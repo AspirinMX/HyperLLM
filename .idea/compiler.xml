@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CompilerConfiguration">
+    <annotationProcessing>
+      <profile name="Maven default annotation processors profile" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <module name="hyperllm-console" />
+        <module name="hyperllm-protocol" />
+        <module name="hyperllm-common" />
+        <module name="hyperllm-gateway" />
+        <module name="hyperllm-admin" />
+        <module name="hyperllm-domain" />
+      </profile>
+    </annotationProcessing>
+  </component>
+</project>

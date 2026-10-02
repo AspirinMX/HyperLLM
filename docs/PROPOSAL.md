@@ -1,6 +1,8 @@
-# 企业级商业化 LLM API 网关（MaaS 平台）规划蓝图
+# HyperLLM — 企业级商业化 LLM API 网关（MaaS 平台）规划蓝图
 
-> 本文档基于需求对齐结果编制，完整覆盖 **1. 功能与业务规划** 与 **2. 架构与实现设计**，作为统一大仓（Monorepo）后续详细设计、数据库建模与分阶段编码的基准蓝图。
+> 本文档基于需求对齐结果与当前仓库实际结构编制，完整覆盖 **1. 功能与业务规划** 与 **2. 架构与实现设计**，作为 **HyperLLM**（`app.pagefault.hyperllm`，Apache-2.0）大仓后续详细设计、数据库建模与分阶段编码的基准蓝图。
+
+> **当前工程基线提示**：仓库目前处于 **Phase 0 脚手架初始化完成** 阶段——已建立 `backend/`（Java 21 LTS + Maven Wrapper 6 模块骨架）、`frontend/console` 与 `frontend/admin`（双独立 Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3 初始工程）、`infra/` 目录框架与 `docker-compose.yaml` 占位文件及 Apache-2.0 `LICENSE`；Spring Boot 依赖锁定、业务源码、Flyway DDL 及容器编排均尚待按本蓝图分阶段落地（下文中标注 `[规划]` 的目录与文件为后续新增项）。
 
 ---
 
@@ -16,10 +18,10 @@
 | **协议范围** | 多原生协议兼容 + 双向协议转换 | OpenAI / Anthropic Messages（含 Thinking & Cache）/ Gemini / Rerank / 多模态 |
 | **路由策略** | 多策略智能路由 + 熔断降级 + Prompt Cache 亲和 | 优先级、权重、最低成本、实时 TTFT 调权；429/5xx 自动重试；Sticky Session |
 | **隐私与合规** | 默认 ZDR（零正文留存）+ 按需调试日志 + 风控 SPI | ClickHouse 默认仅落盘元数据；支持项目级短期加密调试日志与插拔式 Guardrails |
-| **后端架构** | 多模块分离（Java 21 LTS + Maven） | 数据面 `gateway-proxy`（WebFlux Netty）；控制面/Worker（Spring MVC + 虚拟线程） |
-| **数据管道** | Debezium CDC + Kafka + Redis + ClickHouse | Debezium 专职配置热同步与账务 Outbox；网关发射反范式宽表事件入 ClickHouse |
-| **前端工程** | `pnpm` Workspace Monorepo 双应用 | `apps/portal`（开发者门户/官网）+ `apps/admin`（独立运营后台），共享 `ui` 与 `sdk` |
-| **安全与鉴权** | 前端直连 Spring Boot 无状态 JWT + 分层密钥保护 | 客户 `sk-` Key 不可逆 HMAC-SHA256 哈希；上游密钥 AES-256-GCM 密文穿透链路 |
+| **后端架构** | Java 21 LTS + Maven 六模块分离（`app.pagefault.hyperllm`） | `common`/`domain`/`protocol` 为共享底座；数据面 `gateway`（WebFlux Netty）；控制面拆分为 `console` 与 `admin`（Spring MVC + Java 21 虚拟线程），异步核销/对账任务暂由 `admin` 承载（可按需独立进程/拆分 `worker`） |
+| **数据管道** | Debezium CDC + Kafka + Redis + ClickHouse | Debezium 专职配置热同步与账务 Outbox；`gateway` 发射反范式宽表事件入 ClickHouse |
+| **前端工程** | 双独立 Next.js 16 + React 19 应用（`pnpm@12.21.0`） | `frontend/console`（开发者门户/控制台）与 `frontend/admin`（独立运营后台），均启用 Tailwind CSS v4、Turbopack、`cacheComponents` 与 `partialPrefetching` |
+| **安全与鉴权** | 双域无状态 JWT + 分层密钥保护 | `frontend/console` 直连 `backend/console`，`frontend/admin` 直连 `backend/admin`（强制 MFA/内网准入）；客户 `sk-hl-` Key 不可逆 HMAC-SHA256 哈希；上游密钥 AES-256-GCM 密文穿透链路 |
 
 ---
 
@@ -34,7 +36,7 @@
   - 持有唯一钱包（Wallet）、资源包（Resource Packs）、代金券（Vouchers）、客户折扣等级（Tier/Group）与月度/全局限额配置。
 - **Project（项目/环境）**：**资源、配置与预算隔离单元**（如 `prod-chatbot`、`staging-agent`）。
   - 可设置独立的 **月度预算上限（Monthly Hard/Soft Cap）**、**模型白名单（Allowed Models）**、**并发/RPM/TPM 限流阈值**及 **ZDR 调试日志开关**。
-- **API Key（访问凭证）**：隶属于某个 Project，前缀标识如 `sk-gw-...`。
+- **API Key（访问凭证）**：隶属于某个 Project，前缀标识如 `sk-hl-...`。
   - 支持配置有效期、IP 白名单、单 Key 累计消费限额（Quota Limit）、单 Key 速率上限（RPM/TPM）及授权模型子集。
 
 #### 1.1.2 组织内 RBAC 角色矩阵
@@ -133,7 +135,7 @@
 4. **Upstream Channel 级**：保护上游账号自身的 Tier 限速（如某官方账号限 4,000 RPM），接近阈值时路由器主动分流至其他健康渠道而非触发 429。
 
 #### 1.5.2 默认 ZDR（零数据留存）与调试模式
-- **默认生产策略（ZDR）**：请求与响应 Body 仅在 `gateway-proxy` 堆外/堆内内存流转，请求完成后立即释放。发送给 Kafka 与 ClickHouse 的仅包含结构化元数据与计量指标，**绝不落盘任何 Prompt 或 Completion 文本**。
+- **默认生产策略（ZDR）**：请求与响应 Body 仅在 `backend/gateway`（`hyperllm-gateway`）堆外/堆内内存流转，请求完成后立即释放。发送给 Kafka 与 ClickHouse 的仅包含结构化元数据与计量指标，**绝不落盘任何 Prompt 或 Completion 文本**。
 - **可选调试模式（Opt-in Debug Logging）**：允许拥有 Admin/Owner 权限的租户针对特定非生产 Project（或显式开启调试）记录加密后的请求/响应样本（设定强制 TTL 如 3~7 天到期自动物理删除），用于 Playground 排查与 Bad Case 分析。
 
 #### 1.5.3 插拔式内容风控（Guardrails SPI）
@@ -143,9 +145,9 @@
 
 ---
 
-### 1.6 双端应用功能清单（Next.js + React）
+### 1.6 双端应用功能清单（Next.js 16 + React 19）
 
-#### 1.6.1 开发者门户与官网（`apps/portal`）
+#### 1.6.1 开发者门户与控制台（`frontend/console`，`hyperllm-console`）
 - **公网门户与模型广场**：中英双语切换、模型目录与实时定价对比表（含价格计算器）、平台状态页（各模型实时可用率与 TTFT 基准）、交互式 API 文档（支持 OpenAI/Anthropic/Gemini/Python/TS/cURL 一键复制）。
 - **认证与引导**：邮箱验证码登录、GitHub/Google OAuth、企业 SSO 入口、新用户注册欢迎引导与赠金领取。
 - **工作空间与权限**：Org 创建/切换、成员邀请与 RBAC 角色管理、Project 创建与预算/模型白名单配置。
@@ -153,7 +155,7 @@
 - **多模态 Playground**：内置对话与 Agent 测试沙盒，支持流式输出实时展示 TTFT/TPOT/Token 消耗/预估费用、同屏多模型对比（Arena 视图）、调试日志回放（仅对开启 Opt-in 的 Project 生效）。
 - **用量仪表盘与账务中心**：基于 ClickHouse 的毫秒级图表（按模型/Project/Key 维度的 Token、请求量、错误率、P50/P95/P99 TTFT）、在线充值（Stripe / 支付宝 / 微信 / 兑换码）、资源包购买、钱包流水与月度 PDF 账单/收据下载。
 
-#### 1.6.2 平台运营后台（`apps/admin`，独立内网/VPN域名）
+#### 1.6.2 平台运营后台（`frontend/admin`，`hyperllm-admin`，独立内网/VPN域名）
 - **上游渠道与密钥池管理**：渠道 CRUD、API Key 加密录入与连通性探测、上游余额监控与自动禁用告警、健康状态与熔断手动恢复。
 - **虚拟模型与路由编排**：虚拟模型目录管理、渠道绑定与优先级/权重/成本/TTFT 路由策略可视化配置、协议转译开关与模型别名下线映射。
 - **定价与营销引擎**：模型多维单价版本发布（支持定时生效）、客户分组（VIP/大客户）折扣率配置、代金券/兑换码批量生成与模型资源包上架。
@@ -170,23 +172,29 @@
 flowchart TB
     subgraph Clients["外部调用方与终端"]
         SDK["LLM SDK / Claude Code / Cursor"]
-        Portal["apps/portal (Next.js)"]
-        Admin["apps/admin (Next.js)"]
+        ConsoleUI["frontend/console (Next.js 16)"]
+        AdminUI["frontend/admin (Next.js 16)"]
     end
 
     subgraph Edge["接入与负载均衡层"]
         LB["API Gateway / Ingress (TLS + WAF)"]
     end
 
-    subgraph DataPlane["数据面 (Spring WebFlux + Netty)"]
-        Proxy["gateway-proxy cluster"]
+    subgraph DataPlane["数据面 (backend/gateway: Spring WebFlux + Netty)"]
+        Gateway["hyperllm-gateway cluster"]
         L1["Caffeine L1 Cache (Keys/Routes/Pricing)"]
-        Proxy --- L1
+        Gateway --- L1
     end
 
     subgraph ControlPlane["控制面与异步任务 (Spring MVC + Java 21 虚拟线程)"]
-        Control["gateway-admin (REST API + Auth + Payment)"]
-        Worker["gateway-worker (账本核销 + 余额对账 + 任务)"]
+        ConsoleSvc["backend/console (开发者门户 API + Auth + 支付)"]
+        AdminSvc["backend/admin (运营管理 API + 账本核销 + 对账调度)"]
+    end
+
+    subgraph SharedLibs["共享模块底座 (Maven)"]
+        Common["backend/common (micro-USD / 加解密 / 通用原语)"]
+        Domain["backend/domain (领域模型 / DDL / 策略契约)"]
+        Protocol["backend/protocol (Canonical IR / 双向转译)"]
     end
 
     subgraph InfraState["核心中间件与数据引擎"]
@@ -204,28 +212,28 @@ flowchart TB
         VLLM["自建 vLLM / SGLang / 国产模型"]
     end
 
-    SDK -->|"OpenAI / Anthropic / Gemini API"| LB --> Proxy
-    Portal -->|"无状态 JWT REST"| LB --> Control
-    Admin -->|"无状态 JWT REST"| LB --> Control
-    Portal -->|"Playground SSE"| LB --> Proxy
+    SDK -->|"OpenAI / Anthropic / Gemini API"| LB --> Gateway
+    ConsoleUI -->|"无状态 JWT REST"| LB --> ConsoleSvc
+    AdminUI -->|"无状态 JWT REST + MFA"| LB --> AdminSvc
+    ConsoleUI -->|"Playground SSE (临时凭证)"| LB --> Gateway
 
-    Proxy <-->|"Lua Pre-hold/Settle + 限流 + L2"| Redis
-    Proxy -->|"SSE / HTTP 流式代理"| OAI & ANT & GEM & VLLM
-    Proxy -.->|"异步宽表日志 + 结算事件"| Kafka
+    Gateway <-->|"Lua Pre-hold/Settle + 限流 + L2"| Redis
+    Gateway -->|"SSE / HTTP 流式代理"| OAI & ANT & GEM & VLLM
+    Gateway -.->|"异步宽表日志 + 结算事件"| Kafka
 
-    Control <-->|"事务读写 + Outbox"| PG
-    Control -->|"OLAP 查询"| CH
-    Control -->|"余额/状态只读直查"| Redis
+    ConsoleSvc <-->|"事务读写 + Outbox"| PG
+    AdminSvc <-->|"事务读写 + Outbox + 幂等入账/对账"| PG
+    ConsoleSvc -->|"OLAP 用量查询"| CH
+    AdminSvc -->|"OLAP 经营大盘查询"| CH
+    ConsoleSvc & AdminSvc -->|"余额/状态只读与管理直查"| Redis
 
     PG -->|"pgoutput WAL"| Debezium
     Debezium -->|"Config CDC & Wallet Outbox"| Kafka
 
-    Kafka -->|"配置热更新事件"| Proxy
-    Kafka -->|"配置同步至 L2"| Redis
+    Kafka -->|"配置热更新事件"| Gateway
+    Kafka -->|"配置同步至 L2 / 账务核销 / 充值同步"| AdminSvc
+    AdminSvc -->|"L2 刷新 / 充值加额 / 偏差修正"| Redis
     Kafka -->|"Kafka Engine / 批写"| CH
-    Kafka -->|"账务核销 / 充值同步"| Worker
-    Worker -->|"幂等入账 / 对账"| PG
-    Worker -->|"充值加额 / 偏差修正"| Redis
 ```
 
 ---
@@ -233,42 +241,60 @@ flowchart TB
 ### 2.2 统一大仓（Monorepo）目录骨架
 
 ```text
-llm-gateway/
-├── backend/                              # Java 21 LTS + Maven 多模块工程
-│   ├── pom.xml                           # 父 POM（统一 Spring Boot 3.4+/3.5+ BOM 与依赖锁定）
-│   ├── gateway-common/                   # 域模型、micro-USD 工具、AES/HMAC 加密、Canonical IR
-│   ├── gateway-protocol/                 # 协议解析器与双向转换器（OpenAI/Anthropic/Gemini/Rerank）
-│   ├── gateway-proxy/                    # 数据面（Spring WebFlux + Netty）
-│   ├── gateway-admin/                    # 控制面（Spring MVC + 虚拟线程 + OpenAPI 导出）
-│   └── gateway-worker/                   # 异步任务面（Kafka 账本消费、Outbox 同步、对账巡检）
-├── frontend/                             # pnpm Workspace Monorepo
-│   ├── pnpm-workspace.yaml
-│   ├── package.json
-│   ├── apps/
-│   │   ├── portal/                       # Next.js App Router 开发者门户与官网
-│   │   └── admin/                        # Next.js App Router 独立运营后台
-│   └── packages/
-│       ├── ui/                           # 共享设计系统（Tailwind + shadcn/ui + ECharts/Recharts）
-│       ├── sdk/                          # 基于 gateway-admin OpenAPI 自动生成的 TS 客户端
-│       └── config/                       # 共享 ESLint / TypeScript / Tailwind 配置
-├── infra/                                # 基础设施编排与运维脚本
-│   ├── docker-compose.yml                # 本地全栈中间件一键拉起
-│   ├── debezium/                         # Debezium Postgres Connector 注册 JSON
-│   ├── clickhouse/                       # ClickHouse 建表与物化视图初始化 SQL
-│   ├── kafka/                            # Topic 创建脚本与分区/保留策略
-│   ├── observability/                    # Prometheus + Grafana + OTel Collector 配置
-│   └── k8s/                              # Helm Charts / HPA / Ingress 模板
+HyperLLM/
+├── AGENTS.md / CLAUDE.md                 # AI 协作规范（当前为空占位，待补充）
+├── CONTRIBUTING.md                       # 贡献指南（当前为空占位，待补充）
+├── LICENSE                               # Apache License 2.0
+├── README.md / README_zh-CN.md           # 中英文项目说明（当前为占位标题，待完善）
+├── backend/                              # Java 21 LTS + Maven 六模块工程（groupId: app.pagefault.hyperllm）
+│   ├── mvnw / mvnw.cmd / .mvn/           # Maven Wrapper 3.3.4 (Apache Maven 3.9.16)
+│   ├── pom.xml                           # 父 POM（已声明 6 模块与 Java 21；[规划] 引入 Spring Boot 3.4+/3.5+ BOM 与依赖锁定）
+│   ├── common/                           # hyperllm-common：micro-USD 精度工具、AES/HMAC 加密、通用异常与常量
+│   ├── domain/                           # hyperllm-domain：核心领域模型、Flyway DDL（[规划]）、仓储与多租户/计费逻辑
+│   ├── protocol/                         # hyperllm-protocol：Canonical LLM IR 与协议解析/双向转译器
+│   ├── gateway/                          # hyperllm-gateway：数据面网关（Spring WebFlux + Netty）
+│   ├── console/                          # hyperllm-console：开发者门户与控制台后端（Spring MVC + 虚拟线程 + OpenAPI）
+│   └── admin/                            # hyperllm-admin：平台运营后台后端（Spring MVC + 虚拟线程 + 异步核销与对账调度）
+├── frontend/                             # 双独立 Next.js 16 前端应用（pnpm@12.21.0）
+│   ├── console/                          # hyperllm-console：Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3
+│   │   ├── next.config.ts                # 已开启 cacheComponents、partialPrefetching 与 Turbopack CSS rules
+│   │   ├── package.json                  # next 16.4.6 / react 19.3.0 / tailwindcss 4.3.3 / @tailwindcss/turbopack
+│   │   ├── pnpm-workspace.yaml           # 构建许可配置（allowBuilds）
+│   │   └── src/app/                      # App Router 页面与布局（当前为 create-next-app 初始骨架）
+│   └── admin/                            # hyperllm-admin：Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3 运营后台
+│       ├── next.config.ts                # 已开启 cacheComponents、partialPrefetching 与 Turbopack CSS rules
+│       ├── package.json                  # next 16.4.6 / react 19.3.0 / tailwindcss 4.3.3 / @tailwindcss/turbopack
+│       ├── pnpm-workspace.yaml           # 构建许可配置（allowBuilds）
+│       └── src/app/                      # App Router 页面与布局（当前为 create-next-app 初始骨架）
+├── infra/                                # 基础设施编排与运维目录
+│   ├── docker-compose.yaml               # 本地全栈中间件编排（当前为 services: 占位，待补全完整定义）
+│   ├── debezium/                         # Debezium Postgres Connector 注册 JSON（目录已建，待填充）
+│   ├── kafka/                            # Kafka Topic 创建脚本与分区/保留策略（目录已建，待填充）
+│   ├── observability/                    # Prometheus + Grafana + OTel Collector 配置（目录已建，待填充）
+│   ├── k8s/                              # Helm Charts / HPA / Ingress 模板（目录已建，待填充）
+│   └── clickhouse/                       # [规划] ClickHouse 建表与物化视图初始化 SQL
 └── docs/
     ├── PROPOSAL.md                       # 本规划蓝图
-    └── openapi/                          # 导出的 OpenAPI 3.1 契约文件
+    └── openapi/                          # [规划] backend/console 与 backend/admin 导出的 OpenAPI 3.1 契约文件
 ```
+
+#### 2.2.1 模块职责边界与当前结构对齐说明
+1. **共享层 `common` 与 `domain` 的职责切分**：
+   - `backend/common`（`app.pagefault.hyperllm.common`）仅包含无框架强耦合的通用基础能力（`micro-USD` 运算、AES-256-GCM / HMAC-SHA256 工具、基础响应体与错误码）。
+   - `backend/domain`（`app.pagefault.hyperllm.domain`）集中维护核心领域模型、计费/路由策略抽象及数据库迁移脚本（Flyway DDL）。**硬性约束**：`backend/gateway` 仅可消费 `domain` 中的纯领域值对象/策略接口与不可变模型，严禁将阻塞式 JDBC/JPA 实现暴露给 `gateway` 的 WebFlux EventLoop。
+2. **双控制面拆分（`console` vs `admin`）**：
+   - 原初期构想将所有管理 API 合并在单一控制面服务中；当前仓库已按安全域与受众清晰拆分为 `backend/console`（面向 `frontend/console` 外部开发者）与 `backend/admin`（面向 `frontend/admin` 内部运营人员），实现认证鉴权域、API 契约与部署边界的彻底隔离。
+3. **异步消费与对账任务的宿主安排**：
+   - 当前 Maven 多模块中未单独设立 `worker` 子模块；Phase 1–2 期间，Kafka 消费账本入库、Outbox 同步 Redis 与准实时余额对账巡检由 `backend/admin` 内的独立异步调度/消费组件承载（支持通过独立 Spring Profile 单独启动进程而不暴露 HTTP 管理端点）。后续当网关吞吐量增长需要独立水平扩缩容时，再从当前结构中平滑抽离独立的 `backend/worker` 模块。
+4. **双独立前端应用现状**：
+   - 当前 `frontend/console` 与 `frontend/admin` 各自拥有独立的 `package.json`、`pnpm-lock.yaml` 与 `pnpm-workspace.yaml`，尚未建立 `frontend/` 根级 `packages/ui` 或 `packages/sdk`。现阶段保持双独立应用轻量推进，契约类型可各自独立生成；待页面组件与业务稳定后，再按需演进为统一 `pnpm` Workspace 共享设计系统与 SDK。
 
 ---
 
 ### 2.3 数据面核心请求链路与流式防超支设计
 
 #### 2.3.1 关键工程约束（WebFlux 非阻塞黄金法则）
-1. **零阻塞热路径**：`gateway-proxy` 所有线程为 Netty EventLoop，热路径严禁调用任何 JDBC/阻塞 IO；所有配置读取全部命中本地 `Caffeine L1`（毫秒级）或 `Lettuce Reactive Redis L2`。
+1. **零阻塞热路径**：`backend/gateway`（`hyperllm-gateway`）所有请求处理运行于 Netty EventLoop，热路径严禁调用任何 JDBC/阻塞 IO（包括不得直接调用 `backend/domain` 中的阻塞持久化实现）；所有配置读取全部命中本地 `Caffeine L1`（毫秒级）或 `Lettuce Reactive Redis L2`。
 2. **上游连接池隔离**：基于 Reactor Netty `HttpClient` 为不同上游 Provider/Region 配置隔离的 `ConnectionProvider`（长连接复用、DNS 异步解析、合理空闲淘汰时间），并透传背压（Backpressure）防止客户端慢消费撑爆网关堆外内存。
 3. **流式 Usage 捕获**：针对 OpenAI 协议，若客户端未传递 `stream_options: {"include_usage": true}`，网关自动注入该参数以获取精准 Usage（返回给客户端时再按原始请求决定是否剥离或保留）；若遇非标上游未返回 Usage 或流中途断连，网关使用内置 `Tiktoken / Tokenizer` 降级估算作为兜底结算。
 
@@ -278,7 +304,7 @@ llm-gateway/
 sequenceDiagram
     autonumber
     participant C as "客户端 (SDK/Agent)"
-    participant P as "gateway-proxy (WebFlux)"
+    participant P as "backend/gateway (WebFlux)"
     participant L1 as "Caffeine L1"
     participant R as "Redis (Lua Engine)"
     participant U as "上游 LLM (OpenAI/Anthropic)"
@@ -301,7 +327,7 @@ sequenceDiagram
     end
 
     P->>P: "路由选择 Channel (权重/TTFT/Cache Sticky)"
-    P->>P: "内存解密渠道密钥 + 必要时转译协议 IR"
+    P->>P: "内存解密渠道密钥 + 必要时转译协议 IR (protocol)"
     P->>U: "发起异步流式请求"
 
     alt "首字节前上游返回 429/5xx/超时"
@@ -324,7 +350,7 @@ sequenceDiagram
 
 #### 2.3.3 并发 Pre-hold 估算与极端兜底机制
 - **预占上限估算**：若请求显式指定 `max_tokens`，预占额 = `估算输入费用 + max_tokens * 输出单价`；若未指定 `max_tokens`，按系统配置的保守安全预占额（如按模型默认单次上限或设定阈值如 `$0.05` 起步，结合用户当前余额取 `min` 或要求最低余额准入阈值）进行预占，避免不传 `max_tokens` 时把整个大额钱包一次性锁死影响并发度。
-- **僵尸预占回收（Orphan Hold Lease）**：Redis 中每笔 `hold_id` 写入 ZSET 延迟队列（过期时间戳 = `now + 180s`，长推理模型可设为 `600s` 并由网关心跳续期）。一旦 `gateway-proxy` 节点 OOM 或宕机导致未触发 `Settle`，`gateway-worker` 扫描超时 `hold_id` 自动回滚释放冻结额度（或根据已记录心跳补扣）。
+- **僵尸预占回收（Orphan Hold Lease）**：Redis 中每笔 `hold_id` 写入 ZSET 延迟队列（过期时间戳 = `now + 180s`，长推理模型可设为 `600s` 并由网关心跳续期）。一旦 `backend/gateway` 节点 OOM 或宕机导致未触发 `Settle`，后台异步巡检任务（由 `backend/admin` 异步任务域或独立 Worker Profile 承载）扫描超时 `hold_id` 自动回滚释放冻结额度（或根据已记录心跳补扣）。
 
 ---
 
@@ -356,10 +382,10 @@ sequenceDiagram
 为避免全库监听带来的 WAL 膨胀与复杂处理，Debezium **仅订阅两类核心表**：
 1. **配置与状态表（Config CDC）**：`organizations`, `projects`, `api_keys`, `virtual_models`, `channels`, `model_channel_bindings`, `pricing_rules`。
    - 推入 Kafka Topic：`cdc.gateway.config`（开启 Log Compaction 或分区广播）。
-   - 消费动作：`gateway-worker` 同步刷新 Redis L2 Hash；所有 `gateway-proxy` 实例通过独立 Consumer Group（每 Pod 一个 Group ID）实时消费事件，**亚秒级剔除/更新本地 Caffeine L1 缓存**（API Key 吊销、限流调低、渠道摘除即时生效）。
+   - 消费动作：`backend/admin` 异步任务消费者（或独立 Worker 进程）同步刷新 Redis L2 Hash；所有 `backend/gateway` 实例通过独立 Consumer Group（每 Pod 一个 Group ID）实时消费事件，**亚秒级剔除/更新本地 Caffeine L1 缓存**（API Key 吊销、限流调低、渠道摘除即时生效）。
 2. **账务与状态变更 Outbox 表（Outbox Event Router）**：`outbox_events`。
    - 利用 Debezium Outbox Event Router SMT，将表内事件路由至 `cdc.wallet.topup` 等业务 Topic。
-   - **关键保障**：控制面收到 Stripe/支付宝 Webhook 验签成功后，在**同一个 Postgres 本地事务**中完成 `payment_orders` 更新 + `wallets` 加款 + `wallet_ledger` 记账 + 插入 `outbox_events`。Debezium 捕获 WAL 推送 Kafka，`gateway-worker` 消费后带 `idempotency_key` 在 Redis 执行幂等 `INCRBY`，彻底消除「DB 充值成功但 Redis 加钱失败」的数据分裂。
+   - **关键保障**：`backend/console` 收到 Stripe/支付宝 Webhook 验签成功后（或 `backend/admin` 执行人工调账/退款时），在**同一个 Postgres 本地事务**中完成 `payment_orders` 更新 + `wallets` 加款 + `wallet_ledger` 记账 + 插入 `outbox_events`。Debezium 捕获 WAL 推送 Kafka，异步消费任务带 `idempotency_key` 在 Redis 执行幂等 `INCRBY`，彻底消除「DB 充值成功但 Redis 加钱失败」的数据分裂。
 
 #### 2.4.3 Redis 键空间（KeySpace）规划
 - `gw:cfg:key:{key_hash}` -> Hash（Key 元数据、所属 Org/Project、限流配置、权限列表）
@@ -443,7 +469,7 @@ GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
 
 在分布式预付费系统中，Redis 承担高频实时扣减，Postgres 承担持久账本。一致性闭环由三道防线保证：
 1. **入账防丢（Outbox + CDC）**：充值、退款、赠金、人工调账全部经 Postgres 事务写入 `outbox_events`，由 Debezium CDC 保证 At-least-once 送达，Redis 端基于 `event_id` 幂等加额。
-2. **消费防重（Idempotent Batch Settlement）**：`gateway-proxy` 结算时生成全局唯一 `request_id`，`gateway-worker` 批量插入 Postgres `wallet_ledger` 时利用 `ON CONFLICT (idempotency_key) DO NOTHING` 保证 Kafka 重平衡或重放不重复扣款。
+2. **消费防重（Idempotent Batch Settlement）**：`backend/gateway` 结算时生成全局唯一 `request_id`，异步核销消费者（由 `backend/admin` 异步任务域或独立 Worker 进程承载）批量插入 Postgres `wallet_ledger` 时利用 `ON CONFLICT (idempotency_key) DO NOTHING` 保证 Kafka 重平衡或重放不重复扣款。
 3. **周期性准实时对账（Reconciliation Job）**：
    - 定时任务（如每 5 分钟）对近期活跃 Org 核对：
      $$\text{Redis}(\text{cash} + \text{bonus} + \text{held}) \stackrel{?}{=} \text{Postgres}(\text{wallets.balance}) - \text{UnflushedKafkaLag}$$
@@ -453,35 +479,40 @@ GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
 
 ### 2.6 安全设计与鉴权体系
 
-1. **控制台无状态 JWT 鉴权**：
-   - `gateway-admin` 统一签发短时效 Access JWT（如 15 分钟，携带 `user_id`、`org_roles` 摘要或通过轻量缓存校验即时权限）+ 长时效 Refresh Token（存 Postgres 会话表支持强制踢下线与单次轮换防重放）。
-   - `apps/portal` 与 `apps/admin` 客户端通过 HTTPS + 严格 CORS 白名单直连 `gateway-admin`；其中 `apps/admin` 额外强制启用 MFA（TOTP）与管理员 IP/内网网关准入控制。
+1. **双控制面无状态 JWT 鉴权**：
+   - `backend/console` 面向外部开发者/租户签发短时效 Access JWT（如 15 分钟，携带 `user_id`、`org_roles` 摘要或通过轻量缓存校验即时权限）+ 长时效 Refresh Token（存 Postgres 会话表支持强制踢下线与单次轮换防重放），`frontend/console` 通过 HTTPS + 严格 CORS 白名单直连 `backend/console`。
+   - `backend/admin` 面向平台内部运营人员签发独立的管理域 JWT，与开发者账号/会话体系彻底隔离；`frontend/admin` 直连 `backend/admin` 并额外强制启用 MFA（TOTP）与管理员 IP/内网网关准入控制。
 2. **客户 API Key 保护**：
-   - 生成格式：`sk-gw-<8位随机前缀><40位高熵随机串>`。
-   - Postgres 仅存 `key_prefix`（用于前端脱敏展示 `sk-gw-ab12...wxyz`）与 `HMAC-SHA256(raw_key, server_pepper)`；支持配置主副双 Pepper 平滑轮换。
+   - 生成格式：`sk-hl-<8位随机前缀><40位高熵随机串>`。
+   - Postgres 仅存 `key_prefix`（用于前端脱敏展示 `sk-hl-ab12...wxyz`）与 `HMAC-SHA256(raw_key, server_pepper)`；支持配置主副双 Pepper 平滑轮换。
 3. **上游渠道密钥全链路加密**：
-   - 上游厂商 Key 在控制面录入后立即使用全局主密钥执行 **AES-256-GCM 认证加密**（每次随机 12 字节 IV，并将 `channel_id` 绑定为 AAD 防跨行篡改）。
-   - 密文存储于 Postgres -> 经 Debezium WAL -> Kafka -> Redis L2 -> Caffeine L1，**中间所有组件均无法看到上游明文密钥**，仅在 `gateway-proxy` 发出上游 HTTP 请求前于内存中瞬时解密注入 Header。
+   - 上游厂商 Key 在 `backend/admin` 控制面录入后立即使用全局主密钥执行 **AES-256-GCM 认证加密**（每次随机 12 字节 IV，并将 `channel_id` 绑定为 AAD 防跨行篡改）。
+   - 密文存储于 Postgres -> 经 Debezium WAL -> Kafka -> Redis L2 -> Caffeine L1，**中间所有组件均无法看到上游明文密钥**，仅在 `backend/gateway` 发出上游 HTTP 请求前于内存中瞬时解密注入 Header。
 
 ---
 
-### 2.7 前端工程与交互实现（pnpm + Next.js + React）
+### 2.7 前端工程与交互实现（`pnpm@12` + Next.js 16 + React 19）
 
-1. **契约驱动开发（Contract-First）**：`gateway-admin` 通过 `springdoc-openapi` 自动生成标准 OpenAPI 3.1 规范；`packages/sdk` 使用 `openapi-typescript` + `openapi-fetch` 生成强类型客户端与 React Query Hooks，消除前后端接口联调误差。
-2. **Playground 直连数据面 SSE**：
-   - 用户在 `apps/portal` Playground 调试时，可通过用户 JWT 向 `gateway-admin` 换取一个 5 分钟短效、绑定 `sandbox` 权限的临时调用凭证（Ephemeral Token），浏览器使用 `fetch` + `ReadableStream` 直接请求 `gateway-proxy` 获取原生 SSE 流，实时计算并渲染 TTFT、吞吐速率（tokens/s）与推理思考过程（Thinking 折叠块）。
-3. **国际化与主题**：采用 `next-intl` 支持中英双语切换与本地货币格式化展示（如内部 `micro-USD` 按界面偏好折算展示或直接展示 `$0.0042`）。
+1. **工程底座与框架特性对齐**：
+   - `frontend/console`（`hyperllm-console`）与 `frontend/admin`（`hyperllm-admin`）目前为两个独立初始化的 Next.js 应用，技术栈版本统一锁定为 **`next@16.4.6` + `react@19.3.0` + `tailwindcss@4.3.3` + `@tailwindcss/turbopack@4.3.3` + `typescript@^5`**，包管理器统一为 `pnpm@12.21.0`。
+   - 两端 `next.config.ts` 已开启 `cacheComponents: true`、`partialPrefetching: true` 与 Turbopack CSS rules，并采用 `LayoutProps<"/">` 等 Next.js 16 类型约定与 Tailwind CSS v4 `@theme inline` 主题变量。编码时须严格遵循各应用 `AGENTS.md` 提示，先查阅本地 `node_modules/next/dist/docs/` 确认 Next.js 16 缓存组件与路由 API 规范。
+2. **契约驱动开发（Contract-First）**：
+   - `backend/console` 与 `backend/admin` 各自通过 `springdoc-openapi` 生成并导出 OpenAPI 3.1 规范至 `docs/openapi/`（规划）。
+   - 现阶段两个前端各自在 `src/lib/api/` 通过 `openapi-typescript` + `openapi-fetch` 生成强类型客户端与数据请求封装；待核心交互与共享设计系统沉淀稳定后，再按需将 `frontend/` 整合为统一 `pnpm` Workspace 抽离 `packages/ui` 与 `packages/sdk`。
+3. **Playground 直连数据面 SSE**：
+   - 用户在 `frontend/console` Playground 调试时，可通过用户 JWT 向 `backend/console` 换取一个 5 分钟短效、绑定 `sandbox` 权限的临时调用凭证（Ephemeral Token），浏览器使用 `fetch` + `ReadableStream` 直接请求 `backend/gateway` 获取原生 SSE 流，实时计算并渲染 TTFT、吞吐速率（tokens/s）与推理思考过程（Thinking 折叠块）。
+4. **国际化与主题**：结合适配 Next.js 16 `cacheComponents` 的 `next-intl` 方案与 Tailwind CSS v4 CSS 变量，支持中英双语切换、明暗主题切换与本地货币格式化展示（如内部 `micro-USD` 按界面偏好折算展示或直接展示 `$0.0042`）。
 
 ---
 
 ### 2.8 可观测性与基础设施编排
 
-- **链路追踪与指标**：全后端集成 `Micrometer` + `OpenTelemetry`（TraceID 从 `gateway-proxy` 入口注入，串联 Redis、上游渠道请求及 Kafka 异步消息 Header），暴露 Prometheus 指标：
+- **链路追踪与指标**：全后端集成 `Micrometer` + `OpenTelemetry`（TraceID 从 `backend/gateway` 入口注入，串联 Redis、上游渠道请求及 Kafka 异步消息 Header），暴露 Prometheus 指标：
   - `gateway_requests_total`（按 model / protocol / status / channel 标签）
   - `gateway_ttft_seconds`、`gateway_e2e_duration_seconds`（直方图）
   - `gateway_upstream_circuit_state`（渠道熔断状态）
   - `gateway_billing_settle_lag`（Kafka 账本核销积压量）
-- **本地全栈 Docker Compose（`infra/docker-compose.yml`）**：包含 `postgres:16`（启用逻辑复制）、`kafka`（KRaft 单节点开发模式）、`debezium/connect`、`redis:7`、`clickhouse/clickhouse-server:24`、`prometheus`、`grafana` 与一键初始化脚本，确保本地两条命令即可拉起全链路联调环境。
+- **本地全栈 Docker Compose（`infra/docker-compose.yaml`）**：当前仓库已创建 `infra/docker-compose.yaml` 占位文件及 `infra/debezium`、`infra/kafka`、`infra/observability`、`infra/k8s` 目录骨架；后续需在 `docker-compose.yaml` 中编排 `postgres:16`（启用逻辑复制）、`kafka`（KRaft 单节点开发模式）、`debezium/connect`、`redis:7`、`clickhouse/clickhouse-server:24`、`prometheus`、`grafana` 与一键初始化脚本，确保本地可快速拉起全链路联调环境。
 
 ---
 
@@ -489,16 +520,18 @@ GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
 
 | 阶段 | 核心目标 | 关键交付物 |
 | :--- | :--- | :--- |
-| **Phase 1: MVP 基础代理与工程骨架** | 跑通端到端调用与基础记账链路 | 1. 建立 Maven + pnpm Monorepo 骨架与 `infra/docker-compose.yml`<br>2. Postgres 核心表 Flyway 迁移脚本<br>3. `gateway-proxy`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 基础代理与密钥加密解密<br>4. `gateway-admin` 基础 JWT 登录、Org/Project/Key CRUD 与控制台基础页面 |
-| **Phase 2: 商业化计费与数据管道闭环** | 实现高并发防超支、CDC 热同步与 OLAP 报表 | 1. Redis Lua 限流器与 `Pre-hold / Settle` 原子扣费引擎（含超时租约回收）<br>2. Debezium Config CDC + Wallet Outbox 流水线与 Caffeine L1 亚秒级失效<br>3. 宽表事件直入 ClickHouse + 物化视图，Portal 用量仪表盘上线<br>4. Stripe / 支付宝 / 兑换码支付链路与代金券/资源包优先抵扣 |
-| **Phase 3: 智能路由、全协议与企业级治理** | 提升平台毛利、高可用性与大客户能力 | 1. 双向协议转译引擎（OpenAI / Anthropic / Gemini / Embeddings / Images / Audio / Rerank）<br>2. TTFT 感知路由、熔断器、首字节前重试与 Prompt Cache Sticky Session<br>3. 企业 SSO（OIDC/SAML）、项目级 Opt-in 调试日志、Guardrails SPI<br>4. `apps/admin` 完整运营后台（渠道监控、定价版本、毛利大盘、自动对账中心） |
-| **Phase 4: 压测调优与生产交付** | 验证高并发 SLA 与可运维性 | 1. K6/Gatling 模拟万级并发 SSE 长连接与防穿仓混沌压测（Gateway 额外耗时 P99 < 15ms）<br>2. 完善 K8s Helm Charts、HPA 弹性扩缩容策略与生产 Grafana 告警面板 |
+| **Phase 0: 仓库与工程骨架初始化（已完成）** | 确立 Monorepo 边界与前后端技术基线 | 1. 完成 `HyperLLM` 仓库、`LICENSE`（Apache-2.0）及 `README.md` / `README_zh-CN.md` 占位<br>2. 完成 `backend/` Java 21 + Maven Wrapper 6 模块空壳（`common`、`domain`、`protocol`、`gateway`、`console`、`admin`）<br>3. 初始化双独立前端 `frontend/console` 与 `frontend/admin`（Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3）<br>4. 建立 `infra/` 目录框架（`debezium/`、`kafka/`、`observability/`、`k8s/`）与 `docker-compose.yaml` 占位 |
+| **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路 | 1. 补全 `backend/pom.xml`（Spring Boot 3.4+/3.5+ BOM、WebFlux/MVC/虚拟线程、Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 中间件编排<br>2. 在 `backend/domain` 落地 Postgres 核心表 Flyway 迁移脚本与基础领域模型<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 基础代理及 AES/HMAC 密钥加解密<br>4. 在 `backend/console` 与 `backend/admin` 实现基础 JWT 登录、Org/Project/Key/Channel CRUD；在 `frontend/console` 与 `frontend/admin` 接入基础页面 |
+| **Phase 2: 商业化计费与数据管道闭环** | 实现高并发防超支、CDC 热同步与 OLAP 报表 | 1. `backend/gateway` 实现 Redis Lua 限流器与 `Pre-hold / Settle` 原子扣费引擎（含超时租约回收）<br>2. Debezium Config CDC + Wallet Outbox 流水线、`gateway` Caffeine L1 亚秒级失效与 `backend/admin` 异步核销落账<br>3. `infra/clickhouse/` 宽表与物化视图上线，`frontend/console` 用量仪表盘上线<br>4. `backend/console` 对接 Stripe / 支付宝 / 兑换码支付链路与代金券/资源包优先抵扣 |
+| **Phase 3: 智能路由、全协议与企业级治理** | 提升平台毛利、高可用性与大客户能力 | 1. `backend/protocol` 补全双向协议转译引擎（OpenAI / Anthropic / Gemini / Embeddings / Images / Audio / Rerank）<br>2. `backend/gateway` 实现 TTFT 感知路由、熔断器、首字节前重试与 Prompt Cache Sticky Session<br>3. 企业 SSO（OIDC/SAML）、项目级 Opt-in 调试日志、Guardrails SPI<br>4. `frontend/admin` 与 `backend/admin` 完善运营后台（渠道监控、定价版本、毛利大盘、自动对账中心） |
+| **Phase 4: 压测调优与生产交付** | 验证高并发 SLA 与可运维性 | 1. K6/Gatling 模拟万级并发 SSE 长连接与防穿仓混沌压测（Gateway 额外耗时 P99 < 15ms）<br>2. 完善 `infra/k8s/` Helm Charts、HPA 弹性扩缩容策略与 `infra/observability/` Grafana 告警面板；按吞吐需要评估从 `admin` 独立拆出 `backend/worker` 模块 |
 
 ---
 
 ## 4. 下一步细化建议
 
-您可以根据当前关注点继续细化本提案的特定章节：
-1. **数据库与接口详细设计**：进一步补全完整 Flyway SQL DDL、Redis Lua 完整脚本逻辑及 Core REST API 清单。
-2. **协议转译规范**：细化 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
-3. **工程初始化**：确认提案后，即可在当前 Monorepo 根目录开始脚手架搭建与 `docker-compose.yml` 编排验证。
+基于当前已初始化好的六模块后端与双前端骨架，建议按以下顺序推进后续细化工作：
+1. **父 POM 与基础设施落地**：先在 `backend/pom.xml` 中确定 Spring Boot 3.4+/3.5+ 版本与模块间依赖矩阵，并补全 `infra/docker-compose.yaml`（Postgres 16、Redis 7、Kafka KRaft、Debezium、ClickHouse）与本地一键启动验证。
+2. **数据库与接口详细设计**：在 `backend/domain` 编写首版 Flyway SQL DDL，细化 Redis Lua `Pre-hold / Settle` 完整脚本，并确立 `backend/console` 与 `backend/admin` 导出的 OpenAPI 3.1 接口契约。
+3. **协议转译规范**：在 `backend/protocol` 中细化 Canonical IR 模型，明确 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
+4. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、WebFlux 非阻塞约束与 Next.js 16 `cacheComponents` 开发约定。
