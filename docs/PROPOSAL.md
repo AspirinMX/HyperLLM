@@ -275,6 +275,8 @@ HyperLLM/
 │   └── clickhouse/                       # [规划] ClickHouse 建表与物化视图初始化 SQL
 └── docs/
     ├── PROPOSAL.md                       # 本规划蓝图
+    ├── design/
+    │   └── 01-database-design.md         # 第一阶段详细设计：全领域数据库实体与存储规范
     └── openapi/                          # [规划] backend/console 与 backend/admin 导出的 OpenAPI 3.1 契约文件
 ```
 
@@ -356,31 +358,28 @@ sequenceDiagram
 
 ### 2.4 数据存储与 CDC 管道详细设计
 
+> 完整字段、约束、索引、按月分区与 Redis/ClickHouse 映射请参见第一阶段详细设计文档：[01-database-design.md](./design/01-database-design.md)。
+
 #### 2.4.1 PostgreSQL 16 核心表结构规划（OLTP 真值源）
-需开启 `wal_level = logical` 并创建专用 Debezium Publication。核心表分组如下：
-1. **租户与认证域**：
-   - `users` (`id`, `email`, `password_hash`, `oauth_bindings`, `locale`, `status`, `created_at`)
-   - `organizations` (`id`, `name`, `slug`, `owner_user_id`, `tier_code`, `discount_ratio_bps`, `status`, `version`)
-   - `org_members` (`org_id`, `user_id`, `role`, `joined_at`)
-   - `projects` (`id`, `org_id`, `name`, `monthly_budget_micros`, `allowed_models`, `rpm_limit`, `tpm_limit`, `zdr_debug_enabled`, `guardrail_policy`)
-   - `api_keys` (`id`, `project_id`, `org_id`, `key_prefix`, `key_hash` UNIQUE, `name`, `rpm_limit`, `tpm_limit`, `quota_limit_micros`, `expires_at`, `status`, `version`)
-2. **路由与模型定价域**：
-   - `providers` (`id`, `code`, `protocol_type`, `base_url`)
-   - `channels` (`id`, `provider_id`, `name`, `encrypted_credentials`, `region`, `model_mapping_json`, `weight`, `priority`, `cost_ratio`, `rpm_limit`, `tpm_limit`, `status`)
-   - `virtual_models` (`id`, `model_code` UNIQUE, `display_name`, `capability_type`, `routing_strategy`, `sticky_cache_enabled`, `context_window`, `status`)
-   - `model_channel_bindings` (`virtual_model_id`, `channel_id`, `priority_tier`, `weight`, `upstream_model_name`)
-   - `pricing_rules` (`id`, `virtual_model_id`, `input_price_micros_1m`, `output_price_micros_1m`, `cache_read_micros_1m`, `cache_write_micros_1m`, `reasoning_micros_1m`, `per_call_micros`, `tiered_rules_json`, `effective_from`)
-3. **钱包、账本与商品域**：
-   - `wallets` (`org_id` PK, `cash_balance_micros`, `bonus_balance_micros`, `total_recharged_micros`, `total_consumed_micros`, `updated_at`, `version`)
-   - `wallet_ledger` (`id`, `org_id`, `project_id`, `api_key_id`, `ledger_type` [`RECHARGE`|`CONSUME`|`BONUS`|`REFUND`|`ADJUST`], `idempotency_key` UNIQUE, `cash_delta_micros`, `bonus_delta_micros`, `balance_after_micros`, `ref_request_id`, `ref_order_id`, `created_at`)
-   - `resource_packs` (`id`, `org_id`, `pack_type`, `applicable_models`, `remaining_units`, `total_units`, `expires_at`, `status`)
-   - `vouchers` & `redemption_codes` (`id`, `code_hash`, `amount_micros`, `applicable_models`, `expires_at`, `redeemed_org_id`)
-   - `payment_orders` (`id`, `org_id`, `channel` [`STRIPE`|`ALIPAY`|`WECHAT`], `pay_currency`, `pay_amount_minor`, `fx_rate`, `credit_micros`, `status`, `external_tx_id`)
-   - `outbox_events` (`id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload_json`, `created_at`)
+全库采用 **应用层生成 UUIDv7** 主键、**jOOQ + Spring JDBC** 持久层访问、物理外键（`ON DELETE RESTRICT`）、`VARCHAR + CHECK` 枚举、`TIMESTAMPTZ`（UTC）与软删除（`deleted_at`）规范，开启 `wal_level = logical` 并创建专用 Debezium Publication。核心实体分组如下：
+1. **认证、多租户与双层 RBAC 域**（开发者与运营账号物理拆表隔离）：
+   - `users`、`user_identities`、`refresh_tokens`、`sso_connections`（开发者门户账号与企业 OIDC/SAML 身份绑定）
+   - `admin_users`、`admin_sessions`（平台运营独立账号、TOTP MFA 与会话隔离）
+   - `customer_tiers`、`organizations`、`org_members`、`org_invitations`、`projects`、`project_members`、`api_keys`
+2. **路由、模型目录与多维定价域**：
+   - `providers`、`channels`（含 `base_url_override`、`encrypted_credentials` 与默认采购倍率）、`virtual_models`（含 `visibility` 公开/私有标识）
+   - `model_org_grants`（私有模型定向授权）、`model_channel_bindings`（路由 Tier/权重与采购成本覆写）
+   - `pricing_rules`（多维版本化定价，含 `tiered_rules_json` 与 `modality_rules_json`）、`org_model_pricing_overrides`（大客户单模型协议价覆盖）
+3. **钱包、权益、账本、支付与开票域**：
+   - `wallets`、`resource_packs`（第一顺位 Token/次资源包）、`vouchers`、`redemption_codes`、`bonus_grants`（第二顺位分批次过期/限模型赠金）
+   - `payment_orders`、`wallet_ledger`（逐笔请求入账 + 按月 `RANGE` 分区，`PRIMARY KEY (id, created_at)` 与 `UNIQUE (idempotency_key, created_at)`）
+   - `wallet_adjustments`（人工调账二次审批流，强制四眼约束）、`billing_statements`（月度对账单）、`invoices` 与 `invoice_payment_orders`（支持按充值订单或按月度现金实耗双轨开票）
+4. **风控、告警、审计与 Outbox 域**：
+   - `guardrail_policies`、`notification_endpoints`、`billing_alert_rules`、`audit_logs`（按月分区）、`outbox_events`
 
 #### 2.4.2 Debezium CDC 职责与 Topic 规划
-为避免全库监听带来的 WAL 膨胀与复杂处理，Debezium **仅订阅两类核心表**：
-1. **配置与状态表（Config CDC）**：`organizations`, `projects`, `api_keys`, `virtual_models`, `channels`, `model_channel_bindings`, `pricing_rules`。
+为避免全库监听带来的 WAL 膨胀与复杂处理，Debezium **仅订阅两类核心 Publication**：
+1. **配置与状态表（Config CDC）**：仅订阅网关热路径所需的 12 张配置表——`customer_tiers`, `organizations`, `projects`, `api_keys`, `providers`, `channels`, `virtual_models`, `model_org_grants`, `model_channel_bindings`, `pricing_rules`, `org_model_pricing_overrides`, `guardrail_policies`（明确排除用户登录与账本高频表）。
    - 推入 Kafka Topic：`cdc.gateway.config`（开启 Log Compaction 或分区广播）。
    - 消费动作：`backend/admin` 异步任务消费者（或独立 Worker 进程）同步刷新 Redis L2 Hash；所有 `backend/gateway` 实例通过独立 Consumer Group（每 Pod 一个 Group ID）实时消费事件，**亚秒级剔除/更新本地 Caffeine L1 缓存**（API Key 吊销、限流调低、渠道摘除即时生效）。
 2. **账务与状态变更 Outbox 表（Outbox Event Router）**：`outbox_events`。
@@ -388,80 +387,24 @@ sequenceDiagram
    - **关键保障**：`backend/console` 收到 Stripe/支付宝 Webhook 验签成功后（或 `backend/admin` 执行人工调账/退款时），在**同一个 Postgres 本地事务**中完成 `payment_orders` 更新 + `wallets` 加款 + `wallet_ledger` 记账 + 插入 `outbox_events`。Debezium 捕获 WAL 推送 Kafka，异步消费任务带 `idempotency_key` 在 Redis 执行幂等 `INCRBY`，彻底消除「DB 充值成功但 Redis 加钱失败」的数据分裂。
 
 #### 2.4.3 Redis 键空间（KeySpace）规划
-- `gw:cfg:key:{key_hash}` -> Hash（Key 元数据、所属 Org/Project、限流配置、权限列表）
-- `gw:cfg:route:{virtual_model}` -> JSON/Hash（绑定渠道列表、加密凭证密文、定价快照）
-- `gw:wallet:{org_id}` -> Hash（`cash_micros`, `bonus_micros`, `held_micros`, `status`, `discount_bps`）
-- `gw:wallet:hold:{hold_id}` -> String/Hash（预占详情，配合 ZSET `gw:wallet:holds:exp` 做超时回收）
+- `gw:cfg:key:{key_hash}` -> Hash（Key 元数据、所属 Org/Project、限流配置、风控策略与有效折扣）
+- `gw:cfg:route:{model_code}` -> String/Hash（私有可见授权、绑定渠道池、加密凭证密文、版本化定价快照）
+- `gw:cfg:override:{org_id}:{model_code}` -> Hash（大客户单模型协议折扣/固定单价覆盖）
+- `gw:wallet:{org_id}` -> Hash（`cash_micros`, `general_bonus_micros`, `held_cash_micros`, `held_bonus_micros`, `status`）
+- `gw:bonus:{org_id}` -> ZSET + Hash（按过期时间排序的限时/限模型 `bonus_grants` 批次余量）
+- `gw:pack:{org_id}:{model_code}` -> ZSET + Hash（按到期时间排序的可用 `resource_packs` 资源包余量）
+- `gw:wallet:hold:{hold_id}` -> Hash（预占详情，配合 ZSET `gw:wallet:holds:exp` 做超时回收）
 - `gw:wallet:idem:{event_id}` -> String（TTL 7 天，防止 Debezium Outbox 重复加钱）
-- `gw:pack:{org_id}:{model}` -> ZSET/Hash（按到期时间排序的可用资源包余量）
-- `gw:rl:rpm:{scope}:{id}` / `gw:rl:tpm:{scope}:{id}` -> 滑动窗口 ZSET 或令牌桶 Hash
-- `gw:rl:conc:{scope}:{id}` -> 并发计数 String（请求进 `INCR`、出 `DECR` 并配合连接租约）
+- `gw:rl:{rpm|tpm|conc}:{scope}:{id}` -> 滑动窗口 ZSET / 并发计数 String（四层分布式限流）
 - `gw:sticky:{hash}` -> String（`channel_id`，TTL 300s，Prompt Cache 亲和绑定）
 - `gw:cb:channel:{channel_id}` -> Hash（熔断状态、近 1m 错误率、EWMA TTFT 指标）
 
-#### 2.4.4 ClickHouse 宽表与物化视图设计（OLAP）
+#### 2.4.4 ClickHouse 宽表、物化视图与短期调试明细（OLAP）
 数据面请求结束后异步发送宽表 JSON 至 Kafka Topic `llm.request.events`（按 `org_id` 分区保证局部顺序，批量压缩 `zstd`/`lz4`）。
-ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（或由独立批写 Consumer 以每 1~3 秒 / 5000 条批量 `INSERT`，背压与容错控制更可控）：
-
-```sql
--- 主请求事实宽表（默认 ZDR：无 Prompt/Completion 明文）
-CREATE TABLE llm_request_events (
-    event_date       Date DEFAULT toDate(created_at),
-    created_at       DateTime64(3, 'UTC'),
-    request_id       String,
-    trace_id         String,
-    org_id           UUID,
-    project_id       UUID,
-    api_key_id       UUID,
-    virtual_model    LowCardinality(String),
-    provider         LowCardinality(String),
-    channel_id       UUID,
-    upstream_model   LowCardinality(String),
-    inbound_protocol LowCardinality(String),
-    is_stream        UInt8,
-    http_status      UInt16,
-    error_code       LowCardinality(String),
-    prompt_tokens    UInt32,
-    cached_read_tokens  UInt32,
-    cached_write_tokens UInt32,
-    completion_tokens   UInt32,
-    reasoning_tokens    UInt32,
-    cost_micros         Int64,   -- 客户实付（微美元）
-    upstream_cost_micros Int64,  -- 平台采购成本（用于毛利分析）
-    pack_deducted_units Int64,
-    ttft_ms          UInt32,     -- 首字延迟
-    tpot_ms          Float32,    -- 每 Token 平均生成耗时
-    duration_ms      UInt32,
-    client_ip_prefix String,
-    region           LowCardinality(String)
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(event_date)
-ORDER BY (org_id, project_id, event_date, created_at, request_id)
-TTL event_date + INTERVAL 365 DAY;
-
--- 小时级预聚合物化视图（支撑毫秒级门户图表与经营毛利大盘）
-CREATE MATERIALIZED VIEW mv_usage_hourly
-ENGINE = SummingMergeTree()
-PARTITION BY toYYYYMM(hour_bucket)
-ORDER BY (org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket)
-AS SELECT
-    toStartOfHour(created_at) AS hour_bucket,
-    org_id,
-    project_id,
-    api_key_id,
-    virtual_model,
-    channel_id,
-    count() AS request_count,
-    countIf(http_status >= 200 AND http_status < 300) AS success_count,
-    sum(prompt_tokens) AS sum_prompt_tokens,
-    sum(cached_read_tokens) AS sum_cached_tokens,
-    sum(completion_tokens) AS sum_completion_tokens,
-    sum(cost_micros) AS sum_cost_micros,
-    sum(upstream_cost_micros) AS sum_upstream_cost_micros,
-    quantileState(0.95)(ttft_ms) AS ttft_p95_state
-FROM llm_request_events
-GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
-```
+ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（或由独立批写 Consumer 以每 1~3 秒 / 5000 条批量 `INSERT`，背压与容错控制更可控）。核心包含三张表（完整 DDL 见 [01-database-design.md](./design/01-database-design.md#6-clickhouse-24-olap-与调试表设计)）：
+1. **`llm_request_events`**：主请求事实宽表（`MergeTree`，按月分区，365 天 TTL，记录消费现金/赠金/资源包拆解、采购成本 `upstream_cost_micros`、重试次数、粘性命中与风控动作，默认严格 ZDR）。
+2. **`mv_usage_hourly`**：基于 `AggregatingMergeTree` 与 `SimpleAggregateFunction` / `AggregateFunction` 预聚合的小时级物化视图，支撑毫秒级 P95 TTFT 与毛利大盘查询。
+3. **`llm_debug_payloads`**：面向开启 Opt-in 调试的 Project 独立存储 AES-256-GCM 加密的请求/响应样本，利用原生 `TTL expires_at DELETE` 实现 1~7 天到期物理清除，与主业务和 Postgres WAL 完全隔离。
 
 ---
 
@@ -528,10 +471,10 @@ GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
 
 ---
 
-## 4. 下一步细化建议
+## 4. 详细设计进度与后续细化建议
 
-基于当前已初始化好的六模块后端与双前端骨架，建议按以下顺序推进后续细化工作：
-1. **父 POM 与基础设施落地**：先在 `backend/pom.xml` 中确定 Spring Boot 3.4+/3.5+ 版本与模块间依赖矩阵，并补全 `infra/docker-compose.yaml`（Postgres 16、Redis 7、Kafka KRaft、Debezium、ClickHouse）与本地一键启动验证。
-2. **数据库与接口详细设计**：在 `backend/domain` 编写首版 Flyway SQL DDL，细化 Redis Lua `Pre-hold / Settle` 完整脚本，并确立 `backend/console` 与 `backend/admin` 导出的 OpenAPI 3.1 接口契约。
-3. **协议转译规范**：在 `backend/protocol` 中细化 Canonical IR 模型，明确 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
-4. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、WebFlux 非阻塞约束与 Next.js 16 `cacheComponents` 开发约定。
+1. **第一阶段：数据库实体设计（已完成）**：已在 [01-database-design.md](./design/01-database-design.md) 完成全领域 PostgreSQL 16（OLTP）、ClickHouse 24（OLAP）与 Redis 7 实体结构、约束、分区及 Flyway 分期规划。
+2. **父 POM 与基础设施落地**：在 `backend/pom.xml` 中确定 Spring Boot 3.4+/3.5+ BOM、jOOQ/Flyway 及模块间依赖矩阵，并补全 `infra/docker-compose.yaml`（Postgres 16、Redis 7、Kafka KRaft、Debezium、ClickHouse）与本地一键启动验证。
+3. **Redis Lua 与核心接口契约**：细化 `Pre-hold / Settle / 限流` Redis Lua 完整脚本逻辑，并确立 `backend/console` 与 `backend/admin` 的 Core REST API 清单及 OpenAPI 3.1 规范。
+4. **协议转译规范**：在 `backend/protocol` 中细化 Canonical IR 模型，明确 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
+5. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、WebFlux 非阻塞约束与 Next.js 16 `cacheComponents` 开发约定。
