@@ -1,6 +1,6 @@
-# HyperLLM 第一阶段详细设计：数据库实体与存储规范
+# HyperLLM 第一阶段（第一部分）详细设计：数据库实体与存储规范
 
-> 本文档是 **HyperLLM**（`app.pagefault.hyperllm`）在 [PROPOSAL.md](../PROPOSAL.md) 基础上完成的第一阶段详细设计，基于 `/grill-me` 对齐的 13 项核心决策，完整定义全领域 **PostgreSQL 16（OLTP）**、**ClickHouse 24（OLAP）** 与 **Redis 7（热态扣费/路由缓存）** 的实体模型、约束规范、分区策略、Debezium CDC 订阅边界及分阶段 Flyway 落地顺序。
+> 本文档是 **HyperLLM**（`app.pagefault.hyperllm`）在 [PROPOSAL.md](../PROPOSAL.md) 基础上完成的第一阶段（第一部分）详细设计，基于 `/grill-me` 对齐的 13 项核心决策，完整定义全领域 **PostgreSQL 16（OLTP）**、**ClickHouse 24（OLAP）** 与 **Redis 7（热态扣费/路由缓存）** 的实体模型、约束规范、分区策略、Debezium CDC 订阅边界及分阶段 Flyway 落地顺序。
 
 ---
 
@@ -10,7 +10,7 @@
 | :--- | :--- | :--- |
 | **设计范围** | 全领域实体设计 + 核心规范 | 本阶段完成全平台实体/字段/索引/关系定义；编码阶段按 Phase 分批编写 Flyway 脚本落地 |
 | **主键策略** | 应用层生成 **UUIDv7**（PostgreSQL `UUID`） | 高 48 位为毫秒时间戳，兼顾分布式零协调、防枚举与 B-Tree 顺序写入性能，并与 ClickHouse `UUID` 原生对齐 |
-| **持久层技术栈** | **jOOQ + Spring JDBC**（SQL-first + 纯 Java `record` 领域模型） | 配合 Flyway 契约生成代码，天然支持 `JSONB`、`RANGE` 分区与 `ON CONFLICT` 批量核销；`backend/domain` 仅向 `backend/gateway` 暴露纯不可变领域模型与策略接口，杜绝阻塞 ORM 污染 WebFlux |
+| **持久层技术栈** | **jOOQ + Spring JDBC**（SQL-first + 纯 Java `record` 领域模型） | 配合 Flyway 契约生成代码，天然支持 `JSONB`、`RANGE` 分区与 `ON CONFLICT` 批量核销；`gateway` 直接依赖 `domain` 复用统一领域模型与仓储，热路径靠 L1+L2 零阻塞命中，仅极低比例冷缓存穿透时切出 EventLoop 回源查库 |
 | **约束与演进** | 物理外键（`ON DELETE RESTRICT`）+ `VARCHAR` 枚举（`CHECK`）+ 软删除（`deleted_at` + `status`） | 保障财务与配置参照完整、防误删；避免原生 PG `ENUM` 演进阻塞 Flyway 与 Debezium Schema 同步 |
 | **账号域隔离** | **物理拆表隔离**：开发者（`users`）vs 运营管理员（`admin_users`） | 严格匹配 `backend/console` 与 `backend/admin` 双控制面及独立 JWT 密钥域，彻底消除账号混淆或提权面 |
 | **租户授权粒度** | **`org_members` + `project_members`** 双层授权 | `OWNER`/`ADMIN` 默认覆盖全组织项目；`DEVELOPER` 通过 `project_members` 精确控制可访问与管理 Key 的 Project 范围 |

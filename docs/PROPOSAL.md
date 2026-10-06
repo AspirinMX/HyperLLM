@@ -193,7 +193,7 @@ flowchart TB
 
     subgraph SharedLibs["共享模块底座 (Maven)"]
         Common["backend/common (micro-USD / 加解密 / 通用原语)"]
-        Domain["backend/domain (领域模型 / DDL / 策略契约)"]
+        Domain["backend/domain (jOOQ / Flyway DDL / 领域仓储)"]
         Protocol["backend/protocol (Canonical IR / 双向转译)"]
     end
 
@@ -218,6 +218,7 @@ flowchart TB
     ConsoleUI -->|"Playground SSE (临时凭证)"| LB --> Gateway
 
     Gateway <-->|"Lua Pre-hold/Settle + 限流 + L2"| Redis
+    Gateway -.->|"冷缓存未命中回源 (domain)"| PG
     Gateway -->|"SSE / HTTP 流式代理"| OAI & ANT & GEM & VLLM
     Gateway -.->|"异步宽表日志 + 结算事件"| Kafka
 
@@ -248,7 +249,7 @@ HyperLLM/
 ├── README.md / README_zh-CN.md           # 中英文项目说明（当前为占位标题，待完善）
 ├── backend/                              # Java 21 LTS + Maven 六模块工程（groupId: app.pagefault.hyperllm）
 │   ├── mvnw / mvnw.cmd / .mvn/           # Maven Wrapper 3.3.4 (Apache Maven 3.9.16)
-│   ├── pom.xml                           # 父 POM（已声明 6 模块与 Java 21；[规划] 引入 Spring Boot 3.4+/3.5+ BOM 与依赖锁定）
+│   ├── pom.xml                           # 父 POM（已声明 6 模块与 Java 21；[规划] 引入 Spring Boot 3.5.x starter-parent 与依赖锁定）
 │   ├── common/                           # hyperllm-common：micro-USD 精度工具、AES/HMAC 加密、通用异常与常量
 │   ├── domain/                           # hyperllm-domain：核心领域模型、Flyway DDL（[规划]）、仓储与多租户/计费逻辑
 │   ├── protocol/                         # hyperllm-protocol：Canonical LLM IR 与协议解析/双向转译器
@@ -276,14 +277,15 @@ HyperLLM/
 └── docs/
     ├── PROPOSAL.md                       # 本规划蓝图
     ├── design/
-    │   └── 01-database-design.md         # 第一阶段详细设计：全领域数据库实体与存储规范
+    │   ├── 01-database-design.md         # 第一阶段（第一部分）详细设计：全领域数据库实体与存储规范
+    │   └── 02-dependencies-and-infra.md  # 第一阶段（第二部分）详细设计：工程依赖矩阵与基础设施编排
     └── openapi/                          # [规划] backend/console 与 backend/admin 导出的 OpenAPI 3.1 契约文件
 ```
 
 #### 2.2.1 模块职责边界与当前结构对齐说明
 1. **共享层 `common` 与 `domain` 的职责切分**：
    - `backend/common`（`app.pagefault.hyperllm.common`）仅包含无框架强耦合的通用基础能力（`micro-USD` 运算、AES-256-GCM / HMAC-SHA256 工具、基础响应体与错误码）。
-   - `backend/domain`（`app.pagefault.hyperllm.domain`）集中维护核心领域模型、计费/路由策略抽象及数据库迁移脚本（Flyway DDL）。**硬性约束**：`backend/gateway` 仅可消费 `domain` 中的纯领域值对象/策略接口与不可变模型，严禁将阻塞式 JDBC/JPA 实现暴露给 `gateway` 的 WebFlux EventLoop。
+   - `backend/domain`（`app.pagefault.hyperllm.domain`）集中维护核心领域模型、jOOQ 生成契约、仓储实现及数据库迁移脚本（Flyway DDL）。`backend/gateway` **直接依赖 `domain`** 复用统一的 API Key / 组织空间 / 余额 / 路由与计费领域能力；高并发下依靠 Caffeine L1 + Redis L2 + Debezium CDC 保证 99.99%+ 请求零阻塞命中缓存，仅在首次请求或冷缓存未命中等极少数情况下切出 Netty EventLoop 回源 Postgres 查询并回填缓存（阻塞影响可忽略）。同时 `gateway` 关闭启动期 Flyway 自动迁移（`spring.flyway.enabled=false`），由控制面统一负责 DDL 演进。
 2. **双控制面拆分（`console` vs `admin`）**：
    - 原初期构想将所有管理 API 合并在单一控制面服务中；当前仓库已按安全域与受众清晰拆分为 `backend/console`（面向 `frontend/console` 外部开发者）与 `backend/admin`（面向 `frontend/admin` 内部运营人员），实现认证鉴权域、API 契约与部署边界的彻底隔离。
 3. **异步消费与对账任务的宿主安排**：
@@ -295,8 +297,8 @@ HyperLLM/
 
 ### 2.3 数据面核心请求链路与流式防超支设计
 
-#### 2.3.1 关键工程约束（WebFlux 非阻塞黄金法则）
-1. **零阻塞热路径**：`backend/gateway`（`hyperllm-gateway`）所有请求处理运行于 Netty EventLoop，热路径严禁调用任何 JDBC/阻塞 IO（包括不得直接调用 `backend/domain` 中的阻塞持久化实现）；所有配置读取全部命中本地 `Caffeine L1`（毫秒级）或 `Lettuce Reactive Redis L2`。
+#### 2.3.1 关键工程约束（缓存优先热路径与冷回源保护）
+1. **热路径零阻塞 + 冷缓存 `domain` 回源兜底**：`backend/gateway`（`hyperllm-gateway`）处理万级并发下游请求时，99.99%+ 流量直接命中本地 `Caffeine L1`（毫秒级）或 `Lettuce Reactive Redis L2`，不触达数据库。当遇到首次请求或 L1/L2 冷缓存未命中时，通过独立线程调度器（虚拟线程 / `boundedElastic`）配合进程内 `SingleFlight` 防击穿机制调用 `backend/domain`（jOOQ + JDBC）回源查询 Postgres 并回填缓存，严禁直接在 Netty EventLoop 上执行阻塞 JDBC 调用。
 2. **上游连接池隔离**：基于 Reactor Netty `HttpClient` 为不同上游 Provider/Region 配置隔离的 `ConnectionProvider`（长连接复用、DNS 异步解析、合理空闲淘汰时间），并透传背压（Backpressure）防止客户端慢消费撑爆网关堆外内存。
 3. **流式 Usage 捕获**：针对 OpenAI 协议，若客户端未传递 `stream_options: {"include_usage": true}`，网关自动注入该参数以获取精准 Usage（返回给客户端时再按原始请求决定是否剥离或保留）；若遇非标上游未返回 Usage 或流中途断连，网关使用内置 `Tiktoken / Tokenizer` 降级估算作为兜底结算。
 
@@ -358,7 +360,7 @@ sequenceDiagram
 
 ### 2.4 数据存储与 CDC 管道详细设计
 
-> 完整字段、约束、索引、按月分区与 Redis/ClickHouse 映射请参见第一阶段详细设计文档：[01-database-design.md](./design/01-database-design.md)。
+> 完整字段、约束、索引、按月分区与 Redis/ClickHouse 映射请参见第一阶段（第一部分）详细设计文档：[01-database-design.md](./design/01-database-design.md)。
 
 #### 2.4.1 PostgreSQL 16 核心表结构规划（OLTP 真值源）
 全库采用 **应用层生成 UUIDv7** 主键、**jOOQ + Spring JDBC** 持久层访问、物理外键（`ON DELETE RESTRICT`）、`VARCHAR + CHECK` 枚举、`TIMESTAMPTZ`（UTC）与软删除（`deleted_at`）规范，开启 `wal_level = logical` 并创建专用 Debezium Publication。核心实体分组如下：
@@ -455,7 +457,7 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
   - `gateway_ttft_seconds`、`gateway_e2e_duration_seconds`（直方图）
   - `gateway_upstream_circuit_state`（渠道熔断状态）
   - `gateway_billing_settle_lag`（Kafka 账本核销积压量）
-- **本地全栈 Docker Compose（`infra/docker-compose.yaml`）**：当前仓库已创建 `infra/docker-compose.yaml` 占位文件及 `infra/debezium`、`infra/kafka`、`infra/observability`、`infra/k8s` 目录骨架；后续需在 `docker-compose.yaml` 中编排 `postgres:16`（启用逻辑复制）、`kafka`（KRaft 单节点开发模式）、`debezium/connect`、`redis:7`、`clickhouse/clickhouse-server:24`、`prometheus`、`grafana` 与一键初始化脚本，确保本地可快速拉起全链路联调环境。
+- **本地全栈 Docker Compose（`infra/docker-compose.yaml`）**：采用 `profiles` 分层编排（详情见 [02-dependencies-and-infra.md](./design/02-dependencies-and-infra.md)）：默认仅启动 `postgres:16`（逻辑复制）、`redis:7` 与 `apache/kafka`（KRaft 无 ZK + `kafka-init`）；`--profile pipeline` 追加 `debezium/connect`（`publication.autocreate.mode=filtered`）与 `clickhouse:24`（自动初始化表与物化视图）；`--profile observability` 追加 `otel-collector`、`prometheus` 与 `grafana`（端口 `3100` 错峰避免与前端冲突）；`--profile tools` 可选拉起 `kafka-ui`（端口 `8088`）。
 
 ---
 
@@ -464,7 +466,7 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 | 阶段 | 核心目标 | 关键交付物 |
 | :--- | :--- | :--- |
 | **Phase 0: 仓库与工程骨架初始化（已完成）** | 确立 Monorepo 边界与前后端技术基线 | 1. 完成 `HyperLLM` 仓库、`LICENSE`（Apache-2.0）及 `README.md` / `README_zh-CN.md` 占位<br>2. 完成 `backend/` Java 21 + Maven Wrapper 6 模块空壳（`common`、`domain`、`protocol`、`gateway`、`console`、`admin`）<br>3. 初始化双独立前端 `frontend/console` 与 `frontend/admin`（Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3）<br>4. 建立 `infra/` 目录框架（`debezium/`、`kafka/`、`observability/`、`k8s/`）与 `docker-compose.yaml` 占位 |
-| **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路 | 1. 补全 `backend/pom.xml`（Spring Boot 3.4+/3.5+ BOM、WebFlux/MVC/虚拟线程、Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 中间件编排<br>2. 在 `backend/domain` 落地 Postgres 核心表 Flyway 迁移脚本与基础领域模型<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 基础代理及 AES/HMAC 密钥加解密<br>4. 在 `backend/console` 与 `backend/admin` 实现基础 JWT 登录、Org/Project/Key/Channel CRUD；在 `frontend/console` 与 `frontend/admin` 接入基础页面 |
+| **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路 | 1. 补全 `backend/pom.xml`（Spring Boot 3.5.x + `starter-parent`、jOOQ/Flyway/WebFlux/MVC/虚拟线程/Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 与 `.env.example`<br>2. 在 `backend/domain` 落地 Postgres 核心表 `V1`–`V3` Flyway 迁移脚本并打通 `-Pjooq` 代码生成<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 基础代理及 AES/HMAC 密钥加解密<br>4. 在 `backend/console` 与 `backend/admin` 实现基础 JWT 登录、Org/Project/Key/Channel CRUD；在 `frontend/console`（`3000`）与 `frontend/admin`（`3001`）接入基础页面 |
 | **Phase 2: 商业化计费与数据管道闭环** | 实现高并发防超支、CDC 热同步与 OLAP 报表 | 1. `backend/gateway` 实现 Redis Lua 限流器与 `Pre-hold / Settle` 原子扣费引擎（含超时租约回收）<br>2. Debezium Config CDC + Wallet Outbox 流水线、`gateway` Caffeine L1 亚秒级失效与 `backend/admin` 异步核销落账<br>3. `infra/clickhouse/` 宽表与物化视图上线，`frontend/console` 用量仪表盘上线<br>4. `backend/console` 对接 Stripe / 支付宝 / 兑换码支付链路与代金券/资源包优先抵扣 |
 | **Phase 3: 智能路由、全协议与企业级治理** | 提升平台毛利、高可用性与大客户能力 | 1. `backend/protocol` 补全双向协议转译引擎（OpenAI / Anthropic / Gemini / Embeddings / Images / Audio / Rerank）<br>2. `backend/gateway` 实现 TTFT 感知路由、熔断器、首字节前重试与 Prompt Cache Sticky Session<br>3. 企业 SSO（OIDC/SAML）、项目级 Opt-in 调试日志、Guardrails SPI<br>4. `frontend/admin` 与 `backend/admin` 完善运营后台（渠道监控、定价版本、毛利大盘、自动对账中心） |
 | **Phase 4: 压测调优与生产交付** | 验证高并发 SLA 与可运维性 | 1. K6/Gatling 模拟万级并发 SSE 长连接与防穿仓混沌压测（Gateway 额外耗时 P99 < 15ms）<br>2. 完善 `infra/k8s/` Helm Charts、HPA 弹性扩缩容策略与 `infra/observability/` Grafana 告警面板；按吞吐需要评估从 `admin` 独立拆出 `backend/worker` 模块 |
@@ -473,8 +475,8 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 
 ## 4. 详细设计进度与后续细化建议
 
-1. **第一阶段：数据库实体设计（已完成）**：已在 [01-database-design.md](./design/01-database-design.md) 完成全领域 PostgreSQL 16（OLTP）、ClickHouse 24（OLAP）与 Redis 7 实体结构、约束、分区及 Flyway 分期规划。
-2. **父 POM 与基础设施落地**：在 `backend/pom.xml` 中确定 Spring Boot 3.4+/3.5+ BOM、jOOQ/Flyway 及模块间依赖矩阵，并补全 `infra/docker-compose.yaml`（Postgres 16、Redis 7、Kafka KRaft、Debezium、ClickHouse）与本地一键启动验证。
+1. **第一阶段（第一部分）：数据库实体设计（已完成）**：已在 [01-database-design.md](./design/01-database-design.md) 完成全领域 PostgreSQL 16（OLTP）、ClickHouse 24（OLAP）与 Redis 7 实体结构、约束、分区及 Flyway 分期规划。
+2. **第一阶段（第二部分）：工程依赖与基础设施编排（已完成）**：已在 [02-dependencies-and-infra.md](./design/02-dependencies-and-infra.md) 明确 Spring Boot 3.5.x 父子 POM 依赖矩阵、`gateway` 复用 `domain` 冷回源规范、`-Pjooq` 生成流程、`docker-compose.yaml` 分层编排与全栈端口表（下一步可先落地 POM/Compose/V1–V3 骨架，或继续细化第一阶段第三部分：认证鉴权、Core REST API 与基础代理链路设计）。
 3. **Redis Lua 与核心接口契约**：细化 `Pre-hold / Settle / 限流` Redis Lua 完整脚本逻辑，并确立 `backend/console` 与 `backend/admin` 的 Core REST API 清单及 OpenAPI 3.1 规范。
 4. **协议转译规范**：在 `backend/protocol` 中细化 Canonical IR 模型，明确 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
-5. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、WebFlux 非阻塞约束与 Next.js 16 `cacheComponents` 开发约定。
+5. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、缓存优先与冷回源保护约束及 Next.js 16 `cacheComponents` 开发约定。
