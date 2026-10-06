@@ -278,7 +278,8 @@ HyperLLM/
     ├── PROPOSAL.md                       # 本规划蓝图
     ├── design/
     │   ├── 01-database-design.md         # 第一阶段（第一部分）详细设计：全领域数据库实体与存储规范
-    │   └── 02-dependencies-and-infra.md  # 第一阶段（第二部分）详细设计：工程依赖矩阵与基础设施编排
+    │   ├── 02-dependencies-and-infra.md  # 第一阶段（第二部分）详细设计：工程依赖矩阵与基础设施编排
+    │   └── 03-phase1-backend-contracts.md # 第一阶段（第三部分）详细设计：认证鉴权、Core REST API 与 Gateway MVP 契约
     └── openapi/                          # [规划] backend/console 与 backend/admin 导出的 OpenAPI 3.1 契约文件
 ```
 
@@ -466,7 +467,7 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 | 阶段 | 核心目标 | 关键交付物 |
 | :--- | :--- | :--- |
 | **Phase 0: 仓库与工程骨架初始化（已完成）** | 确立 Monorepo 边界与前后端技术基线 | 1. 完成 `HyperLLM` 仓库、`LICENSE`（Apache-2.0）及 `README.md` / `README_zh-CN.md` 占位<br>2. 完成 `backend/` Java 21 + Maven Wrapper 6 模块空壳（`common`、`domain`、`protocol`、`gateway`、`console`、`admin`）<br>3. 初始化双独立前端 `frontend/console` 与 `frontend/admin`（Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3）<br>4. 建立 `infra/` 目录框架（`debezium/`、`kafka/`、`observability/`、`k8s/`）与 `docker-compose.yaml` 占位 |
-| **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路 | 1. 补全 `backend/pom.xml`（Spring Boot 3.5.x + `starter-parent`、jOOQ/Flyway/WebFlux/MVC/虚拟线程/Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 与 `.env.example`<br>2. 在 `backend/domain` 落地 Postgres 核心表 `V1`–`V3` Flyway 迁移脚本并打通 `-Pjooq` 代码生成<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 基础代理及 AES/HMAC 密钥加解密<br>4. 在 `backend/console` 与 `backend/admin` 实现基础 JWT 登录、Org/Project/Key/Channel CRUD；在 `frontend/console`（`3000`）与 `frontend/admin`（`3001`）接入基础页面 |
+| **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路 | 1. 补全 `backend/pom.xml`（Spring Boot 3.5.x + `starter-parent`、jOOQ/Flyway/WebFlux/MVC/虚拟线程/Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 与 `.env.example`<br>2. 在 `backend/domain` 落地 Postgres 核心表 `V1`–`V3` Flyway 迁移脚本并打通 `-Pjooq` 代码生成<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 同构透传、Debezium Config CDC 联动失效、简化版 Redis 扣费与 Kafka 异步写 `wallet_ledger`（详情见 [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md)）<br>4. 在 `backend/console` 与 `backend/admin` 实现双域 JWT 登录、Org/Project/Key/Channel/Model/Pricing CRUD 与测试充值接口；在 `frontend/console`（`3000`）与 `frontend/admin`（`3001`）接入基础页面 |
 | **Phase 2: 商业化计费与数据管道闭环** | 实现高并发防超支、CDC 热同步与 OLAP 报表 | 1. `backend/gateway` 实现 Redis Lua 限流器与 `Pre-hold / Settle` 原子扣费引擎（含超时租约回收）<br>2. Debezium Config CDC + Wallet Outbox 流水线、`gateway` Caffeine L1 亚秒级失效与 `backend/admin` 异步核销落账<br>3. `infra/clickhouse/` 宽表与物化视图上线，`frontend/console` 用量仪表盘上线<br>4. `backend/console` 对接 Stripe / 支付宝 / 兑换码支付链路与代金券/资源包优先抵扣 |
 | **Phase 3: 智能路由、全协议与企业级治理** | 提升平台毛利、高可用性与大客户能力 | 1. `backend/protocol` 补全双向协议转译引擎（OpenAI / Anthropic / Gemini / Embeddings / Images / Audio / Rerank）<br>2. `backend/gateway` 实现 TTFT 感知路由、熔断器、首字节前重试与 Prompt Cache Sticky Session<br>3. 企业 SSO（OIDC/SAML）、项目级 Opt-in 调试日志、Guardrails SPI<br>4. `frontend/admin` 与 `backend/admin` 完善运营后台（渠道监控、定价版本、毛利大盘、自动对账中心） |
 | **Phase 4: 压测调优与生产交付** | 验证高并发 SLA 与可运维性 | 1. K6/Gatling 模拟万级并发 SSE 长连接与防穿仓混沌压测（Gateway 额外耗时 P99 < 15ms）<br>2. 完善 `infra/k8s/` Helm Charts、HPA 弹性扩缩容策略与 `infra/observability/` Grafana 告警面板；按吞吐需要评估从 `admin` 独立拆出 `backend/worker` 模块 |
@@ -476,7 +477,7 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 ## 4. 详细设计进度与后续细化建议
 
 1. **第一阶段（第一部分）：数据库实体设计（已完成）**：已在 [01-database-design.md](./design/01-database-design.md) 完成全领域 PostgreSQL 16（OLTP）、ClickHouse 24（OLAP）与 Redis 7 实体结构、约束、分区及 Flyway 分期规划。
-2. **第一阶段（第二部分）：工程依赖与基础设施编排（已完成）**：已在 [02-dependencies-and-infra.md](./design/02-dependencies-and-infra.md) 明确 Spring Boot 3.5.x 父子 POM 依赖矩阵、`gateway` 复用 `domain` 冷回源规范、`-Pjooq` 生成流程、`docker-compose.yaml` 分层编排与全栈端口表（下一步可先落地 POM/Compose/V1–V3 骨架，或继续细化第一阶段第三部分：认证鉴权、Core REST API 与基础代理链路设计）。
-3. **Redis Lua 与核心接口契约**：细化 `Pre-hold / Settle / 限流` Redis Lua 完整脚本逻辑，并确立 `backend/console` 与 `backend/admin` 的 Core REST API 清单及 OpenAPI 3.1 规范。
-4. **协议转译规范**：在 `backend/protocol` 中细化 Canonical IR 模型，明确 OpenAI Responses / Chat Completions 与 Anthropic Messages（`thinking` + `tool_use` + `cache_control`）之间的字段映射与流式状态机边界用例。
-5. **工程规范文档补全**：同步补充根目录 `AGENTS.md`、`CONTRIBUTING.md` 及 `README.md` / `README_zh-CN.md`，固化 Java 21 LTS、缓存优先与冷回源保护约束及 Next.js 16 `cacheComponents` 开发约定。
+2. **第一阶段（第二部分）：工程依赖与基础设施编排（已完成）**：已在 [02-dependencies-and-infra.md](./design/02-dependencies-and-infra.md) 明确 Spring Boot 3.5.x 父子 POM 依赖矩阵、`gateway` 复用 `domain` 冷回源规范、`-Pjooq` 生成流程、`docker-compose.yaml` 分层编排与全栈端口表。
+3. **第一阶段（第三部分）：后端运行契约（已完成）**：已在 [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) 明确双域认证/JWT/加解密规范、`console`/`admin` Core REST API 清单，以及 `gateway` 同构透传、Debezium Config CDC 联动 L1 失效与简化 Redis + Kafka `wallet_ledger` 记账链路（注：本地验证 CDC 热失效时需同时启动 Compose `--profile pipeline`）。
+4. **第一阶段（第四部分，待敲定）：前端工程选型与 Phase 1 页面交互契约**：确定 `frontend/console` 与 `frontend/admin` 的 UI 组件库、表单/请求状态层、Next.js 16 鉴权方案及 Phase 1 MVP 落地页面范围（或先启动后端 POM/Compose/V1–V3 工程落地）。
+5. **Phase 2/3 深化规范（后续）**：细化 Phase 2 完整版 `Pre-hold / Settle` + 资源包/多批代金券 Redis Lua 原子脚本、Phase 3 `Canonical IR` 双向协议转译状态机，以及根目录 `AGENTS.md`、`CONTRIBUTING.md`、`README.md` 工程规范文档。

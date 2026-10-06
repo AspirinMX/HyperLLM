@@ -162,7 +162,7 @@ flowchart LR
 | **默认（无 Profile）** | `postgres` | `postgres:16-alpine` | 启动参数 `-c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10`；健康检查 `pg_isready`；挂载 `infra/postgres/init/` |
 | **默认（无 Profile）** | `redis` | `redis:7-alpine` | 启动参数 `--appendonly yes`（AOF 持久化减少重启冷穿透）；健康检查 `redis-cli ping` |
 | **默认（无 Profile）** | `kafka` | `apache/kafka:3.9.0` | 单节点 KRaft（同时担任 broker + controller，无 ZooKeeper），配置双 Listener（`29092` 容器内 / `9092` 宿主机） |
-| **默认（无 Profile）** | `kafka-init` | `apache/kafka:3.9.0` | `depends_on: kafka (healthy)` 一次性初始化容器，幂等创建 `cdc.gateway.config`、`cdc.wallet.events`、`llm.request.events` 等 Topic |
+| **默认（无 Profile）** | `kafka-init` | `apache/kafka:3.9.0` | `depends_on: kafka (healthy)` 一次性初始化容器，幂等创建 `cdc.gateway.config`、`cdc.wallet.*`、`llm.billing.settlement`、`llm.request.events` 等 Topic |
 | **`pipeline`** | `clickhouse` | `clickhouse/clickhouse-server:24-alpine` | 挂载 `infra/clickhouse/init/*.sql` 至 `/docker-entrypoint-initdb.d/` 自动初始化宽表、物化视图与调试表 |
 | **`pipeline`** | `debezium` | `debezium/connect:2.7` | 依赖 `postgres` + `kafka` 健康就绪；负责读取 PG `pgoutput` WAL 写入 Kafka |
 | **`pipeline`** | `debezium-init` | `curlimages/curl:8.11.0` | 依赖 `debezium` 就绪后幂等 PUT/POST 注册 `infra/debezium/` 下的 Config CDC 与 Outbox Connector JSON |
@@ -170,6 +170,8 @@ flowchart LR
 | **`observability`** | `prometheus` | `prom/prometheus:v2.55.1` | 挂载 `infra/observability/prometheus.yml`，抓取后端 `/actuator/prometheus` 与中间件指标 |
 | **`observability`** | `grafana` | `grafana/grafana:11.3.0` | 端口 `3100:3000`，挂载 `infra/observability/grafana/provisioning/` 自动装载 Prometheus/ClickHouse 数据源与大盘 |
 | **`tools`** | `kafka-ui` | `provectuslabs/kafka-ui:latest` | 端口 `8088:8080`，仅本地排查 Topic 与 Debezium 消息时按需拉起 |
+
+> **Phase 1 CDC 联调提示**：Phase 1 已启用 Debezium Config CDC（`cdc.gateway.config`）触发 `gateway` L1 失效，本地启动完整网关链路时建议执行 `docker compose --profile pipeline up -d`。
 
 ### 6.2 Kafka Topic 与 Debezium Connector 初始化规划
 
