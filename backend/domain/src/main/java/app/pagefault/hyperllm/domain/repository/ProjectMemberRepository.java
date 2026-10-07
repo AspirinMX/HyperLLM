@@ -14,4 +14,6 @@ public interface ProjectMemberRepository {
     List<UUID> listUserIdsByProject(UUID projectId);
 
     boolean hasAccess(UUID projectId, UUID userId);
+
+    int deleteByOrgAndUser(UUID orgId, UUID userId);
 }

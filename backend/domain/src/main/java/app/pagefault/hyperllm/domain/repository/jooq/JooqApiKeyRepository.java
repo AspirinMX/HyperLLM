@@ -118,6 +118,24 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
     }
 
     @Override
+    public List<String> listActiveKeyHashesByProject(UUID projectId) {
+        return dsl.select(API_KEYS.KEY_HASH)
+                .from(API_KEYS)
+                .where(API_KEYS.PROJECT_ID.eq(projectId))
+                .and(API_KEYS.DELETED_AT.isNull())
+                .fetch(API_KEYS.KEY_HASH);
+    }
+
+    @Override
+    public List<String> listActiveKeyHashesByOrg(UUID orgId) {
+        return dsl.select(API_KEYS.KEY_HASH)
+                .from(API_KEYS)
+                .where(API_KEYS.ORG_ID.eq(orgId))
+                .and(API_KEYS.DELETED_AT.isNull())
+                .fetch(API_KEYS.KEY_HASH);
+    }
+
+    @Override
     public boolean updateConfig(
             UUID keyId,
             String name,

@@ -5,6 +5,7 @@ import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.springframework.stereotype.Repository;
 
 import java.time.OffsetDateTime;
@@ -65,6 +66,27 @@ public class JooqWalletRepository implements WalletRepository {
                 .where(WALLETS.ORG_ID.eq(orgId))
                 .and(WALLETS.CASH_BALANCE_MICROS.plus(cashDeltaMicros).ge(0L))
                 .and(WALLETS.BONUS_BALANCE_MICROS.plus(bonusDeltaMicros).ge(0L))
+                .execute();
+        return updated == 1;
+    }
+
+    @Override
+    public boolean applySettlementDelta(
+            UUID orgId,
+            long cashDeltaMicros,
+            long bonusDeltaMicros,
+            long consumedCashDeltaMicros,
+            long consumedBonusDeltaMicros,
+            OffsetDateTime updatedAt
+    ) {
+        int updated = dsl.update(WALLETS)
+                .set(WALLETS.CASH_BALANCE_MICROS, DSL.greatest(WALLETS.CASH_BALANCE_MICROS.plus(cashDeltaMicros), DSL.inline(0L)))
+                .set(WALLETS.BONUS_BALANCE_MICROS, DSL.greatest(WALLETS.BONUS_BALANCE_MICROS.plus(bonusDeltaMicros), DSL.inline(0L)))
+                .set(WALLETS.TOTAL_CONSUMED_CASH_MICROS, WALLETS.TOTAL_CONSUMED_CASH_MICROS.plus(consumedCashDeltaMicros))
+                .set(WALLETS.TOTAL_CONSUMED_BONUS_MICROS, WALLETS.TOTAL_CONSUMED_BONUS_MICROS.plus(consumedBonusDeltaMicros))
+                .set(WALLETS.VERSION, WALLETS.VERSION.plus(1))
+                .set(WALLETS.UPDATED_AT, updatedAt)
+                .where(WALLETS.ORG_ID.eq(orgId))
                 .execute();
         return updated == 1;
     }

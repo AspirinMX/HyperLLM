@@ -51,3 +51,5 @@ hyperllm:
     cookie-secure: ${HYPERLLM_COOKIE_SECURE:false}
   billing:
     signup-bonus-micros: ${HYPERLLM_SIGNUP_BONUS_MICROS:5000000}
+  auth:
+    otp-debug-echo-enabled: ${HYPERLLM_OTP_DEBUG_ECHO:false}

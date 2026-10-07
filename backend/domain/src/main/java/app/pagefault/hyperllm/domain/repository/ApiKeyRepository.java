@@ -21,6 +21,10 @@ public interface ApiKeyRepository {
 
     PageResponse<ApiKey> listByProject(UUID projectId, PageQuery pageQuery);
 
+    List<String> listActiveKeyHashesByProject(UUID projectId);
+
+    List<String> listActiveKeyHashesByOrg(UUID orgId);
+
     boolean updateConfig(
             UUID keyId,
             String name,

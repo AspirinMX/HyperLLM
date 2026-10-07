@@ -12,6 +12,8 @@ public interface OrgMemberRepository {
 
     void insert(OrgMember member);
 
+    Optional<OrgMember> findById(UUID memberId);
+
     Optional<OrgMember> findByOrgAndUser(UUID orgId, UUID userId);
 
     List<OrgMember> listByOrgId(UUID orgId);

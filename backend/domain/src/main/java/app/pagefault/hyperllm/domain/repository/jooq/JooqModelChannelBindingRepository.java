@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static app.pagefault.hyperllm.domain.jooq.Tables.MODEL_CHANNEL_BINDINGS;
+import static app.pagefault.hyperllm.domain.jooq.Tables.VIRTUAL_MODELS;
 
 @Repository
 @RequiredArgsConstructor
@@ -68,6 +69,17 @@ public class JooqModelChannelBindingRepository implements ModelChannelBindingRep
                 .and(MODEL_CHANNEL_BINDINGS.DELETED_AT.isNull())
                 .orderBy(MODEL_CHANNEL_BINDINGS.PRIORITY_TIER.asc(), MODEL_CHANNEL_BINDINGS.WEIGHT.desc())
                 .fetch(this::toDomain);
+    }
+
+    @Override
+    public List<String> listActiveModelCodesByChannelId(UUID channelId) {
+        return dsl.selectDistinct(VIRTUAL_MODELS.MODEL_CODE)
+                .from(MODEL_CHANNEL_BINDINGS)
+                .join(VIRTUAL_MODELS).on(VIRTUAL_MODELS.ID.eq(MODEL_CHANNEL_BINDINGS.VIRTUAL_MODEL_ID))
+                .where(MODEL_CHANNEL_BINDINGS.CHANNEL_ID.eq(channelId))
+                .and(MODEL_CHANNEL_BINDINGS.DELETED_AT.isNull())
+                .and(VIRTUAL_MODELS.DELETED_AT.isNull())
+                .fetch(VIRTUAL_MODELS.MODEL_CODE);
     }
 
     private ModelChannelBinding toDomain(ModelChannelBindingsRecord r) {

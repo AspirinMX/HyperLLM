@@ -12,4 +12,6 @@ public interface ModelChannelBindingRepository {
     void replaceForModel(UUID virtualModelId, List<ModelChannelBinding> bindings);
 
     List<ModelChannelBinding> listByModelId(UUID virtualModelId);
+
+    List<String> listActiveModelCodesByChannelId(UUID channelId);
 }

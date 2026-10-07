@@ -23,5 +23,14 @@ public interface WalletRepository {
             OffsetDateTime updatedAt
     );
 
+    boolean applySettlementDelta(
+            UUID orgId,
+            long cashDeltaMicros,
+            long bonusDeltaMicros,
+            long consumedCashDeltaMicros,
+            long consumedBonusDeltaMicros,
+            OffsetDateTime updatedAt
+    );
+
     boolean updateLowBalanceThreshold(UUID orgId, Long thresholdMicros, long expectedVersion, OffsetDateTime updatedAt);
 }

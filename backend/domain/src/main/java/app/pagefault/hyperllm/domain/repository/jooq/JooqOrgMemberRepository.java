@@ -34,6 +34,13 @@ public class JooqOrgMemberRepository implements OrgMemberRepository {
     }
 
     @Override
+    public Optional<OrgMember> findById(UUID memberId) {
+        return dsl.selectFrom(ORG_MEMBERS)
+                .where(ORG_MEMBERS.ID.eq(memberId))
+                .fetchOptional(this::toDomain);
+    }
+
+    @Override
     public Optional<OrgMember> findByOrgAndUser(UUID orgId, UUID userId) {
         return dsl.selectFrom(ORG_MEMBERS)
                 .where(ORG_MEMBERS.ORG_ID.eq(orgId))

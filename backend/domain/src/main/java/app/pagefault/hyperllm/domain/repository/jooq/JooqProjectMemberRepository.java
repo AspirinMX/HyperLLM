@@ -70,4 +70,12 @@ public class JooqProjectMemberRepository implements ProjectMemberRepository {
                         .and(PROJECT_MEMBERS.USER_ID.eq(userId))
         );
     }
+
+    @Override
+    public int deleteByOrgAndUser(UUID orgId, UUID userId) {
+        return dsl.deleteFrom(PROJECT_MEMBERS)
+                .where(PROJECT_MEMBERS.ORG_ID.eq(orgId))
+                .and(PROJECT_MEMBERS.USER_ID.eq(userId))
+                .execute();
+    }
 }

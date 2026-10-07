@@ -42,3 +42,4 @@ hyperllm:
   security:
     aes-master-key: ${HYPERLLM_AES_MASTER_KEY}
     key-pepper-v1: ${HYPERLLM_KEY_PEPPER_V1}
+    key-pepper-v2: ${HYPERLLM_KEY_PEPPER_V2:}
