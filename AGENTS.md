@@ -18,7 +18,7 @@
 1. **Money & IDs**: Represent currency exclusively as `long` `micro-USD` (`1 USD = 1_000_000 micros`) using ceiling rounding (`MicroUsd`); never use `float`/`double` for billing. Use time-ordered `UuidV7` for persisted primary keys.
 2. **Cryptography & Secrets**:
    - Upstream credentials and encrypted debug payloads use `AesGcmCipher` (`[1B key_version][12B IV][ciphertext+tag]`) bound with explicit AAD (`channel_id` or `project_id:request_id`).
-   - API keys (`sk-hl-...`) are stored salted via `HmacSha256` with server pepper and `pepper_version`; plaintext keys are returned once at creation.
+   - API keys (`sk-...`) are stored salted via `HmacSha256` with server pepper and `pepper_version`; plaintext keys are returned once at creation.
    - `console` and `admin` must never share JWT signing secrets, issuers, or audiences.
 3. **Database & Migration Ownership**:
    - All Flyway scripts live in `backend/domain/src/main/resources/db/migration/`.

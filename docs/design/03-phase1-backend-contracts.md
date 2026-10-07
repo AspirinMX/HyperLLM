@@ -62,8 +62,8 @@
 ### 2.4 API Key、Playground 临时凭证与 AES-256-GCM 编码规范
 
 1. **客户 API Key 格式**：
-   - 明文格式：`sk-hl-<8位可见前缀><40位高熵随机体>`（共 54 字符，随机部分使用密码学安全 `SecureRandom` + Base62 `[0-9A-Za-z]`）。
-   - 存储字段：`key_prefix` 存前 12 位 + 末 4 位脱敏形式（如 `sk-hl-aB3x9K2m...Z8qW`）；`key_hash` 存小写十六进制 `HMAC-SHA256(raw_key, server_pepper)`，并记录 `pepper_version`（网关校验时支持按主/副双 Pepper 依次匹配）。
+   - 明文格式：`sk-<8位可见前缀><40位高熵随机体>`（共 51 字符，随机部分使用密码学安全 `SecureRandom` + Base62 `[0-9A-Za-z]`）。
+   - 存储字段：`key_prefix` 存前 11 位 + `...` + 末 4 位脱敏形式（如 `sk-aB3x9K2m...Z8qW`）；`key_hash` 存小写十六进制 `HMAC-SHA256(raw_key, server_pepper)`，并记录 `pepper_version`（网关校验时支持按主/副双 Pepper 依次匹配）。
 2. **Playground 临时凭证（Ephemeral Token）**：
    - 格式：`sk-hl-sb-<32位高熵随机串>`，由 `console` 校验用户在目标 Project 具备权限后生成并写入 Redis `gw:sandbox:{sha256_hash}`（TTL `300s`），载荷 JSON 包含：`org_id`、`project_id`、`user_id`、`allowed_models`、`expires_at`。
    - `frontend/console` 浏览器使用 `Authorization: Bearer sk-hl-sb-...` 直连 `gateway` 发起 SSE，同样计入对应 Org 扣费与 `llm.request.events`（`user_id` 字段非空）。
@@ -163,8 +163,8 @@
 
 | 端点 | 鉴权 Header 兼容 | Phase 1 路由匹配原则 |
 | :--- | :--- | :--- |
-| `POST /v1/chat/completions` | `Authorization: Bearer sk-hl-...` | 仅路由至绑定渠道中 `providers.protocol_family = 'OPENAI'` 的健康渠道，执行同构流式/非流式透传 |
-| `POST /v1/messages` | `x-api-key: sk-hl-...`（兼容 `Authorization: Bearer`） | 仅路由至绑定渠道中 `providers.protocol_family = 'ANTHROPIC'` 的健康渠道，执行同构原生 SSE 透传 |
+| `POST /v1/chat/completions` | `Authorization: Bearer sk-...` | 仅路由至绑定渠道中 `providers.protocol_family = 'OPENAI'` 的健康渠道，执行同构流式/非流式透传 |
+| `POST /v1/messages` | `x-api-key: sk-...`（兼容 `Authorization: Bearer`） | 仅路由至绑定渠道中 `providers.protocol_family = 'ANTHROPIC'` 的健康渠道，执行同构原生 SSE 透传 |
 | `GET /v1/models` | `Authorization: Bearer` 或 `x-api-key` | 动态过滤当前 `api_key` / `project` 白名单与 `PUBLIC` 状态活跃模型并返回上下文与元数据 |
 
 ### 4.2 缓存同步与冷回源链路
@@ -188,7 +188,7 @@ sequenceDiagram
     participant K as "Kafka"
 
     C->>G: "POST /v1/chat/completions 或 /v1/messages"
-    G->>G: "解析 sk-hl-... / sk-hl-sb-... 并计算哈希"
+    G->>G: "解析 sk-... / sk-hl-sb-... 并计算哈希"
     G->>L1L2: "读取 Key/Project/Org/Route/Pricing 缓存"
     alt "L1 & L2 均未命中"
         G->>PG: "SingleFlight + 独立调度器调 domain 回源"

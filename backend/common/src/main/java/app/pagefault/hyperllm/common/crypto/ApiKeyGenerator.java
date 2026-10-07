@@ -4,12 +4,12 @@ import java.security.SecureRandom;
 import java.util.Objects;
 
 /**
- * Generates high-entropy Base62 client API keys ({@code sk-hl-...}) and Playground ephemeral
+ * Generates high-entropy Base62 client API keys ({@code sk-...}) and Playground ephemeral
  * tokens ({@code sk-hl-sb-...}).
  */
 public final class ApiKeyGenerator {
 
-    public static final String LIVE_PREFIX = "sk-hl-";
+    public static final String LIVE_PREFIX = "sk-";
     public static final String SANDBOX_PREFIX = "sk-hl-sb-";
     public static final int LIVE_VISIBLE_LENGTH = 8;
     public static final int LIVE_SECRET_LENGTH = 40;
@@ -38,7 +38,7 @@ public final class ApiKeyGenerator {
     public static String maskLiveKey(String rawKey) {
         Objects.requireNonNull(rawKey, "rawKey must not be null");
         if (!isLiveKey(rawKey) || rawKey.length() != LIVE_TOTAL_LENGTH) {
-            throw new IllegalArgumentException("Expected 54-char live key starting with " + LIVE_PREFIX);
+            throw new IllegalArgumentException("Expected " + LIVE_TOTAL_LENGTH + "-char live key starting with " + LIVE_PREFIX);
         }
         int visibleEnd = LIVE_PREFIX.length() + LIVE_VISIBLE_LENGTH;
         return rawKey.substring(0, visibleEnd) + "..." + rawKey.substring(rawKey.length() - 4);

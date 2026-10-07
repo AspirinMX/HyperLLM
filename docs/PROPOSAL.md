@@ -21,7 +21,7 @@
 | **后端架构** | Java 21 LTS + Maven 六模块分离（`app.pagefault.hyperllm`） | `common`/`domain`/`protocol` 为共享底座；数据面 `gateway`（WebFlux Netty）；控制面拆分为 `console` 与 `admin`（Spring MVC + Java 21 虚拟线程），异步核销/对账任务暂由 `admin` 承载（可按需独立进程/拆分 `worker`） |
 | **数据管道** | Debezium CDC + Kafka + Redis + ClickHouse | Debezium 专职配置热同步与账务 Outbox；`gateway` 发射反范式宽表事件入 ClickHouse |
 | **前端工程** | 双独立 Next.js 16 + React 19 应用（`pnpm@12.21.0`） | `frontend/console`（开发者门户/控制台）与 `frontend/admin`（独立运营后台），均启用 Tailwind CSS v4、Turbopack、`cacheComponents` 与 `partialPrefetching` |
-| **安全与鉴权** | 双域无状态 JWT + 分层密钥保护 | `frontend/console` 直连 `backend/console`，`frontend/admin` 直连 `backend/admin`（强制 MFA/内网准入）；客户 `sk-hl-` Key 不可逆 HMAC-SHA256 哈希；上游密钥 AES-256-GCM 密文穿透链路 |
+| **安全与鉴权** | 双域无状态 JWT + 分层密钥保护 | `frontend/console` 直连 `backend/console`，`frontend/admin` 直连 `backend/admin`（强制 MFA/内网准入）；客户 `sk-` Key 不可逆 HMAC-SHA256 哈希；上游密钥 AES-256-GCM 密文穿透链路 |
 
 ---
 
@@ -36,7 +36,7 @@
   - 持有唯一钱包（Wallet）、资源包（Resource Packs）、代金券（Vouchers）、客户折扣等级（Tier/Group）与月度/全局限额配置。
 - **Project（项目/环境）**：**资源、配置与预算隔离单元**（如 `prod-chatbot`、`staging-agent`）。
   - 可设置独立的 **月度预算上限（Monthly Hard/Soft Cap）**、**模型白名单（Allowed Models）**、**并发/RPM/TPM 限流阈值**及 **ZDR 调试日志开关**。
-- **API Key（访问凭证）**：隶属于某个 Project，前缀标识如 `sk-hl-...`。
+- **API Key（访问凭证）**：隶属于某个 Project，前缀标识如 `sk-...`。
   - 支持配置有效期、IP 白名单、单 Key 累计消费限额（Quota Limit）、单 Key 速率上限（RPM/TPM）及授权模型子集。
 
 #### 1.1.2 组织内 RBAC 角色矩阵
@@ -430,8 +430,8 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
    - `backend/console` 面向外部开发者/租户签发短时效 Access JWT（如 15 分钟，携带 `user_id`、`org_roles` 摘要或通过轻量缓存校验即时权限）+ 长时效 Refresh Token（存 Postgres 会话表支持强制踢下线与单次轮换防重放），`frontend/console` 通过 HTTPS + 严格 CORS 白名单直连 `backend/console`。
    - `backend/admin` 面向平台内部运营人员签发独立的管理域 JWT，与开发者账号/会话体系彻底隔离；`frontend/admin` 直连 `backend/admin` 并额外强制启用 MFA（TOTP）与管理员 IP/内网网关准入控制。
 2. **客户 API Key 保护**：
-   - 生成格式：`sk-hl-<8位随机前缀><40位高熵随机串>`。
-   - Postgres 仅存 `key_prefix`（用于前端脱敏展示 `sk-hl-ab12...wxyz`）与 `HMAC-SHA256(raw_key, server_pepper)`；支持配置主副双 Pepper 平滑轮换。
+   - 生成格式：`sk-<8位随机前缀><40位高熵随机串>`。
+   - Postgres 仅存 `key_prefix`（用于前端脱敏展示 `sk-ab12cdef...wxyz`）与 `HMAC-SHA256(raw_key, server_pepper)`；支持配置主副双 Pepper 平滑轮换。
 3. **上游渠道密钥全链路加密**：
    - 上游厂商 Key 在 `backend/admin` 控制面录入后立即使用全局主密钥执行 **AES-256-GCM 认证加密**（每次随机 12 字节 IV，并将 `channel_id` 绑定为 AAD 防跨行篡改）。
    - 密文存储于 Postgres -> 经 Debezium WAL -> Kafka -> Redis L2 -> Caffeine L1，**中间所有组件均无法看到上游明文密钥**，仅在 `backend/gateway` 发出上游 HTTP 请求前于内存中瞬时解密注入 Header。

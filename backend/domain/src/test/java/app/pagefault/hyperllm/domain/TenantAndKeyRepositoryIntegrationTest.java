@@ -151,7 +151,7 @@ class TenantAndKeyRepositoryIntegrationTest extends AbstractPostgresIntegrationT
         UUID keyId = UuidV7.next();
         String keyHash = "hmac-" + keyId;
         apiKeyRepository.insert(new ApiKey(
-                keyId, prodProjId, orgId, userId, "Prod Gateway Key", "sk-hl-ab12...wxyz",
+                keyId, prodProjId, orgId, userId, "Prod Gateway Key", "sk-ab12cdef...wxyz",
                 keyHash, (short) 1, List.of("claude-sonnet-4-5"), List.of("203.0.113.0/24"),
                 300, 100_000, 20, 5_000_000L, now.plusDays(30), null,
                 ApiKeyStatus.ACTIVE, null, 0L, now, now

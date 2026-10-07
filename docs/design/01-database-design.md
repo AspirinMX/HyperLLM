@@ -300,7 +300,7 @@ erDiagram
 | `org_id` | `UUID` | `NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT` | 冗余组织 ID（热路径与报表免 JOIN） |
 | `created_by_user_id` | `UUID` | `NULL REFERENCES users(id) ON DELETE RESTRICT` | 签发者 |
 | `name` | `VARCHAR(120)` | `NOT NULL` | Key 备注名 |
-| `key_prefix` | `VARCHAR(24)` | `NOT NULL` | 脱敏前缀（如 `sk-hl-ab12...wxyz`） |
+| `key_prefix` | `VARCHAR(24)` | `NOT NULL` | 脱敏前缀（如 `sk-ab12cdef...wxyz`） |
 | `key_hash` | `VARCHAR(128)` | `NOT NULL UNIQUE` | `HMAC-SHA256(raw_key, pepper)` |
 | `pepper_version` | `SMALLINT` | `NOT NULL DEFAULT 1` | 主副 Pepper 轮换版本号 |
 | `allowed_models` | `TEXT[]` | `NULL` | 单 Key 授权模型子集 |
