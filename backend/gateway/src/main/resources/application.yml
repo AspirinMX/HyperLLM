@@ -1,0 +1,44 @@
+server:
+  port: ${GATEWAY_PORT:8080}
+
+spring:
+  application:
+    name: hyperllm-gateway
+  main:
+    web-application-type: reactive
+  flyway:
+    enabled: false
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:hyperllm}
+    username: ${POSTGRES_USER:hyperllm}
+    password: ${POSTGRES_PASSWORD:hyperllm}
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 2
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: hyperllm-gateway-${HYPERLLM_INSTANCE_ID:${random.uuid}}
+      auto-offset-reset: latest
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  tracing:
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLING_PROBABILITY:0.1}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
+
+hyperllm:
+  security:
+    aes-master-key: ${HYPERLLM_AES_MASTER_KEY}
+    key-pepper-v1: ${HYPERLLM_KEY_PEPPER_V1}

@@ -1,0 +1,8 @@
+* text=auto
+*.sh text eol=lf
+infra/**/*.yaml text eol=lf
+infra/**/*.yml text eol=lf
+infra/**/*.sql text eol=lf
+infra/**/*.json text eol=lf
+backend/mvnw text eol=lf
+backend/mvnw.cmd text eol=crlf

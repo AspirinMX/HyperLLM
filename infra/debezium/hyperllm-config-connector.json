@@ -1,0 +1,25 @@
+{
+  "name": "hyperllm-config-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "__POSTGRES_USER__",
+    "database.password": "__POSTGRES_PASSWORD__",
+    "database.dbname": "__POSTGRES_DB__",
+    "topic.prefix": "hyperllm",
+    "plugin.name": "pgoutput",
+    "publication.name": "pub_hyperllm_config",
+    "slot.name": "slot_hyperllm_config",
+    "publication.autocreate.mode": "filtered",
+    "table.include.list": "public.customer_tiers,public.organizations,public.projects,public.api_keys,public.providers,public.channels,public.virtual_models,public.model_channel_bindings,public.pricing_rules",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "true",
+    "transforms": "reroute",
+    "transforms.reroute.type": "io.debezium.transforms.ByLogicalTableRouter",
+    "transforms.reroute.topic.regex": "hyperllm\\.public\\.(.*)",
+    "transforms.reroute.topic.replacement": "cdc.gateway.config",
+    "transforms.reroute.key.enforce.uniqueness": "true"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "hyperllm-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "__POSTGRES_USER__",
+    "database.password": "__POSTGRES_PASSWORD__",
+    "database.dbname": "__POSTGRES_DB__",
+    "topic.prefix": "hyperllm_outbox",
+    "plugin.name": "pgoutput",
+    "publication.name": "pub_hyperllm_outbox",
+    "slot.name": "slot_hyperllm_outbox",
+    "publication.autocreate.mode": "filtered",
+    "table.include.list": "public.outbox_events",
+    "tombstones.on.delete": "false",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.expand.json.payload": "true",
+    "transforms.outbox.route.topic.replacement": "cdc.${routedByValue}"
+  }
+}
