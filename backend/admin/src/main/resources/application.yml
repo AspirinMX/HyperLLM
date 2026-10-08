@@ -27,6 +27,10 @@ spring:
     consumer:
       group-id: hyperllm-admin-billing
       enable-auto-commit: false
+    listener:
+      # BillingSettlementConsumer takes an Acknowledgment argument; Spring only populates it
+      # for manual ack modes, so BATCH would fail every message before it reaches the ledger.
+      ack-mode: manual
 
 springdoc:
   api-docs:

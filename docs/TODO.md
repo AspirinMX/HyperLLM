@@ -75,9 +75,25 @@
 - [x] 实现入口鉴权（`sk-...` HMAC 与 `sk-hl-sb-...` Sandbox Redis Token）、IP/模型白名单校验与 Redis RPM + 并发限流
 - [x] 实现 `priority_tier + weight` 加权随机路由与最多 2 次首字节前失败重试（`429`/`5xx`/超时）
 - [x] 实现 `/v1/chat/completions`、`/v1/messages` 同构透传与 `/v1/models`，接入简化版 Redis Lua 扣费（先通用赠金后现金）并异步发射 `llm.billing.settlement` 与 `llm.request.events`
-- [ ] 编写 WireMock + Testcontainers 端到端集成测试，通过 `curl`/HTTP 脚本验证完整调用、CDC 失效、故障重试与账本落盘
+- [x] 编写 WireMock + Testcontainers 端到端集成测试，通过 `curl`/HTTP 脚本验证完整调用、CDC 失效、故障重试与账本落盘（2.0 收尾：`GatewayE2EIntegrationTest` 补 CDC 驱逐断言、新增 `SettlementPipelineIT`、新增 [scripts/e2e/phase1-smoke.sh](../scripts/e2e/phase1-smoke.sh)）
 
 ---
+
+## Phase 1 遗留缺口登记（2.0 产出）
+
+> 2.0 的原则是**只钉基线、不改基线行为**。已修复的项标注修复点，未修的项标注由哪个子任务承接，避免「知道有问题但忘了」。
+> 基线验证入口：`./backend/mvnw -f backend/pom.xml verify`（JVM 内）+ `bash scripts/e2e/phase1-smoke.sh`（活栈）。
+
+| # | 缺口 | 现状 | 处置 |
+| :--- | :--- | :--- | :--- |
+| **G1** | 跨服务链路未验证：gateway 发结算事件、admin 消费落库，两半只在各自 JVM 里测过 | ✅ 已关闭：新增 `SettlementPipelineIT`，走真实 Kafka 监听器写入 `wallet_ledger`，并断言重放只落一行 | 2.0 |
+| **G2** | CDC 只发不验：E2E 第 5 步发完事件没有任何断言 | ✅ 已关闭：改为「吊销 key → 删 L2 → 发事件 → 轮询直到 401」，否则断言失败 | 2.0 |
+| **G3** | 没有活栈脚本，真实 Debezium/Kafka topic/Redis Lua 从未一起跑过 | ✅ 已关闭：`scripts/e2e/phase1-smoke.sh` + Compose `tools` profile 的 WireMock 上游 | 2.0 |
+| **G4** | `pricing == null` 时 `exactCostMicros = 0`，未配置定价的模型被免费使用 | ❌ 未修（会改变基线行为）；已在新设计稿中定义为拒绝并抛 `MODEL_PRICING_MISSING` | 2.2 |
+| **G5** | `deduct_wallet.lua` 不钳制下限，Redis 现金可为负；随后 `wallets.cash_balance_micros` 的 `CHECK (>= 0)` 让结算落库失败并无限重试 | ❌ 未修；分档预占 + 现金腿钳制后不再可能出现负值 | 2.3 |
+| **G6** | `spring.kafka.listener.ack-mode` 未配置（默认 BATCH），而 `BillingSettlementConsumer` 声明了 `Acknowledgment` 参数 → **每条结算消息都抛异常，账本从未被 Kafka 写入** | ✅ 已修复：`admin/application.yml` 增补 `ack-mode: manual`；`SettlementPipelineIT` 现在能守住这条链路 | 2.0 |
+| **G7** | `BillingSettlementConsumer.onMessage` 调 `this.ingestIdempotent(...)` 属自调用，`@Transactional` 被代理绕过 → 监听器路径实际无事务（直调测试看不到） | ❌ 未修 | 2.4 |
+| **G8** | `wallet_ledger` 跨月入账、分区预建作业从未被测过 | ❌ 未修 | 2.4 |
 
 ## Phase 2：商业化计费、完整 CDC/Outbox 与 OLAP 管道闭环
 

@@ -215,6 +215,20 @@ services:
     ports:
       - "${KAFKA_UI_PORT:-8088}:8080"
 
+  # Mock upstream used by scripts/e2e/*.sh. Pinned to the same WireMock version as
+  # <wiremock.version> in backend/pom.xml so stub JSON is interchangeable with the JVM tests.
+  wiremock:
+    image: wiremock/wiremock:3.13.2
+    container_name: hyperllm-wiremock
+    profiles: ["tools"]
+    restart: unless-stopped
+    command: ["--global-response-templating"]
+    ports:
+      - "${WIREMOCK_PORT:-8099}:8080"
+    volumes:
+      # Stub mappings are loaded at startup; no /__admin calls needed from the smoke script.
+      - ./wiremock:/home/wiremock:ro
+
 volumes:
   postgres_data:
   redis_data:

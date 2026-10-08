@@ -347,10 +347,44 @@ class GatewayE2EIntegrationTest {
                 .expectBody()
                 .jsonPath("$.object").isEqualTo("list");
 
-        // 5. Simulate Debezium CDC event on cdc.gateway.config (evict L1 after revoking key in Redis/DB)
+        // 5. CDC eviction must actually take effect, not merely publish a message.
+        //    Revoke in PostgreSQL, drop the L2 entry exactly as the control plane would,
+        //    publish the Debezium envelope, then prove the next request is rejected.
+        assertThat(apiKeyRepository.revoke(keyId, 0L, now)).isTrue();
+        redisTemplate.delete(GatewayRedisKeys.keyConfig(keyHash)).block();
         kafkaTemplate.send(KafkaTopics.CDC_GATEWAY_CONFIG,
                 "{\"payload\":{\"source\":{\"table\":\"api_keys\"},\"after\":{\"key_hash\":\"" + keyHash + "\"}}}")
                 .get();
+        assertThat(awaitUnauthorized(generated.rawKey()))
+                .as("L1 key cache was not evicted within 10s of the CDC event; a revoked key was still accepted")
+                .isTrue();
+    }
+
+    /**
+     * Polls until the gateway rejects the revoked key. Before eviction the cached context is still
+     * ACTIVE, so the call keeps succeeding; the assertion only passes once L1 is genuinely evicted.
+     */
+    private boolean awaitUnauthorized(String rawKey) {
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while (System.currentTimeMillis() < deadline) {
+            int status = webTestClient.get()
+                    .uri("/v1/models")
+                    .header("Authorization", "Bearer " + rawKey)
+                    .exchange()
+                    .returnResult(String.class)
+                    .getStatus()
+                    .value();
+            if (status == 401) {
+                return true;
+            }
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
     }
 
     private KafkaConsumer<String, String> createConsumer() {
