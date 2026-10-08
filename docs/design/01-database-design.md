@@ -695,7 +695,7 @@ erDiagram
 为控制 PostgreSQL WAL 体积并保证 `backend/gateway` 缓存绝对纯净，Debezium 仅维护以下两个专用 Publication：
 
 1. **`pub_hyperllm_config`（配置热同步 -> Topic `cdc.gateway.config`）**：
-   - 仅订阅网关数据面所需的 **12 张配置表**：`customer_tiers`, `organizations`, `projects`, `api_keys`, `providers`, `channels`, `virtual_models`, `model_org_grants`, `model_channel_bindings`, `pricing_rules`, `org_model_pricing_overrides`, `guardrail_policies`。
+   - 仅订阅网关数据面所需的 **12 张配置表**（分两批落地：V4 后 10 张，V5 补齐 `model_org_grants` 与 `guardrail_policies`）：`customer_tiers`, `organizations`, `projects`, `api_keys`, `providers`, `channels`, `virtual_models`, `model_org_grants`, `model_channel_bindings`, `pricing_rules`, `org_model_pricing_overrides`, `guardrail_policies`。
    - **明确排除**：`users`、`user_identities`、`refresh_tokens`、`admin_users`、`admin_sessions`、`org_members`、`project_members`、`payment_orders`、`wallet_ledger`、`audit_logs` 等高频或纯控制面表，杜绝登录与账务写入冲击网关内存缓存。
 2. **`pub_hyperllm_outbox`（账务可靠投递 -> Outbox Event Router SMT）**：
    - 仅订阅 `outbox_events`，配合 `idempotency_key` 驱动 Redis 幂等加额与资源包/赠金加载。

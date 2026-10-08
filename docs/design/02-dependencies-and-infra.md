@@ -108,7 +108,7 @@ flowchart LR
 
 1. **生成触发方式**：在 `backend/domain/pom.xml` 中定义 `<id>jooq</id>` Profile，仅当手动执行以下命令时触发：
    ```bash
-   ./mvnw generate-sources -pl domain -Pjooq
+   ./backend/mvnw -f backend/pom.xml compile -pl common,domain -Pjooq
    ```
 2. **执行流程**：
    - 通过 `groovy-maven-plugin` / `testcontainers` 在构建期拉起临时 `postgres:16-alpine` 容器；
@@ -181,7 +181,7 @@ flowchart LR
    - `llm.request.events`：12 partitions，`retention.ms=604800000`（7 天），承载网关发射的反范式请求宽表事件。
    - `llm.billing.settlement`：12 partitions，`retention.ms=604800000`（7 天），承载结算后写 Postgres `wallet_ledger` 的流水事件。
 2. **`infra/debezium/` Connector 设计**：
-   - `hyperllm-config-connector.json`：使用 `publication.autocreate.mode=filtered`，仅包含 [01-database-design.md](./01-database-design.md#5-debezium-cdc-publication-订阅边界) 指定的 12 张配置表（待控制面首次运行 Flyway 建表后再启动 `pipeline` 或重启 Connector 自动创建过滤 Publication）。
+   - `hyperllm-config-connector.json`：使用 `publication.autocreate.mode=filtered`，仅包含 [01-database-design.md](./01-database-design.md#5-debezium-cdc-publication-订阅边界) 指定的配置表（V4 后 10 张、V5 后 12 张；待控制面首次运行 Flyway 建表后再启动 `pipeline` 或重启 Connector 自动创建过滤 Publication）。
    - `hyperllm-outbox-connector.json`：启用 `io.debezium.transforms.outbox.EventRouter` SMT 仅监听 `public.outbox_events`，按 `aggregatetype` 路由至对应业务 Topic，并以 `aggregateid`（`org_id`）作为 Kafka Key 保证单组织顺序。
 
 ### 6.3 基础设施目录完整结构规划

@@ -383,7 +383,7 @@ sequenceDiagram
 
 #### 2.4.2 Debezium CDC 职责与 Topic 规划
 为避免全库监听带来的 WAL 膨胀与复杂处理，Debezium **仅订阅两类核心 Publication**：
-1. **配置与状态表（Config CDC）**：仅订阅网关热路径所需的 12 张配置表——`customer_tiers`, `organizations`, `projects`, `api_keys`, `providers`, `channels`, `virtual_models`, `model_org_grants`, `model_channel_bindings`, `pricing_rules`, `org_model_pricing_overrides`, `guardrail_policies`（明确排除用户登录与账本高频表）。
+1. **配置与状态表（Config CDC）**：仅订阅网关热路径所需的 12 张配置表（分两批落地：V4 后 10 张，V5 补齐 `model_org_grants` 与 `guardrail_policies` 至 12 张）——`customer_tiers`, `organizations`, `projects`, `api_keys`, `providers`, `channels`, `virtual_models`, `model_org_grants`, `model_channel_bindings`, `pricing_rules`, `org_model_pricing_overrides`, `guardrail_policies`（明确排除用户登录与账本高频表）。
    - 推入 Kafka Topic：`cdc.gateway.config`（开启 Log Compaction 或分区广播）。
    - 消费动作：`backend/admin` 异步任务消费者（或独立 Worker 进程）同步刷新 Redis L2 Hash；所有 `backend/gateway` 实例通过独立 Consumer Group（每 Pod 一个 Group ID）实时消费事件，**亚秒级剔除/更新本地 Caffeine L1 缓存**（API Key 吊销、限流调低、渠道摘除即时生效）。
 2. **账务与状态变更 Outbox 表（Outbox Event Router）**：`outbox_events`。
