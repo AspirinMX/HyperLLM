@@ -81,15 +81,67 @@
 
 ## Phase 2：商业化计费、完整 CDC/Outbox 与 OLAP 管道闭环
 
-- [ ] 编写并迁移 Flyway `V4__init_commercial_billing_outbox.sql`（`payment_orders`, `resource_packs`, `vouchers`, `redemption_codes`, `bonus_grants`, `org_model_pricing_overrides`, `notification_endpoints`, `billing_alert_rules`, `outbox_events`）及刷新 `-Pjooq`
-- [ ] 升级 `gateway` Redis Lua 引擎为完整版 `Pre-hold / Settle` 原子冻结与流式多退少补（含 `hold_id` ZSET 延迟回收队列与长推理心跳续期）
-- [ ] 实现三顺位确定性抵扣引擎（1. `resource_packs` Token/次 -> 2. 按到期时间优先 `bonus_grants` -> 3. `cash` 余额）与大客户单模型协议价覆盖
-- [ ] 完善四层分布式限流（补充 TPM 滑动窗口、Organization 并发池保护与 Channel 上游自身保护阈值）
-- [ ] 部署 `infra/debezium/hyperllm-outbox-connector.json`（Outbox Event Router），实现 `admin` 幂等消费 `cdc.wallet.*` / `cdc.pack.*` / `cdc.bonus.*` 加额同步 Redis
-- [ ] 上线 `admin` 周期性准实时余额对账任务（Redis vs Postgres + Kafka Lag 巡检与差异告警）
-- [ ] 在 `console` 接入支付抽象层，对接 Stripe、支付宝、微信支付下单与验签回调，以及兑换码核销/资源包购买
-- [ ] 落地 ClickHouse `llm_request_events` 与 `mv_usage_hourly` 批写摄入，在 `console` / `admin` 开放聚合用量与实时毛利查询 API
-- [ ] 落地低余额阈值与 Project 月度软/硬预算超限 Webhook / 邮件告警派发
+> 按 `2.0 → 2.1 → 2.2 → 2.3 → 2.4 → 2.5 → 2.6` 推进计费主线。2.7 可在用量与计价口径明确后并行，2.8 可在请求事件契约明确后并行。2.9 完成全链路验收。
+
+### 2.0 设计与 Phase 1 验收基线
+
+- [ ] 梳理 Phase 1 遗留的 HTTP 联调缺口、结算事务边界、测试充值幂等性和并发超支问题，将修复与回归场景纳入对应开发步骤。
+- [ ] 完成 Phase 2 详细设计与评审，确认预占默认上限与超预占处理、历史余额与 Redis Key 迁移、支付渠道范围、ClickHouse 摄入方式及各步骤的事件和 API 契约。
+
+### 2.1 Flyway V4、jOOQ 与领域仓储
+
+- [ ] 编写并执行 `V4__init_commercial_billing_outbox.sql`，新增 `payment_orders`、`resource_packs`、`vouchers`、`redemption_codes`、`bonus_grants`、`org_model_pricing_overrides`、`notification_endpoints`、`billing_alert_rules` 和 `outbox_events`，补齐 `wallet_ledger.ref_order_id` 外键。见 [数据库迁移规划](./design/01-database-design.md)。
+- [ ] 通过 `-Pjooq` 重新生成代码，补齐 `domain` 的领域模型和仓储。
+- [ ] 通过 PostgreSQL 16 容器测试验证空库初始化、V3 升级、旧账本兼容性以及新表的关键约束。
+
+### 2.2 三顺位抵扣与组织模型协议价
+
+- [ ] 实现按模型适用范围和到期顺序确定分摊的三顺位抵扣 `资源包（Token/次） → 赠金批次 → 现金`。
+- [ ] 接入组织级单模型协议价，沿用 `micro-USD` 整数精度与 `MicroUsd` 向上取整规则，输出逐批次分摊明细。
+- [ ] 验证过期或不适用的权益、部分抵扣、多批次抵扣、余额不足与定价生效边界。
+
+### 2.3 网关预占、流式结算与回收
+
+- [ ] 将 `gateway` 的 Redis Lua 计费升级为 `Pre-hold / Settle`，准入时原子预占，收尾时按实测 Usage 或估算用量结算并释放剩余预占。
+- [ ] 实现长流心跳续期、僵尸预占到期回收，以及结算和释放的幂等处理。
+- [ ] 用 Redis 容器测试验证并发请求防超支，以及断连、上游异常和实例退出后的结算与回收。
+
+### 2.4 结算事件、账本落库与分区维护
+
+- [ ] 升级 `llm.billing.settlement` 事件，携带资源包与赠金分摊明细，兼容 Phase 1 事件重放。
+- [ ] 在 `admin` 同一事务内幂等写入 `wallet_ledger` 并更新钱包及权益余额，补齐失败重试和重放流程。
+- [ ] 预建 `wallet_ledger` 与 `audit_logs` 的未来月份分区，验证跨月入账、重复事件和消费者恢复。
+
+### 2.5 Outbox CDC 与 Redis 加额同步
+
+- [ ] 在充值及权益发放事务中写入 `outbox_events`，按评审确定的方案切换 Phase 1 测试充值链路。
+- [ ] 在 V4 就绪后启用 Outbox Connector，由 `admin` 幂等消费 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`，同步钱包及权益变动。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
+- [ ] 验证业务事务回滚、重复投递和消费者停机恢复。恢复后已提交的加额与权益发放各生效一次。
+
+### 2.6 支付、兑换码与资源包购买
+
+- [ ] 在 `console` 实现支付抽象、下单、订单查询和验签回调。Stripe、支付宝、微信支付的接入范围及顺序由 2.0 确认。
+- [ ] 交付兑换码核销、资源包购买及相应的 `admin` 运营接口，复用 2.5 的加额与权益发放链路。
+- [ ] 通过沙箱和模拟测试验证支付成功、签名与金额校验、回调重放及兑换码并发核销。
+
+### 2.7 四层限流与项目预算
+
+- [ ] 补齐 API Key 和 Project 的 RPM/TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
+- [ ] 实现 Project 月度预算检查，软上限触发告警，硬上限在准入时拦截超预算请求。
+- [ ] 验证跨分钟限流、并发准入和预算超限的协议错误响应。
+
+### 2.8 ClickHouse 摄入、用量与毛利 API
+
+- [ ] 接通 `llm.request.events` 到 ClickHouse `llm_request_events` 和 `mv_usage_hourly` 的摄入，遵循 ZDR，仅落盘结构化用量元数据。
+- [ ] 在 `console` 提供按租户权限过滤的聚合用量查询，在 `admin` 提供毛利查询。
+- [ ] 验证重复投递后的指标准确性、明细与聚合的一致性、查询权限和 ZDR 约束。
+
+### 2.9 告警、对账与全链路验收
+
+- [ ] 上线低余额及 Project 月度软/硬预算的 Webhook 和邮件告警，验证冷却期与失败处理。
+- [ ] 在 `admin` 周期性核对 Redis 与 PostgreSQL 的钱包和权益余额，纳入 Kafka 待落账事件，监控结算积压和账务差异。
+- [ ] 补齐可重复执行的 HTTP 联调脚本，覆盖充值或兑换、预占、SSE 调用、结算入账、报表与告警，并回归 Phase 1 的配置 CDC、故障重试和账本落盘。
+- [ ] 通过 Maven `test`、`verify` 和 Compose `pipeline` 配置校验，并在联调环境验证并发防超支、重复投递幂等和消费恢复后的余额一致性。
 
 ---
 
