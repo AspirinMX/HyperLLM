@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.WalletLedgerRecord;
 
@@ -219,7 +220,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
+        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_ORDER, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
     }
 
     @Override
@@ -234,7 +235,20 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
 
     @Override
     public List<ForeignKey<WalletLedgerRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.WALLET_LEDGER__WALLET_LEDGER_API_KEY_ID_FKEY, Keys.WALLET_LEDGER__WALLET_LEDGER_ORG_ID_FKEY, Keys.WALLET_LEDGER__WALLET_LEDGER_PROJECT_ID_FKEY);
+        return Arrays.asList(Keys.WALLET_LEDGER__FK_WALLET_LEDGER_REF_ORDER, Keys.WALLET_LEDGER__WALLET_LEDGER_API_KEY_ID_FKEY, Keys.WALLET_LEDGER__WALLET_LEDGER_ORG_ID_FKEY, Keys.WALLET_LEDGER__WALLET_LEDGER_PROJECT_ID_FKEY);
+    }
+
+    private transient PaymentOrdersPath _paymentOrders;
+
+    /**
+     * Get the implicit join path to the <code>public.payment_orders</code>
+     * table.
+     */
+    public PaymentOrdersPath paymentOrders() {
+        if (_paymentOrders == null)
+            _paymentOrders = new PaymentOrdersPath(this, Keys.WALLET_LEDGER__FK_WALLET_LEDGER_REF_ORDER, null);
+
+        return _paymentOrders;
     }
 
     private transient ApiKeysPath _apiKeys;

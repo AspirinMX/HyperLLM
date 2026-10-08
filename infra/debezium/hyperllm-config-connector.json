@@ -13,7 +13,7 @@
     "publication.name": "pub_hyperllm_config",
     "slot.name": "slot_hyperllm_config",
     "publication.autocreate.mode": "filtered",
-    "table.include.list": "public.customer_tiers,public.organizations,public.projects,public.api_keys,public.providers,public.channels,public.virtual_models,public.model_channel_bindings,public.pricing_rules",
+    "table.include.list": "public.customer_tiers,public.organizations,public.projects,public.api_keys,public.providers,public.channels,public.virtual_models,public.model_channel_bindings,public.pricing_rules,public.org_model_pricing_overrides",
     "snapshot.mode": "initial",
     "tombstones.on.delete": "true",
     "transforms": "reroute",

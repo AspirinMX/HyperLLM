@@ -7,6 +7,7 @@ package app.pagefault.hyperllm.domain.jooq.tables;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
+import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules.BillingAlertRulesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
@@ -255,6 +256,19 @@ public class Projects extends TableImpl<ProjectsRecord> {
             _apiKeys = new ApiKeysPath(this, null, Keys.API_KEYS__API_KEYS_PROJECT_ID_FKEY.getInverseKey());
 
         return _apiKeys;
+    }
+
+    private transient BillingAlertRulesPath _billingAlertRules;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.billing_alert_rules</code> table
+     */
+    public BillingAlertRulesPath billingAlertRules() {
+        if (_billingAlertRules == null)
+            _billingAlertRules = new BillingAlertRulesPath(this, null, Keys.BILLING_ALERT_RULES__BILLING_ALERT_RULES_PROJECT_ID_FKEY.getInverseKey());
+
+        return _billingAlertRules;
     }
 
     private transient ProjectMembersPath _projectMembers;

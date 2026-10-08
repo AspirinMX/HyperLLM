@@ -8,20 +8,29 @@ import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminUsers;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys;
 import app.pagefault.hyperllm.domain.jooq.tables.AuditLogs;
+import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules;
+import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants;
 import app.pagefault.hyperllm.domain.jooq.tables.Channels;
 import app.pagefault.hyperllm.domain.jooq.tables.CustomerTiers;
 import app.pagefault.hyperllm.domain.jooq.tables.ModelChannelBindings;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationEndpoints;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers;
+import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations;
+import app.pagefault.hyperllm.domain.jooq.tables.OutboxEvents;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
+import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes;
 import app.pagefault.hyperllm.domain.jooq.tables.RefreshTokens;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks;
 import app.pagefault.hyperllm.domain.jooq.tables.UserIdentities;
 import app.pagefault.hyperllm.domain.jooq.tables.Users;
 import app.pagefault.hyperllm.domain.jooq.tables.VirtualModels;
+import app.pagefault.hyperllm.domain.jooq.tables.Vouchers;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger;
 import app.pagefault.hyperllm.domain.jooq.tables.Wallets;
 
@@ -67,6 +76,16 @@ public class Public extends SchemaImpl {
     public final AuditLogs AUDIT_LOGS = AuditLogs.AUDIT_LOGS;
 
     /**
+     * The table <code>public.billing_alert_rules</code>.
+     */
+    public final BillingAlertRules BILLING_ALERT_RULES = BillingAlertRules.BILLING_ALERT_RULES;
+
+    /**
+     * The table <code>public.bonus_grants</code>.
+     */
+    public final BonusGrants BONUS_GRANTS = BonusGrants.BONUS_GRANTS;
+
+    /**
      * The table <code>public.channels</code>.
      */
     public final Channels CHANNELS = Channels.CHANNELS;
@@ -82,6 +101,11 @@ public class Public extends SchemaImpl {
     public final ModelChannelBindings MODEL_CHANNEL_BINDINGS = ModelChannelBindings.MODEL_CHANNEL_BINDINGS;
 
     /**
+     * The table <code>public.notification_endpoints</code>.
+     */
+    public final NotificationEndpoints NOTIFICATION_ENDPOINTS = NotificationEndpoints.NOTIFICATION_ENDPOINTS;
+
+    /**
      * The table <code>public.org_invitations</code>.
      */
     public final OrgInvitations ORG_INVITATIONS = OrgInvitations.ORG_INVITATIONS;
@@ -92,9 +116,24 @@ public class Public extends SchemaImpl {
     public final OrgMembers ORG_MEMBERS = OrgMembers.ORG_MEMBERS;
 
     /**
+     * The table <code>public.org_model_pricing_overrides</code>.
+     */
+    public final OrgModelPricingOverrides ORG_MODEL_PRICING_OVERRIDES = OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES;
+
+    /**
      * The table <code>public.organizations</code>.
      */
     public final Organizations ORGANIZATIONS = Organizations.ORGANIZATIONS;
+
+    /**
+     * The table <code>public.outbox_events</code>.
+     */
+    public final OutboxEvents OUTBOX_EVENTS = OutboxEvents.OUTBOX_EVENTS;
+
+    /**
+     * The table <code>public.payment_orders</code>.
+     */
+    public final PaymentOrders PAYMENT_ORDERS = PaymentOrders.PAYMENT_ORDERS;
 
     /**
      * The table <code>public.pricing_rules</code>.
@@ -117,9 +156,19 @@ public class Public extends SchemaImpl {
     public final Providers PROVIDERS = Providers.PROVIDERS;
 
     /**
+     * The table <code>public.redemption_codes</code>.
+     */
+    public final RedemptionCodes REDEMPTION_CODES = RedemptionCodes.REDEMPTION_CODES;
+
+    /**
      * The table <code>public.refresh_tokens</code>.
      */
     public final RefreshTokens REFRESH_TOKENS = RefreshTokens.REFRESH_TOKENS;
+
+    /**
+     * The table <code>public.resource_packs</code>.
+     */
+    public final ResourcePacks RESOURCE_PACKS = ResourcePacks.RESOURCE_PACKS;
 
     /**
      * The table <code>public.user_identities</code>.
@@ -135,6 +184,11 @@ public class Public extends SchemaImpl {
      * The table <code>public.virtual_models</code>.
      */
     public final VirtualModels VIRTUAL_MODELS = VirtualModels.VIRTUAL_MODELS;
+
+    /**
+     * The table <code>public.vouchers</code>.
+     */
+    public final Vouchers VOUCHERS = Vouchers.VOUCHERS;
 
     /**
      * The table <code>public.wallet_ledger</code>.
@@ -166,20 +220,29 @@ public class Public extends SchemaImpl {
             AdminUsers.ADMIN_USERS,
             ApiKeys.API_KEYS,
             AuditLogs.AUDIT_LOGS,
+            BillingAlertRules.BILLING_ALERT_RULES,
+            BonusGrants.BONUS_GRANTS,
             Channels.CHANNELS,
             CustomerTiers.CUSTOMER_TIERS,
             ModelChannelBindings.MODEL_CHANNEL_BINDINGS,
+            NotificationEndpoints.NOTIFICATION_ENDPOINTS,
             OrgInvitations.ORG_INVITATIONS,
             OrgMembers.ORG_MEMBERS,
+            OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES,
             Organizations.ORGANIZATIONS,
+            OutboxEvents.OUTBOX_EVENTS,
+            PaymentOrders.PAYMENT_ORDERS,
             PricingRules.PRICING_RULES,
             ProjectMembers.PROJECT_MEMBERS,
             Projects.PROJECTS,
             Providers.PROVIDERS,
+            RedemptionCodes.REDEMPTION_CODES,
             RefreshTokens.REFRESH_TOKENS,
+            ResourcePacks.RESOURCE_PACKS,
             UserIdentities.USER_IDENTITIES,
             Users.USERS,
             VirtualModels.VIRTUAL_MODELS,
+            Vouchers.VOUCHERS,
             WalletLedger.WALLET_LEDGER,
             Wallets.WALLETS
         );

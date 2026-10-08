@@ -8,11 +8,18 @@ import app.pagefault.hyperllm.domain.jooq.Indexes;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
+import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules.BillingAlertRulesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants.BonusGrantsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.CustomerTiers.CustomerTiersPath;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationEndpoints.NotificationEndpointsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations.OrgInvitationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers.OrgMembersPath;
+import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides.OrgModelPricingOverridesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes.RedemptionCodesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks.ResourcePacksPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger.WalletLedgerPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Wallets.WalletsPath;
@@ -255,6 +262,45 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
         return _apiKeys;
     }
 
+    private transient BillingAlertRulesPath _billingAlertRules;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.billing_alert_rules</code> table
+     */
+    public BillingAlertRulesPath billingAlertRules() {
+        if (_billingAlertRules == null)
+            _billingAlertRules = new BillingAlertRulesPath(this, null, Keys.BILLING_ALERT_RULES__BILLING_ALERT_RULES_ORG_ID_FKEY.getInverseKey());
+
+        return _billingAlertRules;
+    }
+
+    private transient BonusGrantsPath _bonusGrants;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.bonus_grants</code> table
+     */
+    public BonusGrantsPath bonusGrants() {
+        if (_bonusGrants == null)
+            _bonusGrants = new BonusGrantsPath(this, null, Keys.BONUS_GRANTS__BONUS_GRANTS_ORG_ID_FKEY.getInverseKey());
+
+        return _bonusGrants;
+    }
+
+    private transient NotificationEndpointsPath _notificationEndpoints;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.notification_endpoints</code> table
+     */
+    public NotificationEndpointsPath notificationEndpoints() {
+        if (_notificationEndpoints == null)
+            _notificationEndpoints = new NotificationEndpointsPath(this, null, Keys.NOTIFICATION_ENDPOINTS__NOTIFICATION_ENDPOINTS_ORG_ID_FKEY.getInverseKey());
+
+        return _notificationEndpoints;
+    }
+
     private transient OrgInvitationsPath _orgInvitations;
 
     /**
@@ -281,6 +327,32 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
         return _orgMembers;
     }
 
+    private transient OrgModelPricingOverridesPath _orgModelPricingOverrides;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.org_model_pricing_overrides</code> table
+     */
+    public OrgModelPricingOverridesPath orgModelPricingOverrides() {
+        if (_orgModelPricingOverrides == null)
+            _orgModelPricingOverrides = new OrgModelPricingOverridesPath(this, null, Keys.ORG_MODEL_PRICING_OVERRIDES__ORG_MODEL_PRICING_OVERRIDES_ORG_ID_FKEY.getInverseKey());
+
+        return _orgModelPricingOverrides;
+    }
+
+    private transient PaymentOrdersPath _paymentOrders;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.payment_orders</code> table
+     */
+    public PaymentOrdersPath paymentOrders() {
+        if (_paymentOrders == null)
+            _paymentOrders = new PaymentOrdersPath(this, null, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_ORG_ID_FKEY.getInverseKey());
+
+        return _paymentOrders;
+    }
+
     private transient ProjectMembersPath _projectMembers;
 
     /**
@@ -305,6 +377,32 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
             _projects = new ProjectsPath(this, null, Keys.PROJECTS__PROJECTS_ORG_ID_FKEY.getInverseKey());
 
         return _projects;
+    }
+
+    private transient RedemptionCodesPath _redemptionCodes;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.redemption_codes</code> table
+     */
+    public RedemptionCodesPath redemptionCodes() {
+        if (_redemptionCodes == null)
+            _redemptionCodes = new RedemptionCodesPath(this, null, Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_ORG_ID_FKEY.getInverseKey());
+
+        return _redemptionCodes;
+    }
+
+    private transient ResourcePacksPath _resourcePacks;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.resource_packs</code> table
+     */
+    public ResourcePacksPath resourcePacks() {
+        if (_resourcePacks == null)
+            _resourcePacks = new ResourcePacksPath(this, null, Keys.RESOURCE_PACKS__RESOURCE_PACKS_ORG_ID_FKEY.getInverseKey());
+
+        return _resourcePacks;
     }
 
     private transient WalletLedgerPath _walletLedger;

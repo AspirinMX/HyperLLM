@@ -8,6 +8,7 @@ import app.pagefault.hyperllm.domain.jooq.Indexes;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ModelChannelBindings.ModelChannelBindingsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides.OrgModelPricingOverridesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules.PricingRulesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.VirtualModelsRecord;
 
@@ -267,6 +268,19 @@ public class VirtualModels extends TableImpl<VirtualModelsRecord> {
             _modelChannelBindings = new ModelChannelBindingsPath(this, null, Keys.MODEL_CHANNEL_BINDINGS__MODEL_CHANNEL_BINDINGS_VIRTUAL_MODEL_ID_FKEY.getInverseKey());
 
         return _modelChannelBindings;
+    }
+
+    private transient OrgModelPricingOverridesPath _orgModelPricingOverrides;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.org_model_pricing_overrides</code> table
+     */
+    public OrgModelPricingOverridesPath orgModelPricingOverrides() {
+        if (_orgModelPricingOverrides == null)
+            _orgModelPricingOverrides = new OrgModelPricingOverridesPath(this, null, Keys.ORG_MODEL_PRICING_OVERRIDES__ORG_MODEL_PRICING_OVERRIDES_VIRTUAL_MODEL_ID_FKEY.getInverseKey());
+
+        return _orgModelPricingOverrides;
     }
 
     private transient PricingRulesPath _pricingRules;

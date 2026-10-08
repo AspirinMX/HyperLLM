@@ -7,7 +7,9 @@ package app.pagefault.hyperllm.domain.jooq.tables;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions.AdminSessionsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides.OrgModelPricingOverridesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules.PricingRulesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.Vouchers.VouchersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.AdminUsersRecord;
 
 import java.time.OffsetDateTime;
@@ -223,6 +225,19 @@ public class AdminUsers extends TableImpl<AdminUsersRecord> {
         return _adminSessions;
     }
 
+    private transient OrgModelPricingOverridesPath _orgModelPricingOverrides;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.org_model_pricing_overrides</code> table
+     */
+    public OrgModelPricingOverridesPath orgModelPricingOverrides() {
+        if (_orgModelPricingOverrides == null)
+            _orgModelPricingOverrides = new OrgModelPricingOverridesPath(this, null, Keys.ORG_MODEL_PRICING_OVERRIDES__ORG_MODEL_PRICING_OVERRIDES_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
+
+        return _orgModelPricingOverrides;
+    }
+
     private transient PricingRulesPath _pricingRules;
 
     /**
@@ -234,6 +249,19 @@ public class AdminUsers extends TableImpl<AdminUsersRecord> {
             _pricingRules = new PricingRulesPath(this, null, Keys.PRICING_RULES__PRICING_RULES_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
 
         return _pricingRules;
+    }
+
+    private transient VouchersPath _vouchers;
+
+    /**
+     * Get the implicit to-many join path to the <code>public.vouchers</code>
+     * table
+     */
+    public VouchersPath vouchers() {
+        if (_vouchers == null)
+            _vouchers = new VouchersPath(this, null, Keys.VOUCHERS__VOUCHERS_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
+
+        return _vouchers;
     }
 
     @Override

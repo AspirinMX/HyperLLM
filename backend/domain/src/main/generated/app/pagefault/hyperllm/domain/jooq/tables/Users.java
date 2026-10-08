@@ -11,8 +11,10 @@ import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations.OrgInvitationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers.OrgMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes.RedemptionCodesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.RefreshTokens.RefreshTokensPath;
 import app.pagefault.hyperllm.domain.jooq.tables.UserIdentities.UserIdentitiesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.UsersRecord;
@@ -268,6 +270,19 @@ public class Users extends TableImpl<UsersRecord> {
         return _organizations;
     }
 
+    private transient PaymentOrdersPath _paymentOrders;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.payment_orders</code> table
+     */
+    public PaymentOrdersPath paymentOrders() {
+        if (_paymentOrders == null)
+            _paymentOrders = new PaymentOrdersPath(this, null, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_CREATED_BY_USER_ID_FKEY.getInverseKey());
+
+        return _paymentOrders;
+    }
+
     private transient ProjectMembersPath _projectMembersGrantedByUserIdFkey;
 
     /**
@@ -294,6 +309,19 @@ public class Users extends TableImpl<UsersRecord> {
             _projectMembersUserIdFkey = new ProjectMembersPath(this, null, Keys.PROJECT_MEMBERS__PROJECT_MEMBERS_USER_ID_FKEY.getInverseKey());
 
         return _projectMembersUserIdFkey;
+    }
+
+    private transient RedemptionCodesPath _redemptionCodes;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.redemption_codes</code> table
+     */
+    public RedemptionCodesPath redemptionCodes() {
+        if (_redemptionCodes == null)
+            _redemptionCodes = new RedemptionCodesPath(this, null, Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_BY_USER_ID_FKEY.getInverseKey());
+
+        return _redemptionCodes;
     }
 
     private transient RefreshTokensPath _refreshTokens;
