@@ -15,7 +15,7 @@
 3. `domain` 模块：9 个不可变 `record` 实体 + 14 个枚举。
 4. `domain` 模块：9 个仓储接口 + 对应 jOOQ 实现（含行映射）。
 5. `infra/debezium/hyperllm-config-connector.json` 的订阅表 9 → 10 张。
-6. 测试：`V4MigrationPathTest`、`V4SchemaConstraintTest`、`CommercialBillingRepositoryIntegrationTest`。
+6. 测试：`V4MigrationPathIT`、`V4SchemaConstraintIT`、`CommercialBillingRepositoryIntegrationTest`（failsafe 只认 `*IT` / `*IntegrationTest` 后缀，前两者带 `Integration` 却不以 `Test` 结尾，故用 `IT` 命名）。
 7. 四处文档口径修正（PROPOSAL §2.4.2、01 §5、02 §4、02 §6.2 的「12 张」与 `-Pjooq` 命令表述）。
 
 ### 1.2 非目标（明确不做）
@@ -628,7 +628,7 @@ V5 后（12 张）：+ model_org_grants, guardrail_policies
 
 三个新测试类，全部带 ```Tag("integration")`，**不新增 Testcontainers 容器**。
 
-### 7.1 V4MigrationPathTest（不经过 Spring）
+### 7.1 V4MigrationPathIT（不经过 Spring）
 
 用 `AbstractPostgresIntegrationTest.POSTGRES` 的连接信息，在容器内 `CREATE DATABASE hyperllm_v4_path`，然后直接驱动 Flyway API：
 
@@ -640,7 +640,7 @@ V5 后（12 张）：+ model_org_grants, guardrail_policies
 | `validatesRefOrderId` | 插入 `ref_order_id = 随机 UUID` 抛 FK 违反 |
 | `partitionsSurviveAlter` | 迁移后 14 个分区仍在，且新分区继承 `fk_wallet_ledger_ref_order` |
 
-### 7.2 V4SchemaConstraintTest（Spring 上下文，自动迁到 latest）
+### 7.2 V4SchemaConstraintIT（Spring 上下文，自动迁到 latest）
 
 用原生 SQL（`dsl.execute` / `JdbcTemplate`）逐条验证：
 

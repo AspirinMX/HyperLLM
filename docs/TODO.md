@@ -106,9 +106,9 @@
 
 ### 2.1 Flyway V4、jOOQ 与领域仓储
 
-- [ ] 编写并执行 `V4__init_commercial_billing_outbox.sql`，新增 `payment_orders`、`resource_packs`、`vouchers`、`redemption_codes`、`bonus_grants`、`org_model_pricing_overrides`、`notification_endpoints`、`billing_alert_rules` 和 `outbox_events`，补齐 `wallet_ledger.ref_order_id` 外键。见 [数据库迁移规划](./design/01-database-design.md)。
-- [ ] 通过 `-Pjooq` 重新生成代码，补齐 `domain` 的领域模型和仓储。
-- [ ] 通过 PostgreSQL 16 容器测试验证空库初始化、V3 升级、旧账本兼容性以及新表的关键约束。
+- [x] 编写并执行 `V4__init_commercial_billing_outbox.sql`，新增 `payment_orders`、`resource_packs`、`vouchers`、`redemption_codes`、`bonus_grants`、`org_model_pricing_overrides`、`notification_endpoints`、`billing_alert_rules` 和 `outbox_events`，补齐 `wallet_ledger.ref_order_id` 外键。见 [数据库迁移规划](./design/01-database-design.md) 与 [2.1 设计稿](./design/04-01-v4-schema.md)。
+- [x] 通过 `-Pjooq` 重新生成代码，补齐 `domain` 的领域模型和仓储（9 个 record、14 个枚举、9 组仓储契约与实现）。
+- [x] 通过 PostgreSQL 16 容器测试验证空库初始化、V3 升级、旧账本兼容性以及新表的关键约束（`V4MigrationPathIT`、`V4SchemaConstraintIT`、`CommercialBillingRepositoryIntegrationTest`，共 17 个用例）。
 
 ### 2.2 三顺位抵扣与组织模型协议价
 
