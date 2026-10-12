@@ -137,7 +137,7 @@ public class ConsoleAuthService {
             walletLedgerRepository.insertIdempotent(new WalletLedgerEntry(
                     UuidV7.next(), orgId, null, null, LedgerType.BONUS_GRANT,
                     "signup-bonus:" + orgId, 0L, signupBonus, 0L,
-                    0L, signupBonus, null, null, null, null, "Welcome signup bonus", now
+                    0L, signupBonus, null, null, null, null, "Welcome signup bonus", now, null
             ));
         }
         cacheSync.syncWalletAfterCommit(wallet, OrgStatus.ACTIVE.name());

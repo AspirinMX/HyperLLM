@@ -155,7 +155,7 @@ class RoutingAndBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
         WalletLedgerEntry entry = new WalletLedgerEntry(
                 UuidV7.next(), orgId, null, null, LedgerType.CONSUME, "req:" + reqId,
                 -1_500_000L, -500_000L, 0L, 3_500_000L, 500_000L, null,
-                reqId, null, null, "Chat completion settlement", now
+                reqId, null, null, "Chat completion settlement", now, null
         );
         assertThat(walletLedgerRepository.insertIdempotent(entry)).isTrue();
         // Replaying exact same idempotency_key + created_at must no-op

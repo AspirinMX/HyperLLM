@@ -22,6 +22,10 @@ public record BillingSettlementEvent(
         long packDeltaUnits,
         String idempotencyKey,
         String description,
-        String allocationDetailJson
+        String allocationDetailJson,
+        /** Pre-hold this settlement closes, {@code null} for requests admitted before Phase 2.3. */
+        UUID holdId,
+        /** True when the lease was reclaimed before the settlement arrived. */
+        boolean settledAfterReclaim
 ) {
 }

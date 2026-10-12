@@ -22,6 +22,8 @@ public record WalletLedgerEntry(
         UUID refOrderId,
         UUID refAdjustmentId,
         String description,
-        OffsetDateTime createdAt
+        OffsetDateTime createdAt,
+        /** Pre-hold that produced this row; {@code null} for rows written before Phase 2.3. */
+        UUID holdId
 ) {
 }

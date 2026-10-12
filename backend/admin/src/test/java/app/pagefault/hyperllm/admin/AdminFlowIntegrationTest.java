@@ -267,7 +267,7 @@ class AdminFlowIntegrationTest {
         // Consume settlement event twice; second replay must be ignored idempotently
         BillingSettlementEvent event = new BillingSettlementEvent(
                 "req-settlement-1", now, orgId, null, null,
-                -250_000L, 0L, 0L, "req:req-settlement-1", "Gateway consume test", null
+                -250_000L, 0L, 0L, "req:req-settlement-1", "Gateway consume test", null, null, false
         );
         assertThat(settlementConsumer.ingestIdempotent(event)).isTrue();
         assertThat(settlementConsumer.ingestIdempotent(event)).isFalse();

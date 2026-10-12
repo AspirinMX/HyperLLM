@@ -102,7 +102,8 @@ public class AdminTenantAndBillingService {
                 null,
                 null,
                 req.description() == null ? "Admin Phase 1 test topup" : req.description().trim(),
-                now
+                now,
+                null
         ));
 
         if (inserted) {

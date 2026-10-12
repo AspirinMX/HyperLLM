@@ -552,7 +552,9 @@ public class GatewayProxyService {
                             -packUnits,
                             "req:" + requestId,
                             "Model " + route.model().modelCode(),
-                            detailJson
+                            detailJson,
+                            null,
+                            false
                     );
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,

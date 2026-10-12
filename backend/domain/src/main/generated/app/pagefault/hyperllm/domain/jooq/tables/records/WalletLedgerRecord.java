@@ -277,6 +277,21 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         return (OffsetDateTime) get(16);
     }
 
+    /**
+     * Setter for <code>public.wallet_ledger.hold_id</code>.
+     */
+    public WalletLedgerRecord setHoldId(UUID value) {
+        set(17, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallet_ledger.hold_id</code>.
+     */
+    public UUID getHoldId() {
+        return (UUID) get(17);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -300,7 +315,7 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
     /**
      * Create a detached, initialised WalletLedgerRecord
      */
-    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt) {
+    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt, UUID holdId) {
         super(WalletLedger.WALLET_LEDGER);
 
         setId(id);
@@ -320,6 +335,7 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         setRefAdjustmentId(refAdjustmentId);
         setDescription(description);
         setCreatedAt(createdAt);
+        setHoldId(holdId);
         resetChangedOnNotNull();
     }
 }

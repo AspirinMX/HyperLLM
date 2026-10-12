@@ -67,7 +67,8 @@ public class BillingSettlementConsumer {
                 null,
                 null,
                 event.description(),
-                event.eventCreatedAt()
+                event.eventCreatedAt(),
+                event.holdId()
         ));
         if (!inserted) {
             return false;

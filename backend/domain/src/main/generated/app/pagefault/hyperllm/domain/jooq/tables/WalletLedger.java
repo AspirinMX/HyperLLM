@@ -151,6 +151,11 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
      */
     public final TableField<WalletLedgerRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false), this, "");
 
+    /**
+     * The column <code>public.wallet_ledger.hold_id</code>.
+     */
+    public final TableField<WalletLedgerRecord, UUID> HOLD_ID = createField(DSL.name("hold_id"), SQLDataType.UUID, this, "");
+
     private WalletLedger(Name alias, Table<WalletLedgerRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -220,7 +225,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_ORDER, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
+        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_HOLD, Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_ORDER, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
     }
 
     @Override
