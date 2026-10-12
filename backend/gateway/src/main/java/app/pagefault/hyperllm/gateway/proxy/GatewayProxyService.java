@@ -6,6 +6,15 @@ import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingSettlementEvent;
+import app.pagefault.hyperllm.common.money.CostMath;
+import app.pagefault.hyperllm.domain.billing.AllocationDetailCodec;
+import app.pagefault.hyperllm.domain.billing.AllocationLeg;
+import app.pagefault.hyperllm.domain.billing.AllocationPlan;
+import app.pagefault.hyperllm.domain.billing.AllocationType;
+import app.pagefault.hyperllm.domain.billing.BillableUsage;
+import app.pagefault.hyperllm.domain.billing.EntitlementAllocator;
+import app.pagefault.hyperllm.domain.pricing.PricingResolver;
+import app.pagefault.hyperllm.domain.pricing.ResolvedPricing;
 import app.pagefault.hyperllm.common.messaging.LlmRequestEvent;
 import app.pagefault.hyperllm.common.net.CidrMatcher;
 import app.pagefault.hyperllm.domain.model.enums.ApiKeyStatus;
@@ -84,7 +93,8 @@ public class GatewayProxyService {
             Integer keyMaxConcurrency,
             Integer projMaxConcurrency,
             int orgMaxConcurrency,
-            int effectiveDiscountBps
+            Integer orgDiscountRatioBps,
+            int tierDefaultDiscountBps
     ) {
     }
 
@@ -156,6 +166,11 @@ public class GatewayProxyService {
                                 VirtualModel vm = route.model();
                                 if (vm.status() != ModelStatus.ACTIVE) {
                                     return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
+                                }
+                                if (route.activePricing() == null) {
+                                    return Mono.error(new HyperLlmException(
+                                            ErrorCode.MODEL_PRICING_MISSING,
+                                            "Model " + vm.modelCode() + " has no active pricing rule"));
                                 }
                                 List<GatewayChannelCandidate> candidates = route.candidates().stream()
                                         .filter(c -> c.protocolFamily() == requiredFamily)
@@ -443,24 +458,10 @@ public class GatewayProxyService {
             return Mono.empty();
         }
         PricingRule pricing = route.activePricing();
-        long exactCostMicros = (pricing == null) ? 0L : UsageCostCalculator.computeDiscountedCostMicros(
-                usage,
-                pricing.inputPriceMicros1m(),
-                pricing.outputPriceMicros1m(),
-                pricing.cacheReadPriceMicros1m(),
-                pricing.cacheWritePriceMicros1m(),
-                pricing.reasoningPriceMicros1m(),
-                caller.effectiveDiscountBps()
-        );
-        long upstreamCostMicros = (pricing == null) ? 0L : UsageCostCalculator.computeDiscountedCostMicros(
-                usage,
-                pricing.inputPriceMicros1m(),
-                pricing.outputPriceMicros1m(),
-                pricing.cacheReadPriceMicros1m(),
-                pricing.cacheWritePriceMicros1m(),
-                pricing.reasoningPriceMicros1m(),
-                candidate.effectiveCostDiscountBps()
-        );
+        if (pricing == null) {
+            log.warn("Settling request {} without an active pricing rule; no charge recorded", requestId);
+            return admissionService.releaseLease(lease);
+        }
 
         long endNanos = System.nanoTime();
         int durationMs = (int) Math.max(1L, (endNanos - startNanos) / 1_000_000L);
@@ -468,8 +469,78 @@ public class GatewayProxyService {
         double tpotMs = usage.completionTokens() > 0 ? ((double) Math.max(0, durationMs - ttftMs)) / usage.completionTokens() : 0.0;
         OffsetDateTime eventCreatedAt = OffsetDateTime.now(ZoneOffset.UTC);
 
-        return admissionService.deductCost(caller.orgId(), exactCostMicros)
-                .flatMap(deducted -> {
+        BillableUsage billable = new BillableUsage(
+                usage.promptTokens(), usage.completionTokens(),
+                usage.cachedReadTokens(), usage.cachedWriteTokens(), usage.reasoningTokens());
+        long inputTokens = billable.promptTokens() + billable.cacheReadTokens() + billable.cacheWriteTokens();
+
+        return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())
+                .map(override -> PricingResolver.resolve(
+                        caller.orgDiscountRatioBps(), caller.tierDefaultDiscountBps(), pricing, override, inputTokens))
+                .defaultIfEmpty(PricingResolver.resolve(
+                        caller.orgDiscountRatioBps(), caller.tierDefaultDiscountBps(), pricing, null, inputTokens))
+                .flatMap(resolved -> chargeAndSettle(
+                        resolved, pricing, billable, usage, caller, route, candidate, upstreamModel,
+                        protocolKind, isStream, httpStatus, errorCode, retryCount, clientIp,
+                        requestId, traceId, eventCreatedAt, durationMs, ttftMs, tpotMs))
+                .onErrorResume(ex -> {
+                    log.error("Billing settlement failed for request {}", requestId, ex);
+                    return Mono.empty();
+                })
+                .then(admissionService.releaseLease(lease));
+    }
+
+    private Mono<Void> chargeAndSettle(
+            ResolvedPricing resolved,
+            PricingRule pricing,
+            BillableUsage billable,
+            TokenUsage usage,
+            CallerContext caller,
+            GatewayModelRoute route,
+            GatewayChannelCandidate candidate,
+            String upstreamModel,
+            ProtocolKind protocolKind,
+            boolean isStream,
+            int httpStatus,
+            String errorCode,
+            int retryCount,
+            String clientIp,
+            String requestId,
+            String traceId,
+            OffsetDateTime eventCreatedAt,
+            int durationMs,
+            int ttftMs,
+            double tpotMs
+    ) {
+        long rawCost = CostMath.rawCostMicros(
+                billable.promptTokens(), billable.completionTokens(), billable.cacheReadTokens(),
+                billable.cacheWriteTokens(), billable.reasoningTokens(),
+                resolved.inputPriceMicros1m(), resolved.outputPriceMicros1m(),
+                resolved.cacheReadPriceMicros1m(), resolved.cacheWritePriceMicros1m(),
+                resolved.reasoningPriceMicros1m());
+        long exactCostMicros = CostMath.discountedCostMicros(rawCost, resolved.discountBps());
+        long upstreamCostMicros = CostMath.discountedCostMicros(
+                CostMath.rawCostMicros(
+                        billable.promptTokens(), billable.completionTokens(), billable.cacheReadTokens(),
+                        billable.cacheWriteTokens(), billable.reasoningTokens(),
+                        pricing.inputPriceMicros1m(), pricing.outputPriceMicros1m(),
+                        pricing.cacheReadPriceMicros1m(), pricing.cacheWritePriceMicros1m(),
+                        pricing.reasoningPriceMicros1m()),
+                candidate.effectiveCostDiscountBps());
+
+        return cacheService.readWalletSnapshot(caller.orgId())
+                .defaultIfEmpty(new GatewayConfigCacheService.WalletSnapshot(0L, 0L, ""))
+                .flatMap(wallet -> cacheService
+                        .resolveEntitlements(caller.orgId(), route.model().modelCode(), wallet)
+                        .map(snapshot -> EntitlementAllocator.allocate(
+                                exactCostMicros, billable.totalTokens(), snapshot)))
+                .flatMap(plan -> {
+                    long cashLeg = sumLegs(plan, AllocationType.CASH);
+                    long bonusLeg = sumLegs(plan, AllocationType.BONUS);
+                    long packUnits = sumPackUnits(plan);
+                    String detailJson = AllocationDetailCodec.encodeV1(resolved, billable, plan);
+                    return admissionService.deductExact(caller.orgId(), cashLeg, bonusLeg)
+                            .flatMap(deducted -> {
                     BillingSettlementEvent settlement = new BillingSettlementEvent(
                             requestId,
                             eventCreatedAt,
@@ -478,8 +549,10 @@ public class GatewayProxyService {
                             caller.apiKeyId(),
                             -deducted.cashDeductedMicros(),
                             -deducted.bonusDeductedMicros(),
+                            -packUnits,
                             "req:" + requestId,
-                            "Model " + route.model().modelCode()
+                            "Model " + route.model().modelCode(),
+                            detailJson
                     );
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,
@@ -518,9 +591,18 @@ public class GatewayProxyService {
                             candidate.region() != null ? candidate.region() : "default"
                     );
                     telemetryService.emitSettlementAndRequestEvent(settlement, reqEvent);
-                    return Mono.empty();
-                })
-                .then(admissionService.releaseLease(lease));
+                    return Mono.<Void>empty();
+                            });
+                });
+    }
+
+    private static long sumLegs(AllocationPlan plan, AllocationType type) {
+        return plan.legs().stream().filter(leg -> leg.type() == type).mapToLong(AllocationLeg::micros).sum();
+    }
+
+    private static long sumPackUnits(AllocationPlan plan) {
+        return plan.legs().stream().filter(leg -> leg.type() == AllocationType.PACK)
+                .mapToLong(AllocationLeg::units).sum();
     }
 
     private Mono<CallerContext> authenticateCaller(String rawToken, String clientIp) {
@@ -536,7 +618,7 @@ public class GatewayProxyService {
                         }
                         return Mono.just(new CallerContext(
                                 payload.orgId(), payload.projectId(), null, payload.userId(),
-                                null, payload.allowedModels(), null, null, null, null, 50, 10_000
+                                null, payload.allowedModels(), null, null, null, null, 50, null, 10_000
                         ));
                     });
         }
@@ -572,7 +654,7 @@ public class GatewayProxyService {
                 ctx.keyAllowedModels(), ctx.projectAllowedModels(),
                 ctx.keyRpmLimit(), ctx.projectRpmLimit(),
                 ctx.keyMaxConcurrency(), ctx.projectMaxConcurrency(),
-                ctx.orgMaxConcurrency(), ctx.effectiveDiscountBps()
+                ctx.orgMaxConcurrency(), ctx.orgDiscountRatioBps(), ctx.tierDefaultDiscountBps()
         ));
     }
 

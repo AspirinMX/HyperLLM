@@ -59,7 +59,7 @@ public class BillingSettlementConsumer {
                 event.idempotencyKey(),
                 event.cashDeltaMicros(),
                 event.bonusDeltaMicros(),
-                0L,
+                event.packDeltaUnits(),
                 null,
                 null,
                 null,

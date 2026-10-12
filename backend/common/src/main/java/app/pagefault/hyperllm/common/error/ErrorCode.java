@@ -30,6 +30,7 @@ public enum ErrorCode {
     KEY_QUOTA_EXCEEDED(403, "API key quota limit exceeded"),
 
     MODEL_NOT_FOUND(404, "Virtual model not found"),
+    MODEL_PRICING_MISSING(503, "No active pricing rule for this model"),
     MODEL_NOT_ALLOWED(403, "Model is not permitted for this API key or project"),
     MODEL_CODE_EXISTS(409, "Virtual model code already exists"),
     CHANNEL_NOT_FOUND(404, "Channel not found"),

@@ -114,7 +114,7 @@ class SettlementPipelineIT {
 
         BillingSettlementEvent event = new BillingSettlementEvent(
                 "req-pipeline-1", now, orgId, null, null,
-                -250_000L, 0L, "req:req-pipeline-1", "Kafka pipeline integration"
+                -250_000L, 0L, 0L, "req:req-pipeline-1", "Kafka pipeline integration", null
         );
         String payload = objectMapper.writeValueAsString(event);
 

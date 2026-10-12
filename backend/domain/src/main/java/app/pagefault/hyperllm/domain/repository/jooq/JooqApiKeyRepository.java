@@ -69,9 +69,6 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
 
     @Override
     public Optional<GatewayKeyContext> findGatewayKeyContextByHash(String keyHash) {
-        var effectiveDiscount = DSL.coalesce(ORGANIZATIONS.DISCOUNT_RATIO_BPS, CUSTOMER_TIERS.DEFAULT_DISCOUNT_BPS)
-                .as("effective_discount_bps");
-
         return dsl.select(
                         API_KEYS.ID,
                         API_KEYS.PROJECT_ID,
@@ -98,7 +95,8 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
                         PROJECTS.ZDR_DEBUG_TTL_DAYS,
                         ORGANIZATIONS.STATUS,
                         ORGANIZATIONS.MAX_CONCURRENCY,
-                        effectiveDiscount
+                        ORGANIZATIONS.DISCOUNT_RATIO_BPS,
+                        CUSTOMER_TIERS.DEFAULT_DISCOUNT_BPS
                 )
                 .from(API_KEYS)
                 .join(PROJECTS).on(PROJECTS.ID.eq(API_KEYS.PROJECT_ID))
@@ -108,7 +106,7 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
                 .and(API_KEYS.DELETED_AT.isNull())
                 .and(PROJECTS.DELETED_AT.isNull())
                 .and(ORGANIZATIONS.DELETED_AT.isNull())
-                .fetchOptional(r -> toGatewayContext(r, effectiveDiscount.getName()));
+                .fetchOptional(this::toGatewayContext);
     }
 
     @Override
@@ -209,7 +207,7 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
         );
     }
 
-    private GatewayKeyContext toGatewayContext(Record r, String discountAlias) {
+    private GatewayKeyContext toGatewayContext(Record r) {
         return new GatewayKeyContext(
                 r.get(API_KEYS.ID),
                 r.get(API_KEYS.PROJECT_ID),
@@ -236,7 +234,8 @@ public class JooqApiKeyRepository implements ApiKeyRepository {
                 r.get(PROJECTS.ZDR_DEBUG_TTL_DAYS),
                 PgJooqSupport.toEnum(OrgStatus.class, r.get(ORGANIZATIONS.STATUS)),
                 r.get(ORGANIZATIONS.MAX_CONCURRENCY),
-                r.get(discountAlias, Integer.class)
+                r.get(ORGANIZATIONS.DISCOUNT_RATIO_BPS),
+                r.get(CUSTOMER_TIERS.DEFAULT_DISCOUNT_BPS)
         );
     }
 }

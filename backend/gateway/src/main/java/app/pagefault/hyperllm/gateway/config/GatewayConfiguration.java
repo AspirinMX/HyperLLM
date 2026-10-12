@@ -49,6 +49,12 @@ public class GatewayConfiguration {
         return RedisScript.of(new ClassPathResource("lua/deduct_wallet.lua"), java.util.List.class);
     }
 
+    @SuppressWarnings("rawtypes")
+    @Bean
+    public RedisScript<java.util.List> deductWalletSplitLuaScript() {
+        return RedisScript.of(new ClassPathResource("lua/deduct_wallet_split.lua"), java.util.List.class);
+    }
+
     @Bean
     public RedisScript<Long> releaseConcurrencyLuaScript() {
         return RedisScript.of(new ClassPathResource("lua/release_concurrency.lua"), Long.class);

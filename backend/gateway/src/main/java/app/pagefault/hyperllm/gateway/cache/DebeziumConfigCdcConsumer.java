@@ -44,6 +44,10 @@ public class DebeziumConfigCdcConsumer {
                 }
                 case "channels", "providers", "model_channel_bindings", "pricing_rules" ->
                         cacheService.evictAllRoutesL1();
+                case "org_model_pricing_overrides" -> {
+                    cacheService.evictAllOverridesL1();
+                    cacheService.evictAllRoutesL1();
+                }
                 default -> {
                     cacheService.evictAllKeysL1();
                     cacheService.evictAllRoutesL1();

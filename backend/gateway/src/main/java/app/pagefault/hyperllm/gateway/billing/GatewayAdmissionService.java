@@ -37,6 +37,8 @@ public class GatewayAdmissionService {
     private final RedisScript<String> admissionLuaScript;
     @SuppressWarnings("rawtypes")
     private final RedisScript<List> deductWalletLuaScript;
+    @SuppressWarnings("rawtypes")
+    private final RedisScript<List> deductWalletSplitLuaScript;
     private final RedisScript<Long> releaseConcurrencyLuaScript;
 
     public Mono<AdmissionLease> admit(
@@ -118,6 +120,29 @@ public class GatewayAdmissionService {
                     long bonusDeducted = extractLong(rawList, 0);
                     long cashDeducted = extractLong(rawList, 1);
                     return new DeductionOutcome(bonusDeducted, cashDeducted);
+                })
+                .defaultIfEmpty(new DeductionOutcome(0L, 0L));
+    }
+
+    /**
+     * Applies an allocation plan's cash and bonus legs exactly as computed, rather than letting the
+     * wallet decide the split. Both buckets are clamped inside the script, so a stale snapshot
+     * cannot drive the balance negative.
+     */
+    public Mono<DeductionOutcome> deductExact(UUID orgId, long cashMicros, long bonusMicros) {
+        if (cashMicros <= 0L && bonusMicros <= 0L) {
+            return Mono.just(new DeductionOutcome(0L, 0L));
+        }
+        String walletKey = GatewayRedisKeys.wallet(orgId);
+        return redisTemplate.execute(
+                        deductWalletSplitLuaScript,
+                        List.of(walletKey),
+                        List.of(String.valueOf(Math.max(cashMicros, 0L)), String.valueOf(Math.max(bonusMicros, 0L))))
+                .next()
+                .map(rawList -> {
+                    long bonusApplied = extractLong(rawList, 0);
+                    long cashApplied = extractLong(rawList, 1);
+                    return new DeductionOutcome(bonusApplied, cashApplied);
                 })
                 .defaultIfEmpty(new DeductionOutcome(0L, 0L));
     }

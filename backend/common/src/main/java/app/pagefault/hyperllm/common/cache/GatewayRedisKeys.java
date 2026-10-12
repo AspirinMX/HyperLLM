@@ -31,6 +31,10 @@ public final class GatewayRedisKeys {
         return "gw:cfg:route:" + modelCode;
     }
 
+    public static String modelOverride(UUID orgId, UUID virtualModelId) {
+        return "gw:cfg:override:" + orgId + ":" + virtualModelId;
+    }
+
     public static String wallet(UUID orgId) {
         return "gw:wallet:" + orgId;
     }

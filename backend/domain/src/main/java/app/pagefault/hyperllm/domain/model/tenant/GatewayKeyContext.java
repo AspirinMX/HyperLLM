@@ -37,6 +37,13 @@ public record GatewayKeyContext(
         short zdrDebugTtlDays,
         OrgStatus orgStatus,
         int orgMaxConcurrency,
-        int effectiveDiscountBps
+        /** Organisation-level ratio, {@code null} when it inherits the tier default. */
+        Integer orgDiscountRatioBps,
+        int tierDefaultDiscountBps
 ) {
+
+    /** Ratio actually applied to list prices; the provenance is kept in the two fields above. */
+    public int effectiveDiscountBps() {
+        return orgDiscountRatioBps == null ? tierDefaultDiscountBps : orgDiscountRatioBps;
+    }
 }
