@@ -1,7 +1,8 @@
 -- Settles a pre-hold: release the reservation, then charge the actual amounts.
 -- Idempotent through the done marker, and deliberately still charges when the hold was already
 -- reclaimed, so crashing a request cannot become a way to get served for free.
--- KEYS[1] wallet, [2] hold hash, [3] done marker, [4] holds expiry, [5] org holds set, [6] pack held
+-- KEYS[1] wallet, [2] hold hash, [3] done marker, [4] holds expiry, [5] org holds set, [6] pack held,
+--       [7] pack availability
 -- ARGV[1] holdId, [2] cashToCharge, [3] bonusToCharge, [4] packUnitsConsumed, [5] doneTtlSeconds
 if redis.call('EXISTS', KEYS[3]) == 1 then
     return {'ALREADY_SETTLED'}
@@ -29,6 +30,13 @@ if holdExists == 1 then
     redis.call('DEL', KEYS[2])
     redis.call('ZREM', KEYS[4], ARGV[1])
     redis.call('SREM', KEYS[5], ARGV[1])
+end
+
+-- Keep the admission-side aggregate in step with what was actually consumed.
+local consumedUnits = tonumber(ARGV[4]) or 0
+if consumedUnits > 0 and redis.call('EXISTS', KEYS[7]) == 1 then
+    local available = tonumber(redis.call('GET', KEYS[7]) or '0') or 0
+    redis.call('SET', KEYS[7], math.max(0, available - consumedUnits))
 end
 
 local cash = tonumber(redis.call('HGET', KEYS[1], 'cash_micros') or '0') or 0

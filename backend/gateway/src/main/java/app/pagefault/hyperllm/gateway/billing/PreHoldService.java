@@ -154,7 +154,8 @@ public class PreHoldService {
                 GatewayRedisKeys.holdDone(holdId),
                 GatewayRedisKeys.holdsExpiry(),
                 GatewayRedisKeys.orgHolds(orgId),
-                GatewayRedisKeys.packHeld(orgId, modelCode)
+                GatewayRedisKeys.packHeld(orgId, modelCode),
+                GatewayRedisKeys.packAvailability(orgId, modelCode)
         );
         List<String> args = List.of(
                 holdId,
