@@ -384,7 +384,7 @@ public record BillingSettlementEvent(
 | **D3** 租约与心跳 | ✅ 已落地：300s 租约，心跳寄生在流式分片上并按 15s 节流，同一脚本续 hold 与并发计数 |
 | **D4** 回收 | ✅ 网关惰性回收已落地（准入前最多 3 条，按 ZSET score 做 CAS）；❌ admin 周期兜底未实现，随 2.4 的维护作业 |
 | **D5** 幂等 | ✅ 已落地：`gw:hold:done:{id}` 双标记；回收后到达的结算照扣并返回 `settledAfterReclaim=true`，事件与账本 `hold_id` 已打通 |
-| **D9** 灰度 | ⚠️ 部分落地：`prehold.enabled` 与组织白名单生效；`prehold.shadow` 只保留配置项、未接线（影子模式需要 2.4 的观测指标配合） |
+| **D9** 灰度 | ✅ 已落地：`prehold.enabled` 与组织白名单生效；`prehold.shadow` 是试运行模式——照常估算与分配、只记录「若真实预占会拒绝」的判定，然后走 Phase 1 准入，不产生任何 hold |
 | **D10** 测试 | ✅ 已落地：`PreHoldServiceIT` 十个用例跑真实 Redis，过期用改写 ZSET score 模拟 |
 
 **与 2.2 偏差的衔接**：批次（包/赠金）的 PG 扣减仍由 2.4 的账本事务完成；2.3 的 `settle` 脚本只做三件事——释放本笔预占、扣减 cash/bonus、按实际消耗递减 `gw:pack:avail` 聚合。因此包与赠金在 Redis 侧是「预占 + 聚合可用」两条线，在 PG 侧仍以结算为准，两条线由 300s TTL 的聚合重建收敛。
