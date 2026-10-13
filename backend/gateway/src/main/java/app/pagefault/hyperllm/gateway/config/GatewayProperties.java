@@ -3,6 +3,9 @@ package app.pagefault.hyperllm.gateway.config;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Data
 @ConfigurationProperties(prefix = "hyperllm")
 public class GatewayProperties {
@@ -10,6 +13,7 @@ public class GatewayProperties {
     private Security security = new Security();
     private Cache cache = new Cache();
     private Upstream upstream = new Upstream();
+    private Billing billing = new Billing();
 
     @Data
     public static class Security {
@@ -33,5 +37,22 @@ public class GatewayProperties {
         private int responseTimeoutSeconds = 120;
         private int maxRetryAttempts = 2;
         private int maxConnectionsPerProvider = 200;
+    }
+
+    /**
+     * Pre-hold tuning. The switches exist so a bad rollout can fall back to Phase 1 post-charge
+     * behaviour without a redeploy.
+     */
+    @Data
+    public static class Billing {
+        private boolean preholdEnabled = true;
+        private boolean preholdShadow = false;
+        private List<String> preholdOrgWhitelist = new ArrayList<>();
+        private long leaseTtlSeconds = 300;
+        private long heartbeatMinIntervalSeconds = 15;
+        private int safetyFactorBps = 11500;
+        private int defaultOutputTokens = 8192;
+        private int lazyReclaimBatch = 3;
+        private long packAvailabilityTtlSeconds = 300;
     }
 }

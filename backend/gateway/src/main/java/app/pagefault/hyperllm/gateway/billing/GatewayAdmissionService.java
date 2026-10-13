@@ -23,9 +23,10 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class GatewayAdmissionService {
 
-    public record AdmissionLease(UUID orgId, List<String> concurrencyKeys) {
+    /** Concurrency leases plus the pre-hold this request owns, if any. */
+    public record AdmissionLease(UUID orgId, List<String> concurrencyKeys, String holdId) {
         public static AdmissionLease empty(UUID orgId) {
-            return new AdmissionLease(orgId, List.of());
+            return new AdmissionLease(orgId, List.of(), null);
         }
     }
 
@@ -92,7 +93,7 @@ public class GatewayAdmissionService {
                     return Mono.just(result);
                 })
                 .flatMap(result -> switch (result) {
-                    case "OK" -> Mono.just(new AdmissionLease(orgId, List.copyOf(acquiredConcKeys)));
+                    case "OK" -> Mono.just(new AdmissionLease(orgId, List.copyOf(acquiredConcKeys), null));
                     case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
                     case "INSUFFICIENT_BALANCE" -> Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
                     case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));

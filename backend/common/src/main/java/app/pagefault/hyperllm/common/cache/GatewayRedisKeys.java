@@ -31,6 +31,30 @@ public final class GatewayRedisKeys {
         return "gw:cfg:route:" + modelCode;
     }
 
+    public static String hold(String holdId) {
+        return "gw:hold:" + holdId;
+    }
+
+    public static String holdDone(String holdId) {
+        return "gw:hold:done:" + holdId;
+    }
+
+    public static String holdsExpiry() {
+        return "gw:holds:exp";
+    }
+
+    public static String orgHolds(UUID orgId) {
+        return "gw:org:holds:" + orgId;
+    }
+
+    public static String packAvailability(UUID orgId, String modelCode) {
+        return "gw:pack:avail:" + orgId + ":" + modelCode;
+    }
+
+    public static String packHeld(UUID orgId, String modelCode) {
+        return "gw:pack:held:" + orgId + ":" + modelCode;
+    }
+
     public static String modelOverride(UUID orgId, UUID virtualModelId) {
         return "gw:cfg:override:" + orgId + ":" + virtualModelId;
     }

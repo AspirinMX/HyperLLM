@@ -284,6 +284,25 @@ public class GatewayConfigCacheService {
                 .subscribeOn(domainFallbackScheduler);
     }
 
+    /**
+     * Returns the pack units available to one model, filling the Redis aggregate with a short TTL on
+     * miss. The TTL is what keeps the aggregate self-healing: a settlement that decrements it and a
+     * concurrent rebuild cannot drift for longer than the TTL.
+     */
+    public Mono<Long> ensurePackAvailability(UUID orgId, String modelCode) {
+        String key = GatewayRedisKeys.packAvailability(orgId, modelCode);
+        return redisTemplate.opsForValue().get(key)
+                .map(GatewayConfigCacheService::parseLong)
+                .switchIfEmpty(Mono.fromCallable(() -> resourcePackRepository.sumRemainingUnits(
+                                orgId, modelCode, OffsetDateTime.now(ZoneOffset.UTC)))
+                        .subscribeOn(domainFallbackScheduler)
+                        .flatMap(units -> redisTemplate.opsForValue()
+                                .set(key, String.valueOf(units), Duration.ofSeconds(
+                                        properties.getBilling().getPackAvailabilityTtlSeconds()))
+                                .onErrorReturn(false)
+                                .thenReturn(units)));
+    }
+
     public void evictAllOverridesL1() {
         overrideL1.invalidateAll();
     }
