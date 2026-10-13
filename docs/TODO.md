@@ -112,15 +112,15 @@
 
 ### 2.2 三顺位抵扣与组织模型协议价
 
-- [ ] 实现按模型适用范围和到期顺序确定分摊的三顺位抵扣 `资源包（Token/次） → 赠金批次 → 现金`。
-- [ ] 接入组织级单模型协议价，沿用 `micro-USD` 整数精度与 `MicroUsd` 向上取整规则，输出逐批次分摊明细。
-- [ ] 验证过期或不适用的权益、部分抵扣、多批次抵扣、余额不足与定价生效边界。
+- [x] 实现按模型适用范围和到期顺序确定分摊的三顺位抵扣 `资源包（Token/次） → 赠金批次 → 现金`（`EntitlementAllocator`，含部分抵扣与 shortfall）。
+- [x] 接入组织级单模型协议价，沿用 `micro-USD` 整数精度与 `MicroUsd` 向上取整规则，输出逐批次分摊明细（`PricingResolver` + `AllocationDetailCodec`）。
+- [x] 验证过期或不适用的权益、部分抵扣、多批次抵扣、余额不足与定价生效边界（`EntitlementAllocatorTest`、`PricingResolverTest`、`CommercialBillingRepositoryIntegrationTest`）。
 
 ### 2.3 网关预占、流式结算与回收
 
-- [ ] 将 `gateway` 的 Redis Lua 计费升级为 `Pre-hold / Settle`，准入时原子预占，收尾时按实测 Usage 或估算用量结算并释放剩余预占。
-- [ ] 实现长流心跳续期、僵尸预占到期回收，以及结算和释放的幂等处理。
-- [ ] 用 Redis 容器测试验证并发请求防超支，以及断连、上游异常和实例退出后的结算与回收。
+- [x] 将 `gateway` 的 Redis Lua 计费升级为 `Pre-hold / Settle`，准入时原子预占，收尾时按实测 Usage 或估算用量结算并释放剩余预占（`prehold_admit` / `prehold_settle` / `prehold_release`）。
+- [x] 实现长流心跳续期、僵尸预占到期回收，以及结算和释放的幂等处理（心跳、网关惰性回收与双标记幂等已落地；admin 周期兜底按设计归 2.4）
+- [x] 用 Redis 容器测试验证并发请求防超支，以及断连、上游异常和实例退出后的结算与回收（`PreHoldServiceIT`，含 50 并发只放行 40 例）。
 
 ### 2.4 结算事件、账本落库与分区维护
 
