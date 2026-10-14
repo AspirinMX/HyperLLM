@@ -59,6 +59,7 @@ docker compose -f infra/docker-compose.yaml --profile observability --profile to
 - [Database Entity Design](./docs/design/01-database-design.md)
 - [Dependencies & Infrastructure Design](./docs/design/02-dependencies-and-infra.md)
 - [Backend Contracts Design](./docs/design/03-phase1-backend-contracts.md)
+- [Phase 2 Final Design](./docs/design/04-phase2-design.md)
 
 ## License
 

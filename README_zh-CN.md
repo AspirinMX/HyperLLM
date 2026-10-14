@@ -59,6 +59,7 @@ docker compose -f infra/docker-compose.yaml --profile observability --profile to
 - [数据库实体详细设计](./docs/design/01-database-design.md)
 - [工程依赖与基础设施编排设计](./docs/design/02-dependencies-and-infra.md)
 - [后端认证、REST API 与 Gateway 运行契约](./docs/design/03-phase1-backend-contracts.md)
+- [阶段二最终设计方案](./docs/design/04-phase2-design.md)
 
 ## 开源协议
 

@@ -11,8 +11,8 @@
 | :--- | :--- | :---: | :--- |
 | **Phase 0** | 仓库与多模块工程脚手架初始化 | ✅ 已完成 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
-| **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | 🚧 进行中（已完成 1.1–1.5 与 1.6 核心编码及测试；待补独立 `curl`/HTTP 联调脚本） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
-| **Phase 2** | 商业化计费、完整 `Pre-hold/Settle`、Outbox CDC 与 ClickHouse | ⏳ 待开始 | [01-database-design.md](./design/01-database-design.md) |
+| **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
+| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 至 2.3 已完成；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) |
 | **Phase 3** | 全协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
@@ -89,20 +89,50 @@
 | **G1** | 跨服务链路未验证：gateway 发结算事件、admin 消费落库，两半只在各自 JVM 里测过 | ✅ 已关闭：新增 `SettlementPipelineIT`，走真实 Kafka 监听器写入 `wallet_ledger`，并断言重放只落一行 | 2.0 |
 | **G2** | CDC 只发不验：E2E 第 5 步发完事件没有任何断言 | ✅ 已关闭：改为「吊销 key → 删 L2 → 发事件 → 轮询直到 401」，否则断言失败 | 2.0 |
 | **G3** | 没有活栈脚本，真实 Debezium/Kafka topic/Redis Lua 从未一起跑过 | ✅ 已关闭：`scripts/e2e/phase1-smoke.sh` + Compose `tools` profile 的 WireMock 上游 | 2.0 |
-| **G4** | `pricing == null` 时 `exactCostMicros = 0`，未配置定价的模型被免费使用 | ❌ 未修（会改变基线行为）；已在新设计稿中定义为拒绝并抛 `MODEL_PRICING_MISSING` | 2.2 |
-| **G5** | `deduct_wallet.lua` 不钳制下限，Redis 现金可为负；随后 `wallets.cash_balance_micros` 的 `CHECK (>= 0)` 让结算落库失败并无限重试 | ❌ 未修；分档预占 + 现金腿钳制后不再可能出现负值 | 2.3 |
+| **G4** | `pricing == null` 时 `exactCostMicros = 0`，未配置定价的模型被免费使用 | ✅ 已关闭：2.2 在准入阶段拒绝并抛 `MODEL_PRICING_MISSING`（见 [04-02 第 13 节](./design/04-02-entitlements.md)） | 2.2 |
+| **G5** | `deduct_wallet.lua` 不钳制下限，Redis 现金可为负；随后 `wallets.cash_balance_micros` 的 `CHECK (>= 0)` 让结算落库失败并无限重试 | ✅ 已关闭：分档预占 + 现金腿下限钳制（见 [04-03 第 16 节](./design/04-03-prehold-settle.md)）；滑动 TTL 落地前仍需补空键守卫 | 2.3 |
 | **G6** | `spring.kafka.listener.ack-mode` 未配置（默认 BATCH），而 `BillingSettlementConsumer` 声明了 `Acknowledgment` 参数 → **每条结算消息都抛异常，账本从未被 Kafka 写入** | ✅ 已修复：`admin/application.yml` 增补 `ack-mode: manual`；`SettlementPipelineIT` 现在能守住这条链路 | 2.0 |
-| **G7** | `BillingSettlementConsumer.onMessage` 调 `this.ingestIdempotent(...)` 属自调用，`@Transactional` 被代理绕过 → 监听器路径实际无事务（直调测试看不到） | ❌ 未修 | 2.4 |
-| **G8** | `wallet_ledger` 跨月入账、分区预建作业从未被测过 | ❌ 未修 | 2.4 |
+| **G7** | `BillingSettlementConsumer.onMessage` 调 `this.ingestIdempotent(...)` 属自调用，`@Transactional` 被代理绕过 → 监听器路径实际无事务（直调测试看不到） | ❌ 未修；已登记为 [方案 D-7](./design/04-phase2-design.md) | 2.5 |
+| **G8** | `wallet_ledger` 跨月入账、分区预建作业从未被测过 | ❌ 未修；全仓无任何 `@Scheduled` 作业，已登记为 [方案 D-13](./design/04-phase2-design.md) | 2.5 |
 
-## Phase 2：商业化计费、完整 CDC/Outbox 与 OLAP 管道闭环
+## Phase 2：Redis 权威层、商业化计费与账本闭环
 
-> 按 `2.0 → 2.1 → 2.2 → 2.3 → 2.4 → 2.5 → 2.6` 推进计费主线。2.7 可在用量与计价口径明确后并行，2.8 可在请求事件契约明确后并行。2.9 完成全链路验收。
+> 阶段划分依据 [阶段二最终设计方案](./design/04-phase2-design.md)，该方案是阶段二的唯一权威设计。每个阶段必须声明**依赖**与**验收手段**，依赖未满足不得开工。
+> 与旧划分相比的主要变化：**「Redis 权威层」从 2.2/2.3 的脚注提升为独立阶段 2.4**，其后各阶段整体顺延一位；2.5 与 2.6 紧邻，避免同一段事务写两遍。
 
-### 2.0 设计与 Phase 1 验收基线
+### 阶段地图
 
-- [ ] 梳理 Phase 1 遗留的 HTTP 联调缺口、结算事务边界、测试充值幂等性和并发超支问题，将修复与回归场景纳入对应开发步骤。
-- [ ] 完成 Phase 2 详细设计与评审，确认预占默认上限与超预占处理、历史余额与 Redis Key 迁移、支付渠道范围、ClickHouse 摄入方式及各步骤的事件和 API 契约。
+| 阶段 | 名称 | 目标 | 依赖 | 状态 |
+| :--- | :--- | :--- | :--- | :---: |
+| **2.0a** | Phase 1 基线收口 | 关闭 G1 至 G8，固化既有产出 | Phase 1 | ✅ |
+| **2.0b** | Phase 2 设计评审 | 落地六条基线、三层归属与事件契约 | 04-02、04-03 | 🚧 |
+| **2.1** | V4 schema 与领域仓储 | schema、jOOQ、9 组仓储 | Phase 1 | ✅ |
+| **2.2** | 定价与三顺位分摊 | 定价解析、分摊器、明细契约 | 2.1 | ✅ |
+| **2.3** | 预占、结算与回收 | 分档预占、流式结算、僵尸回收 | 2.1、2.2 | ✅ |
+| **2.4** | **Redis 权威层** | 批次镜像、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis | 2.0b 至 2.3 | ⏳ |
+| **2.5** | 结算落库与账本事务 | 逐批扣库、明细落库、事务边界、维护作业 | 2.4 | ⏳ |
+| **2.6** | Outbox 与 Redis 投影 | 正向变更幂等投影，移除直推 | 2.5 | ⏳ |
+| **2.7** | 支付、兑换码与资源包购买 | 下单、验签、回调、核销 | 2.5、2.6 | ⏳ |
+| **2.8** | 四层限流与项目预算 | Key、Project、Org、Channel 限流与预算拦截 | 2.4 | ⏳ |
+| **2.9** | ClickHouse 摄入与用量毛利 | 请求事件入仓、聚合查询 | 2.5 | ⏳ |
+| **2.10** | 告警、对账与全链路验收 | Webhook 告警、账务对账、HTTP 验收脚本 | 2.6 至 2.9 | ⏳ |
+
+### 2.0a Phase 1 基线收口
+
+- [x] 新增 `SettlementPipelineIT`，验证 gateway 发事件、admin 消费落库的跨服务链路（关闭 G1）。
+- [x] 将 E2E 的 CDC 步骤改为「吊销 key 后轮询直到 401」的真实断言（关闭 G2）。
+- [x] 新增 `scripts/e2e/phase1-smoke.sh` 与 Compose `tools` profile 的 WireMock 上游（关闭 G3）。
+- [x] 补 `admin` 的 `spring.kafka.listener.ack-mode: manual`，修复结算消息逐条抛异常的问题（关闭 G6）。
+- [x] 回填上方「Phase 1 遗留缺口登记」表中 G1 至 G8 的真实状态。
+
+### 2.0b Phase 2 设计评审
+
+- [ ] 评审并确认 [阶段二最终设计方案](./design/04-phase2-design.md)：六条基线、三层数据归属、P1 至 P12 不变量。
+- [ ] 以方案第 2 节取代 04-00 原 T3 关于「批次余额权威在 PostgreSQL」的表述，并同步修正 04-02 第 13 节与 04-03 第 16 节的口径。
+- [ ] 确认方案第 11 节的待确认项 Q1 至 Q4。
+- [ ] 确认结算事件最终契约：现金、赠金、资源包三桶 delta 加逐批明细，`legs[].id` 必填。
+
+**验收手段**：方案文档合并，且 04-00、04-02、04-03 的冲突口径已消除。
 
 ### 2.1 Flyway V4、jOOQ 与领域仓储
 
@@ -110,56 +140,115 @@
 - [x] 通过 `-Pjooq` 重新生成代码，补齐 `domain` 的领域模型和仓储（9 个 record、14 个枚举、9 组仓储契约与实现）。
 - [x] 通过 PostgreSQL 16 容器测试验证空库初始化、V3 升级、旧账本兼容性以及新表的关键约束（`V4MigrationPathIT`、`V4SchemaConstraintIT`、`CommercialBillingRepositoryIntegrationTest`，共 17 个用例）。
 
+**验收手段**：`./backend/mvnw -f backend/pom.xml verify -pl domain`。
+
 ### 2.2 三顺位抵扣与组织模型协议价
 
 - [x] 实现按模型适用范围和到期顺序确定分摊的三顺位抵扣 `资源包（Token/次） → 赠金批次 → 现金`（`EntitlementAllocator`，含部分抵扣与 shortfall）。
 - [x] 接入组织级单模型协议价，沿用 `micro-USD` 整数精度与 `MicroUsd` 向上取整规则，输出逐批次分摊明细（`PricingResolver` + `AllocationDetailCodec`）。
 - [x] 验证过期或不适用的权益、部分抵扣、多批次抵扣、余额不足与定价生效边界（`EntitlementAllocatorTest`、`PricingResolverTest`、`CommercialBillingRepositoryIntegrationTest`）。
 
+> **偏离登记**：方案第 4 节的批次镜像（`gw:pack:item`、`gw:bonus:item`）在本阶段未落地，导致结算读取 PostgreSQL。该偏离由 **2.4** 收敛（方案 D-2）。
+
 ### 2.3 网关预占、流式结算与回收
 
 - [x] 将 `gateway` 的 Redis Lua 计费升级为 `Pre-hold / Settle`，准入时原子预占，收尾时按实测 Usage 或估算用量结算并释放剩余预占（`prehold_admit` / `prehold_settle` / `prehold_release`）。
-- [x] 实现长流心跳续期、僵尸预占到期回收，以及结算和释放的幂等处理（心跳、网关惰性回收与双标记幂等已落地；admin 周期兜底按设计归 2.4）
+- [x] 实现长流心跳续期、僵尸预占到期回收，以及结算和释放的幂等处理（心跳、网关惰性回收与双标记幂等已落地；admin 周期兜底归 2.5）。
 - [x] 用 Redis 容器测试验证并发请求防超支，以及断连、上游异常和实例退出后的结算与回收（`PreHoldServiceIT`，含 50 并发只放行 40 例）。
 
-### 2.4 结算事件、账本落库与分区维护
+> **偏离登记**：本阶段只落地了聚合键 `gw:pack:avail` 与 `gw:pack:held`，未建逐批次镜像；手头脚本均未设置 TTL，心跳也未续期钱包键。三项均由 **2.4** 收敛（方案 D-2、D-3）。
 
-- [ ] 升级 `llm.billing.settlement` 事件，携带资源包与赠金分摊明细，兼容 Phase 1 事件重放。
-- [ ] 在 `admin` 同一事务内幂等写入 `wallet_ledger` 并更新钱包及权益余额，补齐失败重试和重放流程。
-- [ ] 预建 `wallet_ledger` 与 `audit_logs` 的未来月份分区，验证跨月入账、重复事件和消费者恢复。
+### 2.4 Redis 权威层
 
-### 2.5 Outbox CDC 与 Redis 加额同步
+> 本阶段完成后，方案 B1「键存活期间 Redis 是唯一权威」才真正成立。在此之前，结算仍依赖 PostgreSQL。
 
-- [ ] 在充值及权益发放事务中写入 `outbox_events`，按评审确定的方案切换 Phase 1 测试充值链路。
-- [ ] 在 V4 就绪后启用 Outbox Connector，由 `admin` 幂等消费 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`，同步钱包及权益变动。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
-- [ ] 验证业务事务回滚、重复投递和消费者停机恢复。恢复后已提交的加额与权益发放各生效一次。
+- [ ] 建立逐批次镜像：`gw:pack:{org}:{model}` 与 `gw:pack:item:{packId}`、`gw:bonus:{org}` 与 `gw:bonus:item:{grantId}`，载荷按方案 3.1 节（D-2）。
+- [ ] 实现租户维度 miss 加载协议：SingleFlight 去重、一次性加载钱包与两类批次、原子写回、统一 PEXPIRE 300s（方案 3.4 节）。
+- [ ] 实现滑动 TTL：补齐方案 3.2 节列出的全部续期点。`prehold_renew.lua` 必须新增 `gw:wallet` 与批次键的续期，否则长流跨 TTL 会造成组织被误判停用（D-3）。
+- [ ] 落实缺失键纪律：所有 Lua 先 EXISTS，缺失返回哨兵值，禁止在空键上 HINCRBY（D-3）。
+- [ ] 结算改读镜像：`resolveEntitlements` 不再查询 `resource_packs` 与 `bonus_grants`（D-1）。
+- [ ] 结算快照按方案扣除他人预占，避免吃掉他人冻结额度（D-8）。
+- [ ] 结算脚本逐批递减 item 并递减 `gw:pack:avail`；取消固定 TTL；超卖差额记指标而非静默钳位（D-9）。
+- [ ] 事件门禁补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
+- [ ] 修复心跳续期的 id 传递，使三层并发计数被正确续期（D-10）。
+- [ ] 控制面读 Redis：`console` 单租户钱包改读 Redis；`admin` 新增单租户钱包读接口，并在改余额前先加载 Redis（D-11）。
+- [ ] 展示口径：实时值同时给出余额、冻结、可用三个数，并附账本侧对照（方案 4.1 节）。
 
-### 2.6 支付、兑换码与资源包购买
+**验收手段**
+- 容器测试：滑动 TTL 续期，含「长流跨 TTL 后钱包键仍存在」与「空闲 300s 后键消失并可从 checkpoint 重建」。
+- 容器测试：空键哨兵、miss 加载原子性、并发加载只回源一次。
+- 断言：结算路径产生零次对 `resource_packs` / `bonus_grants` 的查询。
+- 断言：纯资源包请求产生一条 `llm.billing.settlement` 且 `packDeltaUnits` 非零。
+- 断言：结算后 `pack:avail`、`pack:held`、`held_*` 归零，item 余量按到期顺序递减。
 
-- [ ] 在 `console` 实现支付抽象、下单、订单查询和验签回调。Stripe、支付宝、微信支付的接入范围及顺序由 2.0 确认。
-- [ ] 交付兑换码核销、资源包购买及相应的 `admin` 运营接口，复用 2.5 的加额与权益发放链路。
+### 2.5 结算落库与账本事务
+
+- [ ] 按事件中的逐批明细，在 `admin` 同一事务内扣减 `resource_packs.remaining_units` 与 `bonus_grants.remaining_micros`（D-6）。
+- [ ] 将 `allocation_detail_json` 写入账本，`hold_id` 落列；`settledAfterReclaim` 为真时标记待人工复核（D-5）。
+- [ ] 修复结算落库的事务边界：将幂等写入移到独立 Bean 或使用显式事务模板（D-7、G7）。
+- [ ] 预建 `wallet_ledger` 与 `audit_logs` 的未来月份分区，验证跨月入账与重复事件（G8）。
+- [ ] 补齐定时作业：僵尸预占周期回收、批次过期 sweeper、分区预建（D-13）。
+- [ ] `remaining` 归零且 `status = ACTIVE` 时置为 `EXHAUSTED`。
+
+**验收手段**
+- 容器测试：跨月入账、重复事件只落一行、消费者恢复后余额一致。
+- 容器测试：批次余量扣减与账本 delta 一致；过期 sweeper 只写一次 `BONUS_EXPIRE`。
+- 断言：`allocation_detail_json` 非空，且可由明细复算出 `chargedMicros`。
+
+### 2.6 Outbox CDC 与 Redis 投影
+
+- [ ] 在充值及权益发放事务中写 `outbox_events`。
+- [ ] 启用 Outbox Connector，由 `admin` 幂等消费 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`，以 `gw:wallet:idem:{eventId}` 做幂等（P9）。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
+- [ ] **移除** Phase 1 的「提交后直推增量」，保证同一笔变更只有一条投影路径（方案 5.4 节）。
+- [ ] 投影一律用增量（HINCRBY），禁止绝对赋值（P5）；绝对目标操作须在写路径上读 Redis 实时值后换算 delta（P6）。
+
+**验收手段**
+- 容器测试：事务回滚不投递；重复投递只加一次钱；消费者停机恢复后余额一致。
+- 断言：同一笔充值在 Redis 只被应用一次（关闭直推后回归）。
+
+### 2.7 支付、兑换码与资源包购买
+
+- [ ] 在 `console` 实现支付抽象、下单、订单查询和验签回调。Stripe、支付宝、微信支付的接入范围及顺序由 2.0b 确认。
+- [ ] 交付兑换码核销、资源包购买及相应的 `admin` 运营接口，复用 2.6 的投影链路。
 - [ ] 通过沙箱和模拟测试验证支付成功、签名与金额校验、回调重放及兑换码并发核销。
 
-### 2.7 四层限流与项目预算
+**验收手段**：沙箱与模拟回调测试，覆盖验签失败、金额不符、回调重放、并发核销。
 
-- [ ] 补齐 API Key 和 Project 的 RPM/TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
+### 2.8 四层限流与项目预算
+
+- [ ] 补齐 API Key 和 Project 的 RPM 与 TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
 - [ ] 实现 Project 月度预算检查，软上限触发告警，硬上限在准入时拦截超预算请求。
 - [ ] 验证跨分钟限流、并发准入和预算超限的协议错误响应。
 
-### 2.8 ClickHouse 摄入、用量与毛利 API
+**验收手段**：跨分钟限流、并发准入、预算软硬限的协议错误体断言。
+
+### 2.9 ClickHouse 摄入、用量与毛利 API
 
 - [ ] 接通 `llm.request.events` 到 ClickHouse `llm_request_events` 和 `mv_usage_hourly` 的摄入，遵循 ZDR，仅落盘结构化用量元数据。
 - [ ] 在 `console` 提供按租户权限过滤的聚合用量查询，在 `admin` 提供毛利查询。
 - [ ] 验证重复投递后的指标准确性、明细与聚合的一致性、查询权限和 ZDR 约束。
 
-### 2.9 告警、对账与全链路验收
+**验收手段**：重复投递后指标一致性、明细与聚合一致性、ZDR 断言。
 
-- [ ] 上线低余额及 Project 月度软/硬预算的 Webhook 和邮件告警，验证冷却期与失败处理。
-- [ ] 在 `admin` 周期性核对 Redis 与 PostgreSQL 的钱包和权益余额，纳入 Kafka 待落账事件，监控结算积压和账务差异。
+### 2.10 告警、对账与全链路验收
+
+- [ ] 上线低余额及 Project 月度软硬预算的 Webhook 和邮件告警，验证冷却期与失败处理。
+- [ ] 在 `admin` 周期性对账，按方案 7.5 节的四项职责执行：账本折叠值与快照一致、快照与 Redis 差额可解释、批次之和等于赠金快照、`shortfall` 与 `settledAfterReclaim` 可解释。
+- [ ] 对账须覆盖 2.4 的「事件丢失」窗口：网关已扣 Redis 但账本无记录时，按账本定向修正（方案 7.4 节）。
 - [ ] 补齐可重复执行的 HTTP 联调脚本，覆盖充值或兑换、预占、SSE 调用、结算入账、报表与告警，并回归 Phase 1 的配置 CDC、故障重试和账本落盘。
 - [ ] 通过 Maven `test`、`verify` 和 Compose `pipeline` 配置校验，并在联调环境验证并发防超支、重复投递幂等和消费恢复后的余额一致性。
 
+**验收手段**：全链路 HTTP 脚本一次跑通；对账作业在人为注入偏差后能定位并修正。
+
 ---
+
+### Phase 2 依赖说明
+
+1. **2.4 是 2.5 的硬前置**：镜像必须先于「结算离开 PostgreSQL」，否则 2.5 落库时没有可信的批次归属。
+2. **2.5 必须早于或同批交付 2.6**：账本事务里要写 `outbox_events`，两阶段隔太远会导致同一段事务写两遍。
+3. **2.6 的切换必须先移除直推**：否则同一笔充值被应用两次，且重建无法修正。
+4. **2.8 只依赖 2.4**：限流与预算不依赖落库链路，可与 2.5 至 2.7 并行。
+
 
 ## Phase 3：全协议双向转译、智能路由与企业级治理
 
