@@ -336,7 +336,8 @@ CREATE TABLE outbox_events (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 供 2.4 的 purge：DELETE FROM outbox_events WHERE created_at < now() - interval '7 days'
+-- 该索引只为按时间 purge 服务。落地方案已改为按投递水位删除（04-phase2-design 5.5 节），
+-- 走 UUIDv7 主键区间即可，因此该索引将在 V4_2 中删除。此处保留以记录 V4 的原始形态。
 CREATE INDEX idx_outbox_events_created
     ON outbox_events (created_at);
 
@@ -683,7 +684,7 @@ V5 后（12 张）：+ model_org_grants, guardrail_policies
 ## 9. 对后续阶段的硬约束（本文交付的契约）
 
 1. **2.2** 必须用 `@>` 查询形态与 `expires_at` 排序（§5.3）；必须用 `EntitlementStatus` 处理两表；必须实现 `org_model_pricing_overrides` 的 L1 失效（§6）。
-2. **2.4** 的 purge 依赖 `idx_outbox_events_created`；分区预建作业复用 V3 的 `ensure_monthly_partition`，不得另写一套。
+2. **2.5 与 2.6** 的 purge 不再依赖 `idx_outbox_events_created`：改为按消费者回传的投递水位删除（走 UUIDv7 主键区间），该索引由 `V4_2` 删除；分区预建作业复用 V3 的 `ensure_monthly_partition`，不得另写一套。
 3. **2.5** 的 `outbox_events.payload` 必须自带 `idempotency_key`（T6），因为消费端只拿得到 payload。
 4. **2.6** 的关单扫描依赖 `idx_payment_orders_pending_expiry`；`order_no` 生成本阶段自定，但必须全局唯一。
 5. **2.9** 的对账以 `bonus_grants` / `resource_packs` 之和与 `wallet_ledger` 之和为真值（T3），`wallets.*` 只作快照比对。

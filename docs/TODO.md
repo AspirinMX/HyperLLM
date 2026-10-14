@@ -111,7 +111,7 @@
 | **2.3** | 预占、结算与回收 | 分档预占、流式结算、僵尸回收 | 2.1、2.2 | ✅ |
 | **2.4** | **Redis 权威层** | 批次镜像、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis、积压联动冻结 | 2.0b 至 2.3 | ⏳ |
 | **2.5** | 结算落库与账本事务 | 逐批扣库、明细落库、事务边界、维护作业 | 2.4 | ⏳ |
-| **2.6** | Outbox 与 Redis 投影 | 正向变更幂等投影，移除直推 | 2.5 | ⏳ |
+| **2.6** | Outbox 投递与生命周期 | 三条路径统一写 outbox；批量顺序插入与背压；Debezium 投递；水位删除 | 2.5 | ⏳ |
 | **2.7** | 支付、兑换码与资源包购买 | 下单、验签、回调、核销 | 2.5、2.6 | ⏳ |
 | **2.8** | 四层限流与项目预算 | Key、Project、Org、Channel 限流与预算拦截 | 2.4 | ⏳ |
 | **2.9** | ClickHouse 摄入与用量毛利 | 请求事件入仓、聚合查询 | 2.5 | ⏳ |
@@ -197,22 +197,32 @@
 - [ ] 预建 `wallet_ledger` 与 `audit_logs` 的未来月份分区，验证跨月入账与重复事件（G8）。
 - [ ] 补齐定时作业：僵尸预占周期回收、批次过期 sweeper、分区预建（D-13）。
 - [ ] `remaining` 归零且 `status = ACTIVE` 时置为 `EXHAUSTED`。
+- [ ] 消费者每处理完一批回传投递水位（已处理到的 outbox id），供 purge 使用（方案 5.5 节）。
 
 **验收手段**
 - 容器测试：跨月入账、重复事件只落一行、消费者恢复后余额一致。
 - 容器测试：批次余量扣减与账本 delta 一致；过期 sweeper 只写一次 `BONUS_EXPIRE`。
 - 断言：`allocation_detail_json` 非空，且可由明细复算出 `chargedMicros`。
 
-### 2.6 Outbox CDC 与 Redis 投影
+### 2.6 Outbox 投递与生命周期
 
-- [ ] 在充值及权益发放事务中写 `outbox_events`。
-- [ ] 启用 Outbox Connector，由 `admin` 幂等消费 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`，以 `gw:wallet:idem:{eventId}` 做幂等（P9）。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
-- [ ] **移除** Phase 1 的「提交后直推增量」，保证同一笔变更只有一条投影路径（方案 5.4 节）。
-- [ ] 投影一律用增量（HINCRBY），禁止绝对赋值（P5）；绝对目标操作须在写路径上读 Redis 实时值后换算 delta（P6）。
+> 三条改余额的路径在此统一：先改 Redis，再写 outbox，由 Debezium 投递、消费者落账本。本阶段完成后，网关不再直投 Kafka。
+
+- [ ] 落地统一写入口：Redis Lua（含幂等标记）加重试，成功后写 `outbox_events`；三条路径共用（方案 5.1 节）。
+- [ ] 网关侧批量顺序写入：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接，与冷回源隔离（方案 5.4 节）。
+- [ ] 背压与溢出：队列满时降级为同步单条插入（超时 1 秒），仍失败返回 503；配套 `gateway_outbox_queue_depth`、`gateway_outbox_sync_fallback_total`、`gateway_outbox_insert_failures_total` 指标与 PG 不可用告警（方案 5.4 节）。
+- [ ] 停用「直投 Kafka」：删掉 `GatewayTelemetryService` 的结算事件直发路径，改走 outbox。
+- [ ] 启用 Outbox Connector，投递至 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`；事件契约与幂等键与消耗路径完全一致。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
+- [ ] 水位删除作业：每 30 秒执行 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；**不设时间保留期**，删除只解决存储，与投递无关（WAL 才是投递源）；水位停滞超过 24 小时时按时间兜底删除并打 P1 告警（方案 5.5 节）。
+- [ ] 发 `V4_2__drop_outbox_created_index.sql` 删除 `idx_outbox_events_created`，purge 改走 UUIDv7 主键区间；同步刷新 `-Pjooq`。
+- [ ] `outbox_events` 表参数：`fillfactor = 100`；确认只追加、不更新，purge 之外无删除。
 
 **验收手段**
-- 容器测试：事务回滚不投递；重复投递只加一次钱；消费者停机恢复后余额一致。
-- 断言：同一笔充值在 Redis 只被应用一次（关闭直推后回归）。
+- 容器测试：批量插入后行数正确、UUIDv7 单调、无二级索引仍能按区间删除。
+- 容器测试：队列满时降级同步插入仍成功落行；模拟 PG 不可用断言返回 503 而非静默丢弃。
+- 断言：水位推进后表行数收敛到未确认事件数量级，且不随时间线性增长。
+- 断言：三条路径产生的事件契约一致，消费者无需分支即可处理。
+
 
 ### 2.7 支付、兑换码与资源包购买
 
@@ -253,8 +263,12 @@
 ### Phase 2 依赖说明
 
 1. **2.4 是 2.5 的硬前置**：镜像必须先于「结算离开 PostgreSQL」，否则 2.5 落库时没有可信的批次归属。
-2. **2.5 必须早于或同批交付 2.6**：账本事务里要写 `outbox_events`，两阶段隔太远会导致同一段事务写两遍。
-3. **2.6 的切换必须先移除直推**：否则同一笔充值被应用两次，且重建无法修正。
+2. **2.5 与 2.6 必须相邻交付**：2.5 的消费者要回传投递水位，2.6 的 purge 依赖它；两者隔开会让 outbox 表无界增长。
+3. **2.6 完成后网关才停止直投 Kafka**：在此之前两条投递通道并存是允许的，因为事件契约与消费者相同、且都能幂等处理；但必须在同一版本内完成切换，不得长期双轨。
+4. **数据面从此依赖 PostgreSQL**：网关每请求写一行 outbox，PG 不可用即返回 503。PG 的可用性目标需与网关同级，不做 fail-open。
+5. **2.8 只依赖 2.4**：限流与预算不依赖落库链路，可与 2.5 至 2.7 并行。
+
+
 4. **2.8 只依赖 2.4**：限流与预算不依赖落库链路，可与 2.5 至 2.7 并行。
 
 

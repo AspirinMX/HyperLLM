@@ -686,7 +686,7 @@ erDiagram
 | `aggregateid` | `VARCHAR(64)` | `NOT NULL` | Kafka Partition Key（统一填 `org_id::text` 保证单组织顺序） |
 | `type` | `VARCHAR(64)` | `NOT NULL` | 领域事件类型 |
 | `payload` | `JSONB` | `NOT NULL` | 完整自包含变更载荷（含 `idempotency_key`、delta 金额/单位、`expires_at` 等） |
-| `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` | 创建时间（定时任务清理 N 天前已投递记录，或启用写入即删模式） |
+| `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` | 创建时间。清理方式为按消费者回传的投递水位删除，不设时间保留期（见 [04-phase2-design 第 5.5 节](./04-phase2-design.md)） |
 
 ---
 
