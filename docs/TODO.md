@@ -12,7 +12,7 @@
 | **Phase 0** | 仓库与多模块工程脚手架初始化 | ✅ 已完成 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
 | **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
-| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 至 2.3 已完成；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) |
+| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 与 2.1–2.3 已完成；2.0b 进行中；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) |
 | **Phase 3** | 全协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
@@ -109,7 +109,7 @@
 | **2.1** | V4 schema 与领域仓储 | schema、jOOQ、9 组仓储 | Phase 1 | ✅ |
 | **2.2** | 定价与三顺位分摊 | 定价解析、分摊器、明细契约 | 2.1 | ✅ |
 | **2.3** | 预占、结算与回收 | 分档预占、流式结算、僵尸回收 | 2.1、2.2 | ✅ |
-| **2.4** | **Redis 权威层** | 批次镜像、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis | 2.0b 至 2.3 | ⏳ |
+| **2.4** | **Redis 权威层** | 批次镜像、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis、积压联动冻结 | 2.0b 至 2.3 | ⏳ |
 | **2.5** | 结算落库与账本事务 | 逐批扣库、明细落库、事务边界、维护作业 | 2.4 | ⏳ |
 | **2.6** | Outbox 与 Redis 投影 | 正向变更幂等投影，移除直推 | 2.5 | ⏳ |
 | **2.7** | 支付、兑换码与资源包购买 | 下单、验签、回调、核销 | 2.5、2.6 | ⏳ |
@@ -127,9 +127,9 @@
 
 ### 2.0b Phase 2 设计评审
 
-- [ ] 评审并确认 [阶段二最终设计方案](./design/04-phase2-design.md)：六条基线、三层数据归属、P1 至 P12 不变量。
-- [ ] 以方案第 2 节取代 04-00 原 T3 关于「批次余额权威在 PostgreSQL」的表述，并同步修正 04-02 第 13 节与 04-03 第 16 节的口径。
-- [ ] 确认方案第 11 节的待确认项 Q1 至 Q4。
+- [x] 评审并确认 [阶段二最终设计方案](./design/04-phase2-design.md)：六条基线、三层数据归属、P1 至 P12 不变量。
+- [x] 以方案第 2 节取代 04-00 原 T3 关于「批次余额权威在 PostgreSQL」的表述，并同步修正 04-02 第 13 节与 04-03 第 16 节的口径。
+- [x] 确认方案第 11 节的决议：Q1 废除 `gw:ent:ver` / `gw:ent:stale`；Q2 实现积压检测与 TTL 联动；Q3 租户列表内联余额；Q4 按租户整体加载。
 - [ ] 确认结算事件最终契约：现金、赠金、资源包三桶 delta 加逐批明细，`legs[].id` 必填。
 
 **验收手段**：方案文档合并，且 04-00、04-02、04-03 的冲突口径已消除。
@@ -173,6 +173,11 @@
 - [ ] 修复心跳续期的 id 传递，使三层并发计数被正确续期（D-10）。
 - [ ] 控制面读 Redis：`console` 单租户钱包改读 Redis；`admin` 新增单租户钱包读接口，并在改余额前先加载 Redis（D-11）。
 - [ ] 展示口径：实时值同时给出余额、冻结、可用三个数，并附账本侧对照（方案 4.1 节）。
+- [ ] `admin` 新增积压监视器：AdminClient 汇总各分区 lag，按排空时间判定级别，每 15s 向 Redis 写入 `gw:health:ledger-lag` 与 `gw:health:ledger-lag:armed`，并暴露 Micrometer gauge（方案 7.3 节）。
+- [ ] 网关实现 TTL 联动：触碰键时读健康信号（本地缓存 5s），OK 则 `PEXPIRE` 300s，DEGRADED 则 `PERSIST`；信号缺失但 `armed` 存在时按 DEGRADED 处理（方案 7.3.4 节）。
+- [ ] 积压期重建可观测：累加 `gateway_rebuild_while_degraded_total`（按组织打标），并把组织加入待对账集合（方案 7.3.5 节）。
+- [ ] 配置项落地：`lag-monitor.*`、`sliding-ttl.freeze`、`sliding-ttl.freeze-orgs`、`sliding-ttl.ttl-seconds`（方案 11.1 节）。
+- [ ] `admin` 租户列表内联余额：`organizations LEFT JOIN wallets` 一次取出，列表不含冻结与可用，标注「账本已确认」（D-12、方案 4.2 节）。
 
 **验收手段**
 - 容器测试：滑动 TTL 续期，含「长流跨 TTL 后钱包键仍存在」与「空闲 300s 后键消失并可从 checkpoint 重建」。
@@ -180,6 +185,9 @@
 - 断言：结算路径产生零次对 `resource_packs` / `bonus_grants` 的查询。
 - 断言：纯资源包请求产生一条 `llm.billing.settlement` 且 `packDeltaUnits` 非零。
 - 断言：结算后 `pack:avail`、`pack:held`、`held_*` 归零，item 余量按到期顺序递减。
+- 容器测试：模拟积压（写入健康信号为 DEGRADED），断言被触碰的键 TTL 被摘除、恢复后重新装上 300s。
+- 单测：健康信号四种状态（OK、DEGRADED、armed 缺失、armed 在但数据过期）各自映射到正确的网关动作。
+- 断言：`admin` 租户列表查询为常数条 SQL，不随租户数增长。
 
 ### 2.5 结算落库与账本事务
 
