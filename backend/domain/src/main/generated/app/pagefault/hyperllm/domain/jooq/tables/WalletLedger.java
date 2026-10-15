@@ -156,6 +156,16 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
      */
     public final TableField<WalletLedgerRecord, UUID> HOLD_ID = createField(DSL.name("hold_id"), SQLDataType.UUID, this, "");
 
+    /**
+     * The column <code>public.wallet_ledger.shortfall_micros</code>.
+     */
+    public final TableField<WalletLedgerRecord, Long> SHORTFALL_MICROS = createField(DSL.name("shortfall_micros"), SQLDataType.BIGINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.BIGINT)), this, "");
+
+    /**
+     * The column <code>public.wallet_ledger.settled_after_reclaim</code>.
+     */
+    public final TableField<WalletLedgerRecord, Boolean> SETTLED_AFTER_RECLAIM = createField(DSL.name("settled_after_reclaim"), SQLDataType.BOOLEAN.nullable(false).defaultValue(DSL.field(DSL.raw("false"), SQLDataType.BOOLEAN)), this, "");
+
     private WalletLedger(Name alias, Table<WalletLedgerRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -296,6 +306,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
     @Override
     public List<Check<WalletLedgerRecord>> getChecks() {
         return Arrays.asList(
+            Internal.createCheck(this, DSL.name("chk_wallet_ledger_shortfall_non_negative"), "((shortfall_micros >= 0))", true),
             Internal.createCheck(this, DSL.name("wallet_ledger_ledger_type_check"), "(((ledger_type)::text = ANY ((ARRAY['RECHARGE'::character varying, 'CONSUME'::character varying, 'BONUS_GRANT'::character varying, 'BONUS_EXPIRE'::character varying, 'REFUND'::character varying, 'ADJUST'::character varying])::text[])))", true)
         );
     }

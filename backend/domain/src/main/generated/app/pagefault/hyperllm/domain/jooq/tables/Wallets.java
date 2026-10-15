@@ -110,6 +110,11 @@ public class Wallets extends TableImpl<WalletsRecord> {
      */
     public final TableField<WalletsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.wallets.last_applied_event_id</code>.
+     */
+    public final TableField<WalletsRecord, UUID> LAST_APPLIED_EVENT_ID = createField(DSL.name("last_applied_event_id"), SQLDataType.UUID, this, "");
+
     private Wallets(Name alias, Table<WalletsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

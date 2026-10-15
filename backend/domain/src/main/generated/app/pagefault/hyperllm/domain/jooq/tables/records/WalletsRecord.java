@@ -171,6 +171,21 @@ public class WalletsRecord extends UpdatableRecordImpl<WalletsRecord> {
         return (OffsetDateTime) get(9);
     }
 
+    /**
+     * Setter for <code>public.wallets.last_applied_event_id</code>.
+     */
+    public WalletsRecord setLastAppliedEventId(UUID value) {
+        set(10, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallets.last_applied_event_id</code>.
+     */
+    public UUID getLastAppliedEventId() {
+        return (UUID) get(10);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -194,7 +209,7 @@ public class WalletsRecord extends UpdatableRecordImpl<WalletsRecord> {
     /**
      * Create a detached, initialised WalletsRecord
      */
-    public WalletsRecord(UUID orgId, Long cashBalanceMicros, Long bonusBalanceMicros, Long totalRechargedMicros, Long totalBonusGrantedMicros, Long totalConsumedCashMicros, Long totalConsumedBonusMicros, Long lowBalanceThresholdMicros, Long version, OffsetDateTime updatedAt) {
+    public WalletsRecord(UUID orgId, Long cashBalanceMicros, Long bonusBalanceMicros, Long totalRechargedMicros, Long totalBonusGrantedMicros, Long totalConsumedCashMicros, Long totalConsumedBonusMicros, Long lowBalanceThresholdMicros, Long version, OffsetDateTime updatedAt, UUID lastAppliedEventId) {
         super(Wallets.WALLETS);
 
         setOrgId(orgId);
@@ -207,6 +222,7 @@ public class WalletsRecord extends UpdatableRecordImpl<WalletsRecord> {
         setLowBalanceThresholdMicros(lowBalanceThresholdMicros);
         setVersion(version);
         setUpdatedAt(updatedAt);
+        setLastAppliedEventId(lastAppliedEventId);
         resetChangedOnNotNull();
     }
 }

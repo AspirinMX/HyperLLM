@@ -19,6 +19,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations;
 import app.pagefault.hyperllm.domain.jooq.tables.OutboxEvents;
+import app.pagefault.hyperllm.domain.jooq.tables.OutboxWatermark;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
@@ -115,6 +116,11 @@ public class Tables {
      * The table <code>public.outbox_events</code>.
      */
     public static final OutboxEvents OUTBOX_EVENTS = OutboxEvents.OUTBOX_EVENTS;
+
+    /**
+     * The table <code>public.outbox_watermark</code>.
+     */
+    public static final OutboxWatermark OUTBOX_WATERMARK = OutboxWatermark.OUTBOX_WATERMARK;
 
     /**
      * The table <code>public.payment_orders</code>.

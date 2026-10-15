@@ -17,7 +17,6 @@ import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations;
-import app.pagefault.hyperllm.domain.jooq.tables.OutboxEvents;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
@@ -59,7 +58,6 @@ public class Indexes {
     public static final Index IDX_ORG_MEMBERS_USER = Internal.createIndex(DSL.name("idx_org_members_user"), OrgMembers.ORG_MEMBERS, new OrderField[] { OrgMembers.ORG_MEMBERS.USER_ID }, false);
     public static final Index IDX_ORG_OVERRIDE_LOOKUP = Internal.createIndex(DSL.name("idx_org_override_lookup"), OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES, new OrderField[] { OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES.ORG_ID, OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES.VIRTUAL_MODEL_ID, OrgModelPricingOverrides.ORG_MODEL_PRICING_OVERRIDES.EFFECTIVE_FROM.desc() }, false);
     public static final Index IDX_ORGANIZATIONS_OWNER = Internal.createIndex(DSL.name("idx_organizations_owner"), Organizations.ORGANIZATIONS, new OrderField[] { Organizations.ORGANIZATIONS.OWNER_USER_ID }, false);
-    public static final Index IDX_OUTBOX_EVENTS_CREATED = Internal.createIndex(DSL.name("idx_outbox_events_created"), OutboxEvents.OUTBOX_EVENTS, new OrderField[] { OutboxEvents.OUTBOX_EVENTS.CREATED_AT }, false);
     public static final Index IDX_PAYMENT_ORDERS_ORG_CREATED = Internal.createIndex(DSL.name("idx_payment_orders_org_created"), PaymentOrders.PAYMENT_ORDERS, new OrderField[] { PaymentOrders.PAYMENT_ORDERS.ORG_ID, PaymentOrders.PAYMENT_ORDERS.CREATED_AT.desc() }, false);
     public static final Index IDX_PAYMENT_ORDERS_PENDING_EXPIRY = Internal.createIndex(DSL.name("idx_payment_orders_pending_expiry"), PaymentOrders.PAYMENT_ORDERS, new OrderField[] { PaymentOrders.PAYMENT_ORDERS.EXPIRES_AT }, false);
     public static final Index IDX_PRICING_RULES_MODEL_EFFECTIVE = Internal.createIndex(DSL.name("idx_pricing_rules_model_effective"), PricingRules.PRICING_RULES, new OrderField[] { PricingRules.PRICING_RULES.VIRTUAL_MODEL_ID, PricingRules.PRICING_RULES.EFFECTIVE_FROM.desc() }, false);

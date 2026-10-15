@@ -161,12 +161,27 @@ class V4SchemaConstraintIT extends AbstractPostgresIntegrationTest {
                 "idx_org_override_lookup",
                 "idx_notification_endpoints_org",
                 "idx_billing_alert_rules_org",
-                "idx_outbox_events_created",
                 "idx_wallet_ledger_ref_order"
         );
         List<String> actual = dsl.fetch("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
                 .getValues(0, String.class);
         assertThat(actual).containsAll(expected);
+    }
+
+    @Test
+    void dropsTheOutboxCreatedIndexBecausePurgingWalksThePrimaryKey() {
+        List<String> actual = dsl.fetch("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+                .getValues(0, String.class);
+        assertThat(actual).doesNotContain("idx_outbox_events_created");
+    }
+
+    @Test
+    void carriesTheSettlementPipelineColumns() {
+        assertThat(dsl.fetchOne("SELECT shortfall_micros, settled_after_reclaim FROM wallet_ledger LIMIT 0"))
+                .isNotNull();
+        assertThat(dsl.fetchOne("SELECT last_applied_event_id FROM wallets LIMIT 0")).isNotNull();
+        assertThat(dsl.fetchOne("SELECT last_event_id, updated_at FROM outbox_watermark LIMIT 0")).isNotNull();
+        assertThat(dsl.fetchValue("SELECT count(*) FROM outbox_watermark", Integer.class)).isEqualTo(1);
     }
 
     private void insertOrder(String orderNo, String idempotencyKey, UUID orgId, String externalTxId) {

@@ -4,20 +4,16 @@
 package app.pagefault.hyperllm.domain.jooq.tables;
 
 
-import app.pagefault.hyperllm.domain.jooq.Indexes;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.records.OutboxEventsRecord;
 
 import java.time.OffsetDateTime;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.List;
 import java.util.UUID;
 
 import org.jooq.Condition;
 import org.jooq.Field;
-import org.jooq.Index;
 import org.jooq.JSONB;
 import org.jooq.Name;
 import org.jooq.PlainSQL;
@@ -118,11 +114,6 @@ public class OutboxEvents extends TableImpl<OutboxEventsRecord> {
     @Override
     public Schema getSchema() {
         return aliased() ? null : Public.PUBLIC;
-    }
-
-    @Override
-    public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_OUTBOX_EVENTS_CREATED);
     }
 
     @Override

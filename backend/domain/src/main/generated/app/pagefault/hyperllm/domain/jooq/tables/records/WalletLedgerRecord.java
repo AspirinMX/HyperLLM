@@ -292,6 +292,36 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         return (UUID) get(17);
     }
 
+    /**
+     * Setter for <code>public.wallet_ledger.shortfall_micros</code>.
+     */
+    public WalletLedgerRecord setShortfallMicros(Long value) {
+        set(18, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallet_ledger.shortfall_micros</code>.
+     */
+    public Long getShortfallMicros() {
+        return (Long) get(18);
+    }
+
+    /**
+     * Setter for <code>public.wallet_ledger.settled_after_reclaim</code>.
+     */
+    public WalletLedgerRecord setSettledAfterReclaim(Boolean value) {
+        set(19, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallet_ledger.settled_after_reclaim</code>.
+     */
+    public Boolean getSettledAfterReclaim() {
+        return (Boolean) get(19);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -315,7 +345,7 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
     /**
      * Create a detached, initialised WalletLedgerRecord
      */
-    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt, UUID holdId) {
+    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt, UUID holdId, Long shortfallMicros, Boolean settledAfterReclaim) {
         super(WalletLedger.WALLET_LEDGER);
 
         setId(id);
@@ -336,6 +366,8 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         setDescription(description);
         setCreatedAt(createdAt);
         setHoldId(holdId);
+        setShortfallMicros(shortfallMicros);
+        setSettledAfterReclaim(settledAfterReclaim);
         resetChangedOnNotNull();
     }
 }
