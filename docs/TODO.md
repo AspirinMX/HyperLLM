@@ -12,7 +12,7 @@
 | **Phase 0** | 仓库与多模块工程脚手架初始化 | ✅ 已完成 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
 | **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
-| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 与 2.1–2.3 已完成；2.0b 进行中；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) |
+| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 与 2.1–2.3 已完成；2.0b 进行中；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
 | **Phase 3** | 全协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
@@ -97,8 +97,9 @@
 
 ## Phase 2：Redis 权威层、商业化计费与账本闭环
 
-> 阶段划分依据 [阶段二最终设计方案](./design/04-phase2-design.md)，该方案是阶段二的唯一权威设计。每个阶段必须声明**依赖**与**验收手段**，依赖未满足不得开工。
+> 阶段划分依据 [阶段二最终设计方案](./design/04-phase2-design.md)，它持有阶段二的基线与决议；机制与验收细节见 [04-04-settlement-pipeline.md](./design/04-04-settlement-pipeline.md)。每个阶段必须声明**依赖**与**验收手段**，依赖未满足不得开工。
 > 与旧划分相比的主要变化：**「Redis 权威层」从 2.2/2.3 的脚注提升为独立阶段 2.4**，其后各阶段整体顺延一位；2.5 与 2.6 紧邻，避免同一段事务写两遍。
+> 2.4 至 2.6 的机制、时序、配置与验收以 [04-04-settlement-pipeline.md](./design/04-04-settlement-pipeline.md) 为准；本文只保留任务分解与验收手段。
 
 ### 阶段地图
 
@@ -109,9 +110,9 @@
 | **2.1** | V4 schema 与领域仓储 | schema、jOOQ、9 组仓储 | Phase 1 | ✅ |
 | **2.2** | 定价与三顺位分摊 | 定价解析、分摊器、明细契约 | 2.1 | ✅ |
 | **2.3** | 预占、结算与回收 | 分档预占、流式结算、僵尸回收 | 2.1、2.2 | ✅ |
-| **2.4** | **Redis 权威层** | 批次镜像、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis、积压联动冻结 | 2.0b 至 2.3 | ⏳ |
-| **2.5** | 结算落库与账本事务 | 逐批扣库、明细落库、事务边界、维护作业 | 2.4 | ⏳ |
-| **2.6** | Outbox 投递与生命周期 | 三条路径统一写 outbox；批量顺序插入与背压；Debezium 投递；水位删除 | 2.5 | ⏳ |
+| **2.4** | **Redis 权威层** | 逐批次冻结、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis、全局重建闸门 | 2.0b 至 2.3 | ⏳ |
+| **2.5** | 结算落库与账本事务 | 逐腿扣库、明细落库、事务边界、折叠恒等、维护作业、对账工单 | 2.4 | ⏳ |
+| **2.6** | Outbox 投递与生命周期 | 消耗异步批量、发放同事务提交；事件副本与巡检重投；Debezium 投递；水位删除 | 2.5 | ⏳ |
 | **2.7** | 支付、兑换码与资源包购买 | 下单、验签、回调、核销 | 2.5、2.6 | ⏳ |
 | **2.8** | 四层限流与项目预算 | Key、Project、Org、Channel 限流与预算拦截 | 2.4 | ⏳ |
 | **2.9** | ClickHouse 摄入与用量毛利 | 请求事件入仓、聚合查询 | 2.5 | ⏳ |
@@ -160,69 +161,69 @@
 
 ### 2.4 Redis 权威层
 
-> 本阶段完成后，方案 B1「键存活期间 Redis 是唯一权威」才真正成立。在此之前，结算仍依赖 PostgreSQL。
+> 本阶段完成后，方案 B1「键存活期间 Redis 是唯一权威」才真正成立。机制、时序与配置以 [04-04 第 2 节](./design/04-04-settlement-pipeline.md) 为准。
 
-- [ ] 建立逐批次镜像：`gw:pack:{org}:{model}` 与 `gw:pack:item:{packId}`、`gw:bonus:{org}` 与 `gw:bonus:item:{grantId}`，载荷按方案 3.1 节（D-2）。
-- [ ] 实现租户维度 miss 加载协议：SingleFlight 去重、一次性加载钱包与两类批次、原子写回、统一 PEXPIRE 300s（方案 3.4 节）。
-- [ ] 实现滑动 TTL：补齐方案 3.2 节列出的全部续期点。`prehold_renew.lua` 必须新增 `gw:wallet` 与批次键的续期，否则长流跨 TTL 会造成组织被误判停用（D-3）。
-- [ ] 落实缺失键纪律：所有 Lua 先 EXISTS，缺失返回哨兵值，禁止在空键上 HINCRBY（D-3）。
-- [ ] 结算改读镜像：`resolveEntitlements` 不再查询 `resource_packs` 与 `bonus_grants`（D-1）。
-- [ ] 结算快照按方案扣除他人预占，避免吃掉他人冻结额度（D-8）。
-- [ ] 结算脚本逐批递减 item 并递减 `gw:pack:avail`；取消固定 TTL；超卖差额记指标而非静默钳位（D-9）。
-- [ ] 事件门禁补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
-- [ ] 修复心跳续期的 id 传递，使三层并发计数被正确续期（D-10）。
-- [ ] 控制面读 Redis：`console` 单租户钱包改读 Redis；`admin` 新增单租户钱包读接口，并在改余额前先加载 Redis（D-11）。
-- [ ] 展示口径：实时值同时给出余额、冻结、可用三个数，并附账本侧对照（方案 4.1 节）。
-- [ ] `admin` 新增积压监视器：AdminClient 汇总各分区 lag，按排空时间判定级别，每 15s 向 Redis 写入 `gw:health:ledger-lag` 与 `gw:health:ledger-lag:armed`，并暴露 Micrometer gauge（方案 7.3 节）。
-- [ ] 网关实现 TTL 联动：触碰键时读健康信号（本地缓存 5s），OK 则 `PEXPIRE` 300s，DEGRADED 则 `PERSIST`；信号缺失但 `armed` 存在时按 DEGRADED 处理（方案 7.3.4 节）。
-- [ ] 积压期重建可观测：累加 `gateway_rebuild_while_degraded_total`（按组织打标），并把组织加入待对账集合（方案 7.3.5 节）。
-- [ ] 配置项落地：`lag-monitor.*`、`sliding-ttl.freeze`、`sliding-ttl.freeze-orgs`、`sliding-ttl.ttl-seconds`（方案 11.1 节）。
-- [ ] `admin` 租户列表内联余额：`organizations LEFT JOIN wallets` 一次取出，列表不含冻结与可用，标注「账本已确认」（D-12、方案 4.2 节）。
+- [ ] **逐批次冻结**：准入携带逐条腿（PACK 带 packId 与 units、BONUS 带 grantId、CASH 无 id），item 键上记 `held_units` / `held_micros`，hold 存 `legs`；结算以 hold 的腿为快照重跑分摊，不再重新查询（D-1、D-2、D-8）。
+- [ ] **废除三个聚合字段**：`general_bonus_micros`、`gw:pack:avail`、`gw:pack:held`。赠金总额由快照脚本按 `score > now` 现算，连带关闭「TTL 冻结时过期赠金仍可花」的漏洞（D-9 作废）。
+- [ ] **快照读原语** `prehold_snapshot.lua`：一次往返返回钱包与逐条腿，网关准入、结算重分摊、console 与 admin 单租户查询共用。该脚本先 ZRANGE 再拼 item 键，**与 Redis Cluster 不兼容**，计费实例必须按租户分 cell。
+- [ ] **加载协议**：只补缺失（存在即跳过）、键级互斥（缺失时禁止 delta 写入）、单 Lua 原子写入后统一 PEXPIRE。
+- [ ] **滑动 TTL 全续期点**：补 `prehold_renew.lua` 的钱包与批次键（D-3），修正心跳把 orgId 当 projectId 传入（D-10），并实现实例本地续期节流（每键 60 秒最多一次）。
+- [ ] **事件门禁**补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
+- [ ] **控制面读 Redis**：console 单租户钱包改读快照脚本；admin 新增单租户实时查询，改余额前先加载（D-11）；租户列表 `organizations LEFT JOIN wallets` 内联余额并标注「账本已确认」（D-12）。
+- [ ] **健康信号与全局重建闸门**：admin 写 `gw:health:ledger-lag` 与 `:armed`；网关本地缓存 5 秒，DEGRADED 时对触碰到的键 PERSIST，**键缺失则返回 503 `LEDGER_BACKLOG`**（`Retry-After` 取 `drainSeconds`）。闸门是全局判据，不引入逐租户状态；监视器失联按 OK 处理并打 P1。
+- [ ] **重建偏差度量**：`gateway_rebuild_stale_delta_micros`（按桶）与 `gateway_rebuild_while_degraded_total`（按组织）。
+- [ ] 删除 `gw:org:holds`，惰性回收改为按 `gw:holds:exp` 全局扫描。
+- [ ] 配置项落地：`sliding-ttl.*`、`lag-monitor.*`。
 
 **验收手段**
-- 容器测试：滑动 TTL 续期，含「长流跨 TTL 后钱包键仍存在」与「空闲 300s 后键消失并可从 checkpoint 重建」。
-- 容器测试：空键哨兵、miss 加载原子性、并发加载只回源一次。
-- 断言：结算路径产生零次对 `resource_packs` / `bonus_grants` 的查询。
-- 断言：纯资源包请求产生一条 `llm.billing.settlement` 且 `packDeltaUnits` 非零。
-- 断言：结算后 `pack:avail`、`pack:held`、`held_*` 归零，item 余量按到期顺序递减。
-- 容器测试：模拟积压（写入健康信号为 DEGRADED），断言被触碰的键 TTL 被摘除、恢复后重新装上 300s。
-- 单测：健康信号四种状态（OK、DEGRADED、armed 缺失、armed 在但数据过期）各自映射到正确的网关动作。
-- 断言：`admin` 租户列表查询为常数条 SQL，不随租户数增长。
+- 容器测试：长流跨 TTL 后钱包键仍存在；空闲 300 秒后键消失且可从 checkpoint 重建。
+- 容器测试：空键哨兵、加载原子性、并发加载只回源一次、**已存在的键不被加载覆盖**。
+- 断言：结算路径对 `resource_packs` / `bonus_grants` 的查询次数为 0。
+- 断言：纯资源包请求产生一条事件且 `packDeltaUnits` 非零。
+- 断言：结算后各腿 `held` 归零，item 余量按到期顺序递减，无超卖。
+- 单测：健康信号四种状态映射正确；`armed` 存在但数据过期时按 OK 处理并打 P1。
+- 断言：DEGRADED 且键存在时请求仍 200；DEGRADED 且键缺失时返回 `LEDGER_BACKLOG` 且带 `Retry-After`。
+- 断言：`admin` 租户列表为常数条 SQL，不随租户数增长。
 
 ### 2.5 结算落库与账本事务
 
-- [ ] 按事件中的逐批明细，在 `admin` 同一事务内扣减 `resource_packs.remaining_units` 与 `bonus_grants.remaining_micros`（D-6）。
-- [ ] 将 `allocation_detail_json` 写入账本，`hold_id` 落列；`settledAfterReclaim` 为真时标记待人工复核（D-5）。
-- [ ] 修复结算落库的事务边界：将幂等写入移到独立 Bean 或使用显式事务模板（D-7、G7）。
-- [ ] 预建 `wallet_ledger` 与 `audit_logs` 的未来月份分区，验证跨月入账与重复事件（G8）。
-- [ ] 补齐定时作业：僵尸预占周期回收、批次过期 sweeper、分区预建（D-13）。
-- [ ] `remaining` 归零且 `status = ACTIVE` 时置为 `EXHAUSTED`。
-- [ ] 消费者每处理完一批回传投递水位（已处理到的 outbox id），供 purge 使用（方案 5.5 节）。
+> 以 [04-04 第 3 节](./design/04-04-settlement-pipeline.md) 为准。
+
+- [ ] **消费者事务边界**：把幂等写入移到独立 Bean 或显式事务模板，消除自调用绕过代理（D-7、G7）。
+- [ ] **按逐腿明细扣减** `resource_packs.remaining_units` 与 `bonus_grants.remaining_micros`，余量归零且 ACTIVE 时置 `EXHAUSTED`（D-6）。
+- [ ] **明细落库**：`allocation_detail_json`、`hold_id`、`shortfall_micros`、`settled_after_reclaim`（D-5）。
+- [ ] **不钳位**：事件只带实扣量，落库一律加法；触发负余额即判错账并告警，不得静默 `GREATEST(0, ...)`。
+- [ ] **`folded` 落 PostgreSQL**：同一事务内推进 `wallets.last_applied_event_id`；`produced` 留在 `gw:ledger:pos`。
+- [ ] **定时作业**：僵尸预占周期回收（含 `served` 兜底结算）、批次过期 sweeper（只改 PG + 写 `BONUS_EXPIRE`）、`wallet_ledger` 与 `audit_logs` 分区预建（D-13、G8）。
+- [ ] **投递水位回传**：消费者每批写 `outbox_watermark`（单行表，含 `updated_at`）。
+- [ ] **对账工单四级阶梯**：L1 重投 / L2 修链路 / L3 补 `ADJUST`（三态判定）/ L4 无条件认亏；工单不参与请求路径。
 
 **验收手段**
 - 容器测试：跨月入账、重复事件只落一行、消费者恢复后余额一致。
-- 容器测试：批次余量扣减与账本 delta 一致；过期 sweeper 只写一次 `BONUS_EXPIRE`。
-- 断言：`allocation_detail_json` 非空，且可由明细复算出 `chargedMicros`。
+- 容器测试：逐腿余量扣减与账本 delta 一致；过期 sweeper 只写一次 `BONUS_EXPIRE`。
+- 断言：`allocation_detail_json` 非空且可由明细复算出 `chargedMicros`。
+- 断言：随机化并发投递下 `fold(wallet_ledger) == wallets` 恒成立。
+- 断言：构造乱序投递，验证幂等门禁与退避重试，且不出现负余额。
+- 断言：工单在 L4 时间点无条件关闭，且留下审计与 P1。
 
 ### 2.6 Outbox 投递与生命周期
 
-> 三条改余额的路径在此统一：先改 Redis，再写 outbox，由 Debezium 投递、消费者落账本。本阶段完成后，网关不再直投 Kafka。
+> 以 [04-04 第 4 节](./design/04-04-settlement-pipeline.md) 为准。本阶段完成后，网关不再直投 Kafka。
 
-- [ ] 落地统一写入口：Redis Lua（含幂等标记）加重试，成功后写 `outbox_events`；三条路径共用（方案 5.1 节）。
-- [ ] 网关侧批量顺序写入：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接，与冷回源隔离（方案 5.4 节）。
-- [ ] 背压与溢出：队列满时降级为同步单条插入（超时 1 秒），仍失败返回 503；配套 `gateway_outbox_queue_depth`、`gateway_outbox_sync_fallback_total`、`gateway_outbox_insert_failures_total` 指标与 PG 不可用告警（方案 5.4 节）。
-- [ ] 停用「直投 Kafka」：删掉 `GatewayTelemetryService` 的结算事件直发路径，改走 outbox。
-- [ ] 启用 Outbox Connector，投递至 `cdc.wallet.*`、`cdc.pack.*`、`cdc.bonus.*`；事件契约与幂等键与消耗路径完全一致。见 [Connector 配置](../infra/debezium/hyperllm-outbox-connector.json)。
-- [ ] 水位删除作业：每 30 秒执行 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；**不设时间保留期**，删除只解决存储，与投递无关（WAL 才是投递源）；水位停滞超过 24 小时时按时间兜底删除并打 P1 告警（方案 5.5 节）。
-- [ ] 发 `V4_2__drop_outbox_created_index.sql` 删除 `idx_outbox_events_created`，purge 改走 UUIDv7 主键区间；同步刷新 `-Pjooq`。
-- [ ] `outbox_events` 表参数：`fillfactor = 100`；确认只追加、不更新，purge 之外无删除。
+- [ ] **单一金额 topic**：connector 的 `route.topic.replacement` 改为 `cdc.billing`，Kafka key = `orgId`，`OutboxAggregateType` 收敛为一个值；`llm.request.events` 仍直投。
+- [ ] **消耗路径批量写入**：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接。退避重试，不得因次数上限丢弃，超过 `retry-deadline` 才放弃并计入孤儿指标。
+- [ ] **事件副本与巡检重投**：结算 Lua 内 `SET gw:settle:evt PX 300000` + `ZADD gw:settle:pending`；消费者落账后 `ZREM`；admin 每 30 秒把超时未确认的重投回 outbox（主键幂等）。
+- [ ] **准入闸门**：队列水位 > 50% 持续 30 秒，或失败率 > 1% 且 1 分钟内 ≥ 50 条 ⇒ 该实例停止准入返回 503；**钱一旦动了，响应里不再有错误码**。
+- [ ] **停用直投**：删除 `GatewayTelemetryService` 的结算事件直发路径。
+- [ ] **水位删除作业**：每 30 秒 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；不设保留期；水位停滞 24 小时按时间兜底并打 P1。
+- [ ] **`V4_2` 迁移**：删 `idx_outbox_events_created`、`outbox_events` 设 `fillfactor = 100`、`wallet_ledger` 增 `shortfall_micros` 与 `settled_after_reclaim`、`wallets` 增 `last_applied_event_id`、新增 `outbox_watermark` 单行表；同步刷新 `-Pjooq`。
 
 **验收手段**
-- 容器测试：批量插入后行数正确、UUIDv7 单调、无二级索引仍能按区间删除。
-- 容器测试：队列满时降级同步插入仍成功落行；模拟 PG 不可用断言返回 503 而非静默丢弃。
-- 断言：水位推进后表行数收敛到未确认事件数量级，且不随时间线性增长。
+- 容器测试：批量插入行数正确、UUIDv7 单调、无二级索引仍可按区间删除。
+- 容器测试：队列水位越线后停止准入并返回 503，恢复后自动放开。
+- 断言：结算后 outbox 写失败时响应仍为 200，且事件在 60 秒内被巡检重投。
+- 断言：水位推进后表行数收敛到未确认事件数量级，不随时间线性增长。
 - 断言：三条路径产生的事件契约一致，消费者无需分支即可处理。
-
 
 ### 2.7 支付、兑换码与资源包购买
 
@@ -262,14 +263,12 @@
 
 ### Phase 2 依赖说明
 
-1. **2.4 是 2.5 的硬前置**：镜像必须先于「结算离开 PostgreSQL」，否则 2.5 落库时没有可信的批次归属。
+1. **2.4 是 2.5 的硬前置**：逐批次冻结必须先于「结算离开 PostgreSQL」，否则 2.5 落库时没有可信的批次归属。
 2. **2.5 与 2.6 必须相邻交付**：2.5 的消费者要回传投递水位，2.6 的 purge 依赖它；两者隔开会让 outbox 表无界增长。
 3. **2.6 完成后网关才停止直投 Kafka**：在此之前两条投递通道并存是允许的，因为事件契约与消费者相同、且都能幂等处理；但必须在同一版本内完成切换，不得长期双轨。
 4. **数据面从此依赖 PostgreSQL**：网关每请求写一行 outbox，PG 不可用即返回 503。PG 的可用性目标需与网关同级，不做 fail-open。
 5. **2.8 只依赖 2.4**：限流与预算不依赖落库链路，可与 2.5 至 2.7 并行。
-
-
-4. **2.8 只依赖 2.4**：限流与预算不依赖落库链路，可与 2.5 至 2.7 并行。
+6. **写方向已在 2.6 分叉**：消耗「先 Redis 后 outbox」、发放「先 outbox 后 Redis」。两条路共用同一事件契约与消费者，差异只在提交方式，见 [04-04 第 1 节](./design/04-04-settlement-pipeline.md)。
 
 
 ## Phase 3：全协议双向转译、智能路由与企业级治理

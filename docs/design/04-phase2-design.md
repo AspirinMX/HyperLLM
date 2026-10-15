@@ -1,8 +1,9 @@
 # HyperLLM 阶段二（Phase 2）最终设计方案
 
-> 本文是**阶段二的唯一权威设计**，2.4 及之后的全部子任务以本文为准。
+> 本文持有**阶段二的基线与决议**，2.4 及之后的全部子任务以本文的基线与决议为准；机制、时序与验收见 [04-04-settlement-pipeline.md](./04-04-settlement-pipeline.md)。
 > 各子任务设计稿（04-01、04-02、04-03）记录「当时如何设计、实际如何落地」，保留作为历史与偏差证据；与本文冲突时以本文为准。
 > 本文**取代** [04-00-overview.md](./04-00-overview.md) 第 2 节的 **T3**。
+> 2.4、2.5、2.6 的机制、时序、配置与验收见 [04-04-settlement-pipeline.md](./04-04-settlement-pipeline.md)；本文继续持有基线与决议。
 
 ---
 
@@ -61,21 +62,23 @@
 
 | 键 | 类型 | 载荷 | TTL / 续期 | 缺失语义 |
 | :--- | :--- | :--- | :--- | :--- |
-| gw:wallet:{orgId} | HASH | cash_micros、general_bonus_micros、held_cash_micros、held_bonus_micros、status | 滑动 300s | MISS_WALLET，触发加载 |
+| gw:wallet:{orgId} | HASH | cash_micros、held_cash_micros、status | 滑动 300s | MISS_WALLET，触发加载 |
 | gw:pack:{orgId}:{modelCode} | ZSET | member = packId，score = expires_at epoch ms | 滑动 300s | 触发加载 |
-| gw:pack:item:{packId} | HASH | remaining_units、total_units、unit_type、status、expires_at | 滑动 300s | 触发加载 |
-| gw:bonus:{orgId} | ZSET | member = grantId，score = expires_at（无限期取 9999-12-31） | 滑动 300s | 触发加载 |
-| gw:bonus:item:{grantId} | HASH | remaining_micros、initial_micros、models、status、expires_at | 滑动 300s | 触发加载 |
-| gw:pack:avail:{orgId}:{modelCode} | STRING | 该模型全部可用包单位之和（派生，可从 item 重建） | 与 pack 键同步 | 重建 |
-| gw:pack:held:{orgId}:{modelCode} | STRING | 已被在飞请求冻结的单位之和（派生） | 与 pack 键同步 | 重建 |
-| gw:hold:{holdId} | HASH | 三腿金额与单位、org_id、project_id、api_key_id、model_code、created_at | PEXPIRE 为 2 倍租约 | 无 |
+| gw:pack:item:{packId} | HASH | remaining_units、held_units、total_units、unit_type、status、expires_at | 滑动 300s | 触发加载 |
+| gw:bonus:{orgId} | ZSET | member = grantId，score = expires_at（无限期取 4102444800000） | 滑动 300s | 触发加载 |
+| gw:bonus:item:{grantId} | HASH | remaining_micros、held_micros、initial_micros、models、status、expires_at | 滑动 300s | 触发加载 |
+| gw:hold:{holdId} | HASH | 三条腿金额、legs JSON、served、org_id、project_id、api_key_id、model_code、created_at | PEXPIRE 为 2 倍租约 | 无 |
 | gw:holds:exp | ZSET | member = holdId，score = 租约到期 epoch ms | 无 TTL | 无 |
-| gw:org:holds:{orgId} | SET | 本组织在飞 holdId | 无 TTL | 无 |
+| gw:ledger:pos:{orgId} | HASH | produced、since | **无 TTL** | 无 |
+| gw:settle:evt:{eventId} | STRING | outbox payload 副本 | 300s | 由巡检重投兜底 |
+| gw:settle:pending | ZSET | member = eventId，score = 结算时刻 epoch ms | 无 TTL | 无 |
 | gw:hold:done:{holdId} | STRING | 结算摘要 JSON | 12 倍租约 | 无 |
-| gw:wallet:idem:{eventId} | STRING | 投影幂等标记 | 7 天 | 无 |
+| gw:wallet:idem:{eventId} | STRING | **发放类**幂等标记（消耗类复用 gw:hold:done，不再另建） | 24 小时 | 无 |
 | gw:cfg:key / gw:cfg:route / gw:cfg:override | STRING | 配置 JSON | 1800s 加 CDC 驱逐 | 回源 |
 | gw:rl:rpm / gw:rl:conc | STRING | 限流与并发计数 | 按分钟或租约 | 无 |
 | gw:sandbox:{sha256} | STRING | Playground 临时凭证 | 300s | 无 |
+
+本表已按 [04-04](./04-04-settlement-pipeline.md) 第 2.1 节修订，相对早期设计有三处变化：删除聚合字段 `general_bonus_micros` 与 `gw:pack:avail` / `gw:pack:held`（改为逐批次精确冻结）；删除 `gw:org:holds`（惰性回收改为按 `gw:holds:exp` 全局扫描，且它是按组织永久存在的键）；新增 `gw:ledger:pos`、`gw:settle:evt`、`gw:settle:pending`。
 
 ### 3.2 续期点（滑动 TTL 的唯一实现手段）
 
@@ -83,11 +86,13 @@
 
 | 续期点 | 涉及的键 |
 | :--- | :--- |
-| 准入 prehold_admit.lua | gw:wallet、gw:pack 系列、gw:pack:avail、gw:pack:held |
-| 心跳 prehold_renew.lua | gw:wallet、gw:pack 系列、gw:hold、并发计数 |
+| 准入 prehold_admit.lua | gw:wallet、各腿 item 键 |
+| 心跳 prehold_renew.lua | **gw:wallet、各腿 item 键**、gw:hold、并发计数 |
 | 结算 prehold_settle.lua | 同上 |
 | 释放 prehold_release.lua | 同上 |
 | 读路径（网关冷回源、console / admin 查询、miss 加载完成时） | 被读到的键 |
+
+**续期节流**：网关在本地记录每个键的最近续期时刻，同一键 60 秒内最多续一次；命中节流时脚本收到 `renew = 0`，不执行 `PEXPIRE`。只要「有流量就永不过期」，续期频率对正确性没有影响，而每请求写五个 `PEXPIRE` 在 AOF 上是纯写放大。
 
 > 心跳是**长流唯一的续期机会**。当前 prehold_renew.lua 的 KEYS 里没有 gw:wallet，这是启用滑动 TTL 之前必须先修的前置项（见第 9 节 D-3）。
 
@@ -107,8 +112,12 @@
 
 1. 进程内 SingleFlight 去重，与 Phase 1 的 warmWalletIfMissing 同形态。
 2. PostgreSQL 读：wallets 与 organizations.status；resource_packs（status = ACTIVE、expires_at 大于当前、applicable_models 包含该模型）；bonus_grants（同条件，且允许 expires_at 为空）。
-3. 单次原子写入：钱包 HASH、重建 pack 与 bonus 两个 ZSET 及 item HASH、重算 avail 与 held。
+3. 单次原子写入：钱包 HASH、pack 与 bonus 两个 ZSET、各 item HASH；**每个键先 EXISTS，已存在则跳过**（只补缺失）。
 4. 统一 PEXPIRE 300s。
+
+**加载只补缺失**：脚本对每个目标键先 EXISTS，已存在则跳过，绝不整租户覆盖。全量覆盖会把加载窗口内并发结算已扣掉的 delta 抹掉。
+
+**键级互斥**：键缺失时，任何 delta 写入一律返回哨兵、不做写入；键存在时，加载不再覆盖它。两条合起来，同一个键在任一时刻只可能被一个写者碰——缺失时只有加载能创建，存在时只有 delta 能修改。重建与增量因此在结构上不会交错。
 
 **加载失败不降级放行**：读不到批次就按「无权益」处理，只允许现金与赠金快照参与分摊；绝不因为读库失败而跳过计费。
 
@@ -154,16 +163,26 @@ Phase 1 遗留数据中，wallets.bonus_balance_micros 可能大于所有 bonus_
 
 ## 5. 写路径
 
-三条改余额的路径形式完全一致：**先改 Redis，再写 outbox，由 Debezium 投递、消费者落账本**。唯一的反向存在是缓存缺失时的加载（3.4 节），它不属于写路径，也不做任何同步。
+写路径**按业务方向分叉**，这是全篇最重要的修订（原 B4「写方向唯一」据此作废，详见 [04-04](./04-04-settlement-pipeline.md) 第 1 节）：
+
+| | 消耗（扣钱） | 发放（充钱） |
+| :--- | :--- | :--- |
+| 先后 | 先改 Redis，再写 outbox | 先写 outbox，再改 Redis |
+| 允许丢 | 是 | **否** |
+| 失效方向 | 平台少收钱 | 无 |
+
+> **扣钱先动钱，给钱先记账。**
+
+唯一的反向存在是缓存缺失时的加载（3.4 节），它不属于写路径，也不做任何同步。
 
 ### 5.1 统一写入口
 
 无论变更来自网关、console 还是 admin，都必须经过同一个原语：
 
 1. 确定 eventId（调用方给出 idempotencyKey，或由服务端生成）。
-2. **Redis Lua 原子执行**：先查 gw:wallet:idem:{eventId}，命中则直接返回 DUPLICATE 且不再向下；否则应用 delta（cash / bonus / 批次单位，钳到非负），新增批次时同时写 ZSET 与 item HASH，写幂等标记，并续期被触碰的键。
-3. 写 outbox（5.4 节），事件里携带同一个 eventId。
-4. Debezium 到 Kafka，消费者写账本、更新 wallets、创建或更新批次行。
+2. **Redis Lua 原子执行**：先查幂等标记（消耗类为 `gw:hold:done:{holdId}`，发放类为 `gw:wallet:idem:{eventId}`），命中则直接返回 DUPLICATE 且不再向下；否则应用 delta，新增批次时同时写 ZSET 与 item HASH，**发号 `seq` 并推进 `gw:ledger:pos`**，写幂等标记，并续期被触碰的键。
+3. 写 outbox（5.4 节），事件里携带同一个 eventId。**消耗路径在此处的提交方式是异步批量；发放路径是把这一步放进业务事务、先于 Redis 提交。**
+4. Debezium 到单一金额 topic，消费者写账本、更新 wallets、按明细扣减批次行。
 
 两条不可协商的规则：
 
@@ -172,21 +191,22 @@ Phase 1 遗留数据中，wallets.bonus_balance_micros 可能大于所有 bonus_
 
 ### 5.2 消耗方向
 
-1. **准入**：读钱包、pack:avail、pack:held，全部来自 Redis。
+1. **准入**：一次 `prehold_snapshot.lua` 取回钱包与逐条腿，全部来自 Redis。
 2. **分摊**：PricingResolver 加 EntitlementAllocator，纯 Java 三顺位。
 3. **冻结**：prehold_admit.lua，限额加三档冻结加惰性回收加续期。
 4. **转发**：首字节前失败换渠道重试；流式分片心跳续期。
-5. **结算**：prehold_settle.lua，释放预占、逐批递减 item、递减 avail、扣 cash 与 bonus（钳到非负）、写 done 标记、续期。
+5. **结算**：prehold_settle.lua，以 hold 的腿为快照重分摊，释放预占、按腿递减各 item 与钱包冻结、扣 cash（钳到非负）、写 done 标记与事件副本、续期。
 6. **事件**：cashDeltaMicros、bonusDeltaMicros、packDeltaUnits、allocationDetailJson（逐批次腿，id 必填）。
-7. **投递与落库**：写入 outbox，经 Debezium 到 Kafka，由 2.5 的消费者按明细扣批次、写账本、更新 wallets。
+7. **投递与落库**：写入 outbox，经 Debezium 到 `cdc.billing`（key = orgId），由 2.5 的消费者按明细扣批次、写账本、更新 wallets。
 
 ### 5.3 发放方向
 
-充值、赠金、资源包发放、人工调账、对账修正，与消耗同形：调用统一写入口先改 Redis，再写 outbox，由消费者落库。
+充值、赠金、资源包发放、人工调账、对账修正走**记录优先**：在业务事务内先写 outbox 行（纯 delta），提交后再由应用者落地到 Redis（消费者为常规路径，生产者可抢先应用一次只是加速）。于是「行存在 = 这笔发放已被授权」，消费者不需要判断它是否已经生效。
 
-- 因为不存在「先写数据库再推 Redis」的路径，**双写翻倍不可能发生**，也不需要「移除直推」这一步。
-- **新增批次**（购买的资源包、发放的赠金）由应用层生成完整对象（UUIDv7、到期时间、总单位、适用模型）后先写进 Redis；PostgreSQL 的批次行由消费者按事件创建。这是「Redis 为权威、数据库为折叠结果」的直接体现。
-- 代价：消费者处理到之前，PostgreSQL 里没有该批次行；此窗口内若该组织的键恰好过期并被加载，会读不到这个新批次。窗口等于消费延迟，由 7.3 的积压监视器覆盖。
+- **双写不会翻倍**：Redis 的幂等标记与 delta 在同一个 Lua 内写入，同一 eventId 无论被应用多少次都只生效一次。
+- **新增批次**（购买的资源包、发放的赠金）由应用层生成完整对象（UUIDv7、到期时间、总单位、适用模型）并写入 outbox 的 payload；批次行由消费者按事件创建，Redis 的 ZSET 与 item 由应用者应用 delta 时一并写入。
+- 代价一：消费者处理到之前，PostgreSQL 没有该批次行；此窗口内若组织的键恰好过期并被加载，会读不到这个新批次（窗口等于消费延迟，由 7.3 的积压监视器覆盖）。
+- 代价二：租户处于冷态时应用 delta 会拿到哨兵，只能「折叠 PostgreSQL、跳过 Redis」，权益最长滞后一个 TTL 才可见。这是「键缺失时不写 delta」的既定代价，见 3.4 节。
 
 ### 5.4 outbox 写入与顺序插入优化
 
@@ -217,10 +237,12 @@ Phase 1 遗留数据中，wallets.bonus_balance_micros 可能大于所有 bonus_
 | :--- | :--- | :--- |
 | 未满 | 入队即返回 | 无 |
 | 接近满 | 加速刷、增大批量 | 延迟略增 |
-| 满 | 降级为同步单条插入（阻塞该请求收尾，超时 1 秒） | 该请求变慢但不丢 |
-| 同步插入仍失败 | 返回 503 | 网关在 PostgreSQL 不可用时停止服务 |
+| 水位 > 50% 持续 30s，或失败率 > 1% 且 1 分钟内 ≥ 50 条 | **该实例停止准入，返回 503** | 新请求一分钱没扣，重试安全 |
+| 恢复正常 | 自动放开准入 | 无 |
 
-**这是本方案的显式代价**：数据面从「只依赖 Redis」变成「依赖 Redis 与 PostgreSQL」。PostgreSQL 的可用性目标必须提到与网关同级；不做 fail-open，因为预付费系统里 fail-open 等于免费使用，损失无上界。
+**响应语义**：准入之前的 503 是唯一合法的 503；**钱一旦动了，响应里不再出现错误码**。结算之后 outbox 写失败不改变响应，事件走 4.3 节的事件副本与巡检重投。
+
+**这是本方案的显式代价**：数据面从「只依赖 Redis」变成「依赖 Redis 与 PostgreSQL」。PostgreSQL 的可用性目标必须提到与网关同级；**准入闸门**不做 fail-open，因为预付费系统里放行等于免费使用，损失无上界（这与 7.3.4 节「监视器失联按 OK」是两件事：前者是「记录不下来就别接客」，后者是「监控挂了别停客」）。
 
 ### 5.5 outbox 生命周期：水位删除
 
@@ -228,13 +250,15 @@ outbox 是传输表，不是历史表。需要删除，但**删除只解决存�
 
 因此不设「保留期」，改为按投递水位删除：
 
-1. 消费者每处理完一批，回传已处理到的 outbox id（写 Redis 键或一行水位表）。
+1. 消费者每处理完一批，把已处理到的 outbox id 写入 `outbox_watermark` 单行表（选表而非 Redis：它必须与 purge 作业同时可用，且不能因 Redis 重启而回退）。
 2. purge 作业每 30 秒执行：DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000，循环直到删完。
 3. 因为主键是 UUIDv7 且单调，id 区间等价于时间区间，走主键索引即可，不需要 created_at 索引。
 
 稳态表大小等于未确认事件数，约等于端到端延迟乘 QPS，与总流量无关；Debezium 或消费者停机时表自然增长，恢复后自动回落。**表长度因此成为积压的可视化指标**，与 7.3 的健康监视器同源。
 
 唯一兜底：水位停滞超过 24 小时时仍然按时间兜底删除，防止表无限膨胀拖垮实例；此时必须打 P1 告警，且**告警依据是水位停了，不是表大了**。
+
+**切换条件**：若压测中 purge 跟不上，或表行数持续超过 100 万，改为按日 RANGE 分区 + 校验「分区内最大 id ≤ 水位」后 DROP PARTITION。该方案需要 publication 开启 publish_via_partition_root 并实测投递链路，因此不进入首版。
 
 ### 5.6 计数字段的写语义
 
@@ -272,7 +296,7 @@ console 与 admin 不得绕过统一写入口直接修改 Redis 计数字段；�
 | 7 | 冻结：限额、三档预占、惰性回收 | prehold_admit.lua | 402 或 429 或 403 |
 | 8 | 转发：首字节前换渠道重试，最多 2 次 | 上游 | 全部耗尽则释放且不收费 |
 | 9 | 结算：释放预占、按实扣、逐批递减、写 done 标记 | prehold_settle.lua | 重复则幂等返回；已回收则照扣并打标 |
-| 10 | 发射 llm.billing.settlement 与 llm.request.events | Kafka | 失败仅记日志，不阻塞响应 |
+| 10 | 结算事件入 outbox 队列（异步批量）；用量遥测仍直投 Kafka | outbox / Kafka | 结算事件的失败由巡检重投兜底；遥测失败仅记日志 |
 
 ---
 
@@ -327,10 +351,12 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 
 **缺失语义必须区分两种情况**，否则会在部署初期让所有键永不过期，或让监视器挂掉后失去保护：
 
-| 状态 | 含义 | 网关视为 |
-| :--- | :--- | :--- |
-| armed 不存在 | 功能未启用，或监视器从未部署 | OK（正常滑动过期） |
-| armed 存在、数据键已过期 | 监视器曾运行但现在停止（admin 宕机、被隔离、积压作业卡死） | **DEGRADED** |
+| 状态 | 含义 | 网关视为 | 理由 |
+| :--- | :--- | :--- | :--- |
+| armed 不存在 | 功能未启用，或监视器从未部署 | OK（正常滑动过期） | 没有证据表明有积压 |
+| armed 存在、数据键已过期 | 监视器曾运行但现在停止（admin 宕机、滚动发布、作业卡死） | **OK，并打 P1** | **监控组件故障不得转化为客户故障** |
+
+**为什么是 fail-open**：admin 每次滚动发布都会让数据键在 60 秒后过期，fail-closed 等于每次发布制造一轮冷启动 503；监视器长期挂掉时更是持续 503。而「监视器停了」与「有积压」是两件事，前者不该触发后者才该触发的惩罚。代价是「监视器死 + 真有积压」时重建会多给钱——该方向是可承受的一侧，由 P1 告警与对账兜住。
 
 同时把级别暴露为 Micrometer gauge（0 为 OK，1 为 DEGRADED），供 Prometheus 采集与告警。
 
@@ -338,12 +364,16 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 
 网关在每次触碰钱包与批次键时读取信号（本地缓存 5 秒，避免每请求多一次往返）：
 
-| 信号 | 动作 |
-| :--- | :--- |
-| OK | PEXPIRE 300，正常滑动 |
-| DEGRADED | PERSIST（摘掉 TTL），并累加 gateway_cache_freeze_total |
-| 数据键缺失但 armed 存在 | 同 DEGRADED |
-| armed 不存在 | 同 OK |
+| 信号 | 键存在 | 键缺失（需要重建） |
+| :--- | :--- | :--- |
+| OK | PEXPIRE 300，正常滑动 | 允许加载 |
+| DEGRADED | PERSIST（摘掉 TTL），累加 `gateway_cache_freeze_total` | **503 `LEDGER_BACKLOG`**，`Retry-After` 取 `drainSeconds` |
+| armed 不存在 | 同 OK | 同 OK |
+| armed 存在但数据键过期 | **同 OK**，并打 P1 | **同 OK** |
+
+判据是**全局的**，不引入任何逐租户的准入状态：命中面只有「DEGRADED 且键缺失」这一格，热键租户永远正常服务——它手里的 Redis 就是权威本身。
+
+**监视器失联按 OK 处理**：admin 停机或滚动发布会让数据键过期，若按 DEGRADED 处理，每次发布都会制造一轮客户故障。监控组件故障不得转化为客户故障，代价是「监视器死 + 真有积压」时重建会多给钱，由 P1 告警与对账兜住。
 
 该设计的关键优点是**不需要全局扫描**：PERSIST 幂等且廉价，只在被触碰的键上生效，因此冻结过程是渐进的、对热点组织立即生效。恢复为 OK 后，下一次触碰自动重新 PEXPIRE 300，键回到滑动过期。
 
@@ -413,6 +443,13 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 | **P10** | console 与 admin 只能经统一写入口写 Redis，网关不得另起一套写逻辑；三条路径的差异只允许在 outbox 提交方式上 |
 | **P11** | 配置类表变更必须同时刷新 Redis L2 并经 CDC 驱逐 L1，缺一即缺陷 |
 | **P12** | 数据库中的余额与批次余量是账本的折叠结果，不作为请求路径的读取源 |
+| **P13** | 键缺失时不写 delta；键存在时加载不覆盖。二者共同保证重建与增量在同一个键上永不交错 |
+| **P14** | 事件只携带实扣量，落库一律加法，禁止钳位；出现负余额即判错账 |
+| **P15** | fold(wallet_ledger) 恒等于 wallets 快照，二者在同一事务内写入 |
+| **P16** | 消耗走「先 Redis 后 outbox」，发放走「先 outbox 后 Redis」；同一 eventId 贯穿两处 |
+| **P17** | 重建闸门是全局判据，不得引入任何逐租户的准入状态 |
+| **P18** | 钱一旦动了，响应里不再出现错误码；503 只出现在准入之前 |
+| **P19** | 批次过期不写 Redis，视为权威值随时间衰减，P9 对此显式豁免 |
 
 ---
 
@@ -429,8 +466,8 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 | **D-5** | allocation_detail_json 被丢弃，明细与 shortfall 不可观测（违反 P8） | BillingSettlementConsumer | 2.5 |
 | **D-6** | 数据库批次余量无生产代码扣减 | ResourcePackRepository 与 BonusGrantRepository | 2.5 |
 | **D-7** | 结算落库的事务注解自调用失效，实际无事务 | BillingSettlementConsumer | 2.5 |
-| **D-8** | 结算快照未扣他人 held，可能吃掉他人冻结额度 | 结算快照构造 | 2.4 |
-| **D-9** | gw:pack:avail 使用固定 TTL，超卖差额被钳位吞掉（违反 P2） | ensurePackAvailability | 2.4 |
+| ~~**D-8**~~ | ~~结算快照未扣他人 held，可能吃掉他人冻结额度~~ | 结算快照构造 | **作废**：改为逐批次冻结后，结算不再重新分摊，不存在「吃掉他人冻结」的形状 |
+| ~~**D-9**~~ | ~~gw:pack:avail 使用固定 TTL，超卖差额被钳位吞掉~~ | ensurePackAvailability | **作废**：聚合字段整体废除，改为逐批次精确冻结 |
 | **D-10** | 心跳续期把 orgId 当作 projectId 传入，并发计数未被续期 | renewHoldIfDue | 2.4 |
 | **D-11** | console 单租户钱包直接读数据库；admin 无单租户钱包读接口（违反 B3 与 B6） | 控制面 | 2.4 |
 | **D-12** | admin 租户列表 DTO 不含余额字段（B6 的列表侧未实现） | AdminOrgDto | 2.4 |
@@ -457,6 +494,9 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 | **Q2** | 消费者积压时的 TTL 联动 | **实现**。以 AdminClient 的记录级 lag 为主信号、排空时间为主判据，admin 发布健康信号，网关在 DEGRADED 期对触碰到的键 PERSIST（见 7.3 节）。 |
 | **Q3** | admin 租户列表是否内联余额 | **内联**。以 organizations LEFT JOIN wallets 一次取出，避免 N 加 1；列表不展示冻结与可用，并标注「账本已确认」（见 4.2 节）。 |
 | **Q4** | 批次是否按模型分片加载 | **暂不**。按租户整体加载（基线 B5）。待单组织批次数超过阈值时再评估分片。 |
+| **Q6** | 写路径是否继续「方向唯一」 | **分叉**。消耗「先 Redis 后 outbox」，发放「先 outbox 后 Redis」，理由与后果见 04-04 第 1 节；原 B4 据此修订 |
+| **Q7** | 积压时的降级粒度 | **全局判据**。命中面只有「DEGRADED 且键缺失」，热键租户照常服务；监视器失联按 OK 处理并打 P1（见 7.3.4） |
+| **Q8** | 丢事件如何收敛 | **对账工单四级阶梯**，最后一级无条件终止；工单不参与请求路径（见 04-04 第 5.3 节） |
 | **Q5** | outbox 的写入方式与生命周期 | **三条路统一写 PostgreSQL outbox**。网关每请求写一行，按追加表设计：UUIDv7 主键、零二级索引、单写者批量提交、队列满降级同步插入、仍失败返回 503。不设保留期，按消费者回传的投递水位删除，24 小时兜底并告警（见 5.4、5.5 节）。 |
 
 ### 11.1 由决议引出的新增配置
@@ -474,7 +514,8 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 | hyperllm.outbox.batch-size | 200 | 触发刷盘的条数 |
 | hyperllm.outbox.max-batch-rows | 500 | 单次 multi-row INSERT 的行数上限 |
 | hyperllm.outbox.queue-capacity | 100000 | 有界队列容量 |
-| hyperllm.outbox.sync-fallback-timeout-ms | 1000 | 队列满时降级同步插入的超时 |
+| hyperllm.outbox.admission-pause-ratio | 0.5 | 队列水位超过该值即停准入 |
+| hyperllm.outbox.retry-deadline-seconds | 600 | 单事件重试截止，超时后放弃并计入孤儿指标 |
 | hyperllm.outbox.purge-interval-seconds | 30 | 水位删除作业周期 |
 | hyperllm.outbox.purge-batch-rows | 5000 | 单次删除行数上限 |
 | hyperllm.outbox.watermark-stall-hours | 24 | 水位停滞多久后按时间兜底删除并告警 |
@@ -499,6 +540,7 @@ admin 侧新增定时作业（建议 15 秒），计算级别后写入 Redis：
 | 文档 | 与本方案的关系 |
 | :--- | :--- |
 | 04-00-overview.md | 索引与跨任务不变量；其 T3 已被本文第 2 节取代 |
-| 04-01-v4-schema.md | 仍有效（表结构未变） |
-| 04-02-entitlements.md | 第 3 与 5 至 7 节的分摊算法与明细契约仍有效；第 4 节的批次镜像协议（含 gw:ent:ver、gw:ent:stale，已按决议 Q1 废除）与第 13 节的落地记录已被本文取代 |
-| 04-03-prehold-settle.md | 第 3 至 7 节的预占、结算、回收语义仍有效；第 4.2 节的结算脚本人批职责与第 16 节的口径已被本文取代 |
+| 04-01-v4-schema.md | 表结构仍有效；`V4_2`（删 outbox 时间索引、`fillfactor`、账本新增两列、`wallets.last_applied_event_id`、`outbox_watermark`）见 04-04 第 8 节 |
+| 04-02-entitlements.md | 第 3 与 5 至 7 节的分摊算法与明细契约仍有效；第 4 节的批次镜像协议（含 gw:ent:ver、gw:ent:stale，已按决议 Q1 废除）、决策 D12（`general_bonus_micros` 聚合字段已废除）与第 13 节的落地记录已被本文取代 |
+| 04-04-settlement-pipeline.md | 2.4、2.5、2.6 的机制、时序、配置与验收；本文的 B4 与 §5.4 由它修订 |
+| 04-03-prehold-settle.md | 第 3 至 7 节的预占、结算、回收语义仍有效；**其第 3 节的键布局（`gw:pack:avail` / `gw:pack:held` / `gw:org:holds` / 钱包聚合字段）已被 04-04 第 2.1 节取代**；第 4.2 节的结算脚本人批职责与第 16 节的口径已被本文取代 |
