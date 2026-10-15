@@ -44,7 +44,9 @@ public enum ErrorCode {
     RATE_LIMITED(429, "Rate limit or concurrency limit exceeded"),
     PROTOCOL_INVALID_REQUEST(400, "Invalid request payload"),
     UPSTREAM_ERROR(502, "Upstream provider error"),
-    CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently");
+    CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),
+    IDEMPOTENT_IN_FLIGHT(409, "An identical request is still in flight"),
+    IDEMPOTENT_REPLAYED(409, "Duplicate request rejected by idempotency key");
 
     private final int httpStatus;
     private final String defaultMessage;
