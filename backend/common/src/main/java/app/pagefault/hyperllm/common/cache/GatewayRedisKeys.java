@@ -47,6 +47,16 @@ public final class GatewayRedisKeys {
         return "gw:org:holds:" + orgId;
     }
 
+    /** Zset of the batches that may serve one model, scored by expiry. */
+    public static String pack(UUID orgId, String modelCode) {
+        return "gw:pack:" + orgId + ":" + modelCode;
+    }
+
+    /** Zset of the organisation's bonus batches, scored by expiry. */
+    public static String bonus(UUID orgId) {
+        return "gw:bonus:" + orgId;
+    }
+
     public static String packAvailability(UUID orgId, String modelCode) {
         return "gw:pack:avail:" + orgId + ":" + modelCode;
     }
@@ -61,6 +71,53 @@ public final class GatewayRedisKeys {
 
     public static String wallet(UUID orgId) {
         return "gw:wallet:" + orgId;
+    }
+
+    /** Prefix of the per-batch mirrors; a Lua script concatenates it with the batch id. */
+    public static String packItemPrefix() {
+        return "gw:pack:item:";
+    }
+
+    public static String bonusItemPrefix() {
+        return "gw:bonus:item:";
+    }
+
+    public static String packItem(UUID packId) {
+        return packItemPrefix() + packId;
+    }
+
+    public static String bonusItem(UUID grantId) {
+        return bonusItemPrefix() + grantId;
+    }
+
+    /** Fold position of one organisation: the last event it produced and when it started lagging. */
+    public static String ledgerPosition(UUID orgId) {
+        return "gw:ledger:pos:" + orgId;
+    }
+
+    /** Copy of a settlement payload, written in the same script that moves the money. */
+    public static String settleEvent(String eventId) {
+        return "gw:settle:evt:" + eventId;
+    }
+
+    /** Settlements awaiting the consumer's confirmation; the re-delivery job scans it. */
+    public static String settlePending() {
+        return "gw:settle:pending";
+    }
+
+    /** Published backlog signal read by every gateway instance. */
+    public static String ledgerLagSignal() {
+        return "gw:health:ledger-lag";
+    }
+
+    /** Marker proving the lag monitor ran at least once, so a missing signal can be distinguished. */
+    public static String ledgerLagArmed() {
+        return "gw:health:ledger-lag:armed";
+    }
+
+    /** Idempotency marker of an issuance; consumption reuses the hold's done marker instead. */
+    public static String issuanceIdempotency(String eventId) {
+        return "gw:wallet:idem:" + eventId;
     }
 
     public static String rpmCounter(String scope, UUID id, long epochMinute) {
