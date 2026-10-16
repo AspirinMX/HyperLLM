@@ -61,6 +61,12 @@ public class GatewayConfiguration {
         return RedisScript.of(new ClassPathResource("lua/prehold_snapshot.lua"), java.util.List.class);
     }
 
+    @SuppressWarnings("rawtypes")
+    @Bean(name = "loadTenantLuaScript")
+    public RedisScript<java.util.List> loadTenantLuaScript() {
+        return RedisScript.of(new ClassPathResource("lua/load_tenant.lua"), java.util.List.class);
+    }
+
     @Bean(name = "preholdAdmitLuaScript")
     public RedisScript<String> preholdAdmitLuaScript() {
         return RedisScript.of(new ClassPathResource("lua/prehold_admit.lua"), String.class);

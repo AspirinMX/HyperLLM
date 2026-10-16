@@ -29,6 +29,12 @@ public class GatewayProperties {
         private long l2KeyTtlSeconds = 1800;
         private long l2RouteTtlSeconds = 1800;
         private long maxEntries = 10_000;
+
+        /** Sliding TTL of the wallet and batch keys; every touch extends it by this much. */
+        private long slidingTtlSeconds = 300;
+
+        /** How long a key may go untouched between renewals; keeps PEXPIRE off the hot path. */
+        private long renewThrottleSeconds = 60;
     }
 
     @Data
