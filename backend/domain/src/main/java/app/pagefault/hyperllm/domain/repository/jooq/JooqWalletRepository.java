@@ -92,6 +92,33 @@ public class JooqWalletRepository implements WalletRepository {
     }
 
     @Override
+    public boolean applyEventDelta(
+            UUID orgId,
+            long cashDeltaMicros,
+            long bonusDeltaMicros,
+            long rechargedDeltaMicros,
+            long bonusGrantedDeltaMicros,
+            long consumedCashDeltaMicros,
+            long consumedBonusDeltaMicros,
+            UUID lastAppliedEventId,
+            OffsetDateTime updatedAt
+    ) {
+        int updated = dsl.update(WALLETS)
+                .set(WALLETS.CASH_BALANCE_MICROS, WALLETS.CASH_BALANCE_MICROS.plus(cashDeltaMicros))
+                .set(WALLETS.BONUS_BALANCE_MICROS, WALLETS.BONUS_BALANCE_MICROS.plus(bonusDeltaMicros))
+                .set(WALLETS.TOTAL_RECHARGED_MICROS, WALLETS.TOTAL_RECHARGED_MICROS.plus(rechargedDeltaMicros))
+                .set(WALLETS.TOTAL_BONUS_GRANTED_MICROS, WALLETS.TOTAL_BONUS_GRANTED_MICROS.plus(bonusGrantedDeltaMicros))
+                .set(WALLETS.TOTAL_CONSUMED_CASH_MICROS, WALLETS.TOTAL_CONSUMED_CASH_MICROS.plus(consumedCashDeltaMicros))
+                .set(WALLETS.TOTAL_CONSUMED_BONUS_MICROS, WALLETS.TOTAL_CONSUMED_BONUS_MICROS.plus(consumedBonusDeltaMicros))
+                .set(WALLETS.LAST_APPLIED_EVENT_ID, lastAppliedEventId)
+                .set(WALLETS.VERSION, WALLETS.VERSION.plus(1))
+                .set(WALLETS.UPDATED_AT, updatedAt)
+                .where(WALLETS.ORG_ID.eq(orgId))
+                .execute();
+        return updated == 1;
+    }
+
+    @Override
     public boolean updateLowBalanceThreshold(UUID orgId, Long thresholdMicros, long expectedVersion, OffsetDateTime updatedAt) {
         int updated = dsl.update(WALLETS)
                 .set(WALLETS.LOW_BALANCE_THRESHOLD_MICROS, thresholdMicros)
