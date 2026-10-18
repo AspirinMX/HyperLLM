@@ -32,6 +32,7 @@ import app.pagefault.hyperllm.domain.model.routing.PricingRule;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
 import app.pagefault.hyperllm.gateway.billing.GatewayAdmissionService;
+import app.pagefault.hyperllm.gateway.billing.HeldLegCharger;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
 import app.pagefault.hyperllm.gateway.cache.GatewayConfigCacheService;
@@ -121,6 +122,7 @@ public class GatewayProxyService {
     private final AesGcmCipher aesGcmCipher;
     private final ChannelSelector channelSelector;
     private final UpstreamWebClientPool webClientPool;
+    private final app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService;
     private final ObjectMapper objectMapper;
     private final TokenEstimator tokenEstimator = new TokenEstimator();
 
@@ -533,13 +535,13 @@ public class GatewayProxyService {
                         pricing.reasoningPriceMicros1m()),
                 candidate.effectiveCostDiscountBps());
 
-        return cacheService.readWalletSnapshot(caller.orgId())
-                .defaultIfEmpty(new GatewayConfigCacheService.WalletSnapshot(0L, 0L, ""))
-                .flatMap(wallet -> cacheService
-                        .resolveEntitlements(caller.orgId(), route.model().modelCode(), wallet)
-                        .map(snapshot -> EntitlementAllocator.allocate(
-                                exactCostMicros, billable.totalTokens(), snapshot)))
-                .flatMap(plan -> {
+        Mono<List<AllocationLeg>> heldLegs = lease.holdId() == null
+                ? Mono.just(List.of())
+                : mirrorService.heldLegs(lease.holdId());
+        return heldLegs
+                .map(legs -> HeldLegCharger.charge(legs, exactCostMicros))
+                .flatMap(charges -> {
+                    AllocationPlan plan = new AllocationPlan(charges.legs(), exactCostMicros, 0L, false);
                     long cashLeg = sumLegs(plan, AllocationType.CASH);
                     long bonusLeg = sumLegs(plan, AllocationType.BONUS);
                     long packUnits = sumPackUnits(plan);
@@ -549,8 +551,11 @@ public class GatewayProxyService {
                                     .map(applied -> new Deduction(
                                             applied.cashDeductedMicros(), applied.bonusDeductedMicros(), false, false))
                             : preHoldService.settle(
-                                            lease.holdId(), caller.orgId(), route.model().modelCode(),
-                                            cashLeg, bonusLeg, packUnits)
+                                            lease.holdId(), caller.orgId(), charges.legs(), detailJson,
+                                            properties.getBilling().getLeaseTtlSeconds() * 12L,
+                                            300_000L,
+                                            true,
+                                            properties.getBilling().getLeaseTtlSeconds())
                                     .map(outcome -> new Deduction(
                                             outcome.cashCharged(), outcome.bonusCharged(),
                                             outcome.alreadySettled(), outcome.settledAfterReclaim()));
@@ -632,8 +637,8 @@ public class GatewayProxyService {
             return;
         }
         preHoldService.renew(
-                        lease.holdId(), lease.orgId(), lease.orgId(), null,
-                        properties.getBilling().getLeaseTtlSeconds())
+                        lease.holdId(), lease.orgId(), lease.concurrencyKeys(),
+                        properties.getBilling().getLeaseTtlSeconds(), true)
                 .subscribe(ok -> { }, ex -> { });
     }
 
@@ -690,15 +695,11 @@ public class GatewayProxyService {
                     long estimate = CostMath.discountedCostMicros(raw, resolved.discountBps());
                     long target = CostMath.discountedCostMicros(estimate, billing.getSafetyFactorBps());
                     long billable = promptEstimate + outputCap;
-                    return preHoldService.reclaimExpired(caller.orgId())
+                    return preHoldService.reclaimExpired(billing.getLazyReclaimBatch())
                             .onErrorResume(ex -> Mono.just(0))
-                            .then(Mono.zip(
-                                    cacheService.readWalletSnapshot(caller.orgId()),
-                                    cacheService.ensurePackAvailability(caller.orgId(), modelCode)))
-                            .flatMap(resources -> admitWithEstimate(
-                                    caller, modelCode, target, billable,
-                                    resources.getT1().cashMicros(), resources.getT1().bonusMicros(),
-                                    resources.getT2()));
+                            .then(mirrorService.read(caller.orgId(), modelCode, true))
+                            .flatMap(mirror -> admitWithEstimate(
+                                    caller, modelCode, target, billable, mirror.snapshot()));
                 });
     }
 
@@ -762,30 +763,20 @@ public class GatewayProxyService {
             String modelCode,
             long holdTarget,
             long billableTokens,
-            long cashAvailable,
-            long bonusAvailable,
-            long packUnitsAvailable
+            EntitlementSnapshot snapshot
     ) {
-        EntitlementSnapshot snapshot = new EntitlementSnapshot(
-                List.of(new EntitlementSnapshot.PackBucket(
-                        null, PackUnitType.TOKENS, Math.max(0L, packUnitsAvailable))),
-                List.of(new EntitlementSnapshot.BonusBucket(null, Math.max(0L, bonusAvailable))),
-                Math.max(0L, cashAvailable));
         AllocationPlan plan = EntitlementAllocator.allocate(holdTarget, billableTokens, snapshot);
-        long cashLeg = sumLegs(plan, AllocationType.CASH);
-        long bonusLeg = sumLegs(plan, AllocationType.BONUS);
-        long packUnits = sumPackUnits(plan);
-        if (cashLeg == 0L && bonusLeg == 0L && packUnits == 0L) {
+        if (plan.legs().isEmpty()) {
             return Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
         }
 
         String holdId = UuidV7.next().toString();
         PreHoldService.AdmitCommand command = new PreHoldService.AdmitCommand(
                 holdId, caller.orgId(), caller.projectId(), caller.apiKeyId(), modelCode,
-                cashLeg, bonusLeg, packUnits,
+                plan.legs(),
                 caller.keyRpmLimit(), caller.projRpmLimit(),
                 caller.keyMaxConcurrency(), caller.projMaxConcurrency(), caller.orgMaxConcurrency(),
-                properties.getBilling().getLeaseTtlSeconds());
+                properties.getBilling().getLeaseTtlSeconds(), true);
         List<String> concurrencyKeys = concurrencyKeys(caller);
         return preHoldService.admit(command)
                 .flatMap(status -> switch (status) {
@@ -820,7 +811,8 @@ public class GatewayProxyService {
     private Mono<Void> releaseHold(GatewayAdmissionService.AdmissionLease lease) {
         return Mono.defer(() -> lease.holdId() == null
                         ? Mono.empty()
-                        : preHoldService.release(lease.holdId(), lease.orgId()))
+                        : preHoldService.release(lease.holdId(), lease.orgId(),
+                        properties.getBilling().getLeaseTtlSeconds() * 12L))
                 .onErrorResume(ex -> Mono.empty())
                 .then(admissionService.releaseLease(lease));
     }

@@ -121,11 +121,24 @@ public class EntitlementMirrorService {
     }
 
     /** The batches a hold froze, used to charge exactly what was reserved. */
-    public Mono<List<String[]>> heldLegs(String holdId) {
+    public Mono<List<app.pagefault.hyperllm.domain.billing.AllocationLeg>> heldLegs(String holdId) {
         return redisTemplate.opsForHash()
                 .get(GatewayRedisKeys.hold(holdId), "legs")
-                .map(value -> decodeLegs(String.valueOf(value)))
-                .defaultIfEmpty(List.of());
+                .map(value -> toLegs(decodeLegs(String.valueOf(value))))
+                .defaultIfEmpty(java.util.List.of());
+    }
+
+    private static java.util.List<app.pagefault.hyperllm.domain.billing.AllocationLeg> toLegs(List<String[]> raw) {
+        java.util.List<app.pagefault.hyperllm.domain.billing.AllocationLeg> legs = new java.util.ArrayList<>();
+        for (String[] parts : raw) {
+            app.pagefault.hyperllm.domain.billing.AllocationType type =
+                    app.pagefault.hyperllm.domain.billing.AllocationType.valueOf(parts[0]);
+            java.util.UUID id = parts[1] == null || parts[1].isEmpty() ? null : java.util.UUID.fromString(parts[1]);
+            long units = Long.parseLong(parts[2]);
+            long micros = Long.parseLong(parts[3]);
+            legs.add(new app.pagefault.hyperllm.domain.billing.AllocationLeg(type, id, units, micros));
+        }
+        return legs;
     }
 
     private List<String> buildLoadArguments(UUID orgId, String modelCode) {

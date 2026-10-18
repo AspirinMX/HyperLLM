@@ -1,6 +1,7 @@
 package app.pagefault.hyperllm.gateway;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import org.junit.jupiter.api.AfterEach;
@@ -8,13 +9,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.testcontainers.containers.GenericContainer;
+import reactor.core.publisher.Flux;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,7 +24,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Runs the reservation lifecycle against a real Redis so the Lua atomicity is exercised, not mocked.
- * Expiry is simulated by rewriting the sorted-set score instead of sleeping.
+ *
+ * <p>The reservation is per batch, so every assertion is about one batch: the freeze lands on the
+ * batch the allocator picked, and a settlement charges that batch and no other. Expiry is simulated
+ * by rewriting the sorted-set score instead of sleeping.
  */
 @Tag("integration")
 class PreHoldServiceIT {
@@ -39,25 +42,34 @@ class PreHoldServiceIT {
     private LettuceConnectionFactory factory;
     private ReactiveStringRedisTemplate redis;
     private PreHoldService service;
-    private GatewayProperties properties;
+    private UUID orgId;
+    private UUID projectId;
+    private UUID packId;
+    private UUID grantId;
 
     @BeforeEach
     void setUp() {
         factory = new LettuceConnectionFactory(REDIS.getHost(), REDIS.getMappedPort(6379));
         factory.afterPropertiesSet();
         redis = new ReactiveStringRedisTemplate(factory);
-        RedisConnections.flush(redis);
+        redis.execute(connection -> connection.serverCommands().flushAll()).blockLast();
 
-        properties = new GatewayProperties();
+        GatewayProperties properties = new GatewayProperties();
         service = new PreHoldService(
                 redis,
                 properties,
-                admitScript(),
-                renewScript(),
-                settleScript(),
-                releaseScript(),
-                reclaimScript()
-        );
+                RedisScript.of(new ClassPathResource("lua/prehold_admit.lua"), String.class),
+                RedisScript.of(new ClassPathResource("lua/prehold_renew.lua"), Long.class),
+                RedisScript.of(new ClassPathResource("lua/prehold_settle.lua"), List.class),
+                RedisScript.of(new ClassPathResource("lua/prehold_release.lua"), String.class),
+                RedisScript.of(new ClassPathResource("lua/prehold_reclaim.lua"), String.class),
+                RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class));
+
+        orgId = UUID.randomUUID();
+        projectId = UUID.randomUUID();
+        packId = UUID.randomUUID();
+        grantId = UUID.randomUUID();
+        seedWallet(10_000L);
     }
 
     @AfterEach
@@ -66,236 +78,178 @@ class PreHoldServiceIT {
     }
 
     @Test
-    void admissionReservesEveryTierInItsOwnUnit() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 10_000L, 5_000L);
-        setPackAvailability(orgId, "gpt", 1_000L);
+    void freezesEveryBatchTheAllocatorPicked() {
+        seedPack(100L);
+        seedGrant(5_000L);
 
-        assertThat(admit(orgId, projectId, "gpt", 3_000L, 1_000L, 400L)).isEqualTo("OK");
+        assertThat(admit("h1", List.of(
+                AllocationLeg.pack(packId, 10L, 500L),
+                AllocationLeg.bonus(grantId, 200L),
+                AllocationLeg.cash(300L)))).isEqualTo("OK");
 
-        assertThat(wallet(orgId, "held_cash_micros")).isEqualTo(3_000L);
-        assertThat(wallet(orgId, "held_bonus_micros")).isEqualTo(1_000L);
-        assertThat(stringValue(GatewayRedisKeys.packHeld(orgId, "gpt"))).isEqualTo(400L);
+        assertThat(hash(packItem(), "held_units")).isEqualTo("10");
+        assertThat(hash(bonusItem(), "held_micros")).isEqualTo("200");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("300");
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.hold("h1"), "legs").block())
+                .isNotNull();
     }
 
     @Test
-    void aSecondHoldCannotSpendWhatTheFirstReserved() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 10_000L, 0L);
-        setPackAvailability(orgId, "gpt", 0L);
-
-        assertThat(admit(orgId, projectId, "gpt", 8_000L, 0L, 0L)).isEqualTo("OK");
-        assertThat(admit(orgId, projectId, "gpt", 3_000L, 0L, 0L)).isEqualTo("INSUFFICIENT_BALANCE");
+    void refusesWhenABatchIsNotMirrored() {
+        assertThat(admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L))))
+                .isEqualTo("MISS_ENTITLEMENTS");
+        // Nothing was frozen before the script gave up.
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.holdsExpiry(), "h1").block()).isNull();
     }
 
     @Test
-    void packUnitsAreReservedSeparately() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 10_000L, 0L);
-        setPackAvailability(orgId, "gpt", 500L);
+    void refusesWhenTheBatchCannotCoverTheUnits() {
+        seedPack(5L);
 
-        assertThat(admit(orgId, projectId, "gpt", 1_000L, 0L, 400L)).isEqualTo("OK");
-        assertThat(admit(orgId, projectId, "gpt", 1_000L, 0L, 200L)).isEqualTo("INSUFFICIENT_ENTITLEMENT");
+        assertThat(admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L))))
+                .isEqualTo("INSUFFICIENT_ENTITLEMENT");
+        assertThat(hash(packItem(), "held_units")).isEqualTo("0");
     }
 
     @Test
-    void settlementChargesExactlyOnceAndClampsAtZero() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 1_000L, 200L);
-        setPackAvailability(orgId, "gpt", 0L);
-        String holdId = admitHold(orgId, projectId, "gpt", 1_000L, 200L, 0L);
+    void refusesWhenCashCannotCoverTheRemainder() {
+        seedPack(0L);
+        seedWallet(100L);
 
-        PreHoldService.SettleOutcome first = service.settle(holdId, orgId, "gpt", 900L, 500L, 0L).block();
-        assertThat(first).isNotNull();
-        assertThat(first.cashCharged()).isEqualTo(900L);
-        assertThat(first.bonusCharged()).as("bonus cannot exceed the 200 available").isEqualTo(200L);
-        assertThat(wallet(orgId, "cash_micros")).isEqualTo(100L);
-        assertThat(wallet(orgId, "general_bonus_micros")).isZero();
-        assertThat(wallet(orgId, "held_cash_micros")).isZero();
-        assertThat(wallet(orgId, "held_bonus_micros")).isZero();
-
-        PreHoldService.SettleOutcome replay = service.settle(holdId, orgId, "gpt", 900L, 500L, 0L).block();
-        assertThat(replay).isNotNull();
-        assertThat(replay.alreadySettled()).isTrue();
-        assertThat(wallet(orgId, "cash_micros")).as("a replayed settlement must not charge twice").isEqualTo(100L);
+        assertThat(admit("h1", List.of(AllocationLeg.cash(300L))))
+                .isEqualTo("INSUFFICIENT_BALANCE");
     }
 
     @Test
-    void releasingReturnsTheReservationWithoutCharging() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 5_000L, 1_000L);
-        setPackAvailability(orgId, "gpt", 0L);
-        String holdId = admitHold(orgId, projectId, "gpt", 2_000L, 500L, 0L);
+    void settlementReleasesTheFreezeAndChargesTheBatches() {
+        seedPack(100L);
+        seedGrant(5_000L);
+        admit("h1", List.of(
+                AllocationLeg.pack(packId, 10L, 500L),
+                AllocationLeg.bonus(grantId, 200L),
+                AllocationLeg.cash(300L)));
 
-        assertThat(service.release(holdId, orgId).block()).isTrue();
-        assertThat(wallet(orgId, "cash_micros")).isEqualTo(5_000L);
-        assertThat(wallet(orgId, "general_bonus_micros")).isEqualTo(1_000L);
-        assertThat(wallet(orgId, "held_cash_micros")).isZero();
-        assertThat(wallet(orgId, "held_bonus_micros")).isZero();
-
-        PreHoldService.SettleOutcome afterRelease = service.settle(holdId, orgId, "gpt", 2_000L, 500L, 0L).block();
-        assertThat(afterRelease).isNotNull();
-        assertThat(afterRelease.alreadySettled()).isTrue();
-        assertThat(wallet(orgId, "cash_micros")).isEqualTo(5_000L);
-    }
-
-    @Test
-    void reclaimReleasesOnlyExpiredLeasesAndOnlyOnce() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 5_000L, 0L);
-        setPackAvailability(orgId, "gpt", 0L);
-        String holdId = admitHold(orgId, projectId, "gpt", 2_000L, 0L, 0L);
-
-        assertThat(service.reclaimExpired(orgId).block()).as("a live lease is untouched").isZero();
-
-        expireNow(holdId);
-        assertThat(service.reclaimExpired(orgId).block()).isEqualTo(1);
-        assertThat(wallet(orgId, "held_cash_micros")).isZero();
-        assertThat(service.reclaimExpired(orgId).block()).as("a reclaimed hold is gone").isZero();
-    }
-
-    @Test
-    void aSettlementThatArrivesAfterTheReclaimStillCharges() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 5_000L, 0L);
-        setPackAvailability(orgId, "gpt", 0L);
-        String holdId = admitHold(orgId, projectId, "gpt", 2_000L, 0L, 0L);
-
-        expireNow(holdId);
-        assertThat(service.reclaimExpired(orgId).block()).isEqualTo(1);
-
-        PreHoldService.SettleOutcome outcome = service.settle(holdId, orgId, "gpt", 1_500L, 0L, 0L).block();
-        assertThat(outcome).isNotNull();
-        assertThat(outcome.settledAfterReclaim()).isTrue();
-        assertThat(outcome.cashCharged()).isEqualTo(1_500L);
-        assertThat(wallet(orgId, "cash_micros")).isEqualTo(3_500L);
-    }
-
-    @Test
-    void heartbeatKeepsTheLeaseFromBeingReclaimed() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 5_000L, 0L);
-        setPackAvailability(orgId, "gpt", 0L);
-        String holdId = admitHold(orgId, projectId, "gpt", 1_000L, 0L, 0L);
-
-        expireNow(holdId);
-        assertThat(service.renew(holdId, orgId, projectId, null, 300L).block()).isTrue();
-        assertThat(service.reclaimExpired(orgId).block()).isZero();
-        assertThat(wallet(orgId, "held_cash_micros")).isEqualTo(1_000L);
-    }
-
-    @Test
-    void concurrentAdmissionsCannotExceedCapacity() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 40_000L, 0L);
-        setPackAvailability(orgId, "gpt", 0L);
-
-        long accepted = IntStream.range(0, 50)
-                .parallel()
-                .mapToObj(i -> admit(orgId, projectId, "gpt", 1_000L, 0L, 0L))
-                .filter("OK"::equals)
-                .count();
-
-        assertThat(accepted).as("only 40 holds of 1_000 micros fit into 40_000").isEqualTo(40);
-        assertThat(wallet(orgId, "held_cash_micros")).isEqualTo(40_000L);
-        assertThat(wallet(orgId, "cash_micros")).isEqualTo(40_000L);
-    }
-
-    @Test
-    void settlementDecrementsThePackAvailabilityAggregate() {
-        UUID orgId = UUID.randomUUID();
-        UUID projectId = UUID.randomUUID();
-        seedWallet(orgId, 1_000L, 0L);
-        setPackAvailability(orgId, "gpt", 500L);
-        String holdId = admitHold(orgId, projectId, "gpt", 100L, 0L, 300L);
-
-        service.settle(holdId, orgId, "gpt", 100L, 0L, 300L).block();
-
-        assertThat(stringValue(GatewayRedisKeys.packAvailability(orgId, "gpt"))).isEqualTo(200L);
-    }
-
-    private String admit(UUID orgId, UUID projectId, String modelCode, long cash, long bonus, long units) {
-        String holdId = UUID.randomUUID().toString();
-        return service.admit(new PreHoldService.AdmitCommand(
-                holdId, orgId, projectId, null, modelCode, cash, bonus, units,
-                null, null, null, null, 50, properties.getBilling().getLeaseTtlSeconds()
-        )).block();
-    }
-
-    private String admitHold(UUID orgId, UUID projectId, String modelCode, long cash, long bonus, long units) {
-        String holdId = UUID.randomUUID().toString();
-        String status = service.admit(new PreHoldService.AdmitCommand(
-                holdId, orgId, projectId, null, modelCode, cash, bonus, units,
-                null, null, null, null, 50, properties.getBilling().getLeaseTtlSeconds()
-        )).block();
-        assertThat(status).isEqualTo("OK");
-        return holdId;
-    }
-
-    private void seedWallet(UUID orgId, long cash, long bonus) {
-        redis.opsForHash().putAll(GatewayRedisKeys.wallet(orgId), Map.of(
-                "cash_micros", String.valueOf(cash),
-                "general_bonus_micros", String.valueOf(bonus),
-                "status", "ACTIVE"
-        )).block();
-    }
-
-    private void setPackAvailability(UUID orgId, String modelCode, long units) {
-        redis.opsForValue().set(GatewayRedisKeys.packAvailability(orgId, modelCode), String.valueOf(units)).block();
-    }
-
-    private void expireNow(String holdId) {
-        redis.opsForZSet()
-                .add(GatewayRedisKeys.holdsExpiry(), holdId, System.currentTimeMillis() - 1_000L)
+        PreHoldService.SettleOutcome outcome = service.settle(
+                        "h1", orgId,
+                        List.of(AllocationLeg.pack(packId, 8L, 400L),
+                                AllocationLeg.bonus(grantId, 100L),
+                                AllocationLeg.cash(200L)),
+                        "{}", 3600L, 300_000L, false, 300L)
                 .block();
+
+        assertThat(outcome.cashCharged()).isEqualTo(200L);
+        assertThat(outcome.bonusCharged()).isEqualTo(100L);
+        assertThat(hash(packItem(), "held_units")).isEqualTo("0");
+        assertThat(hash(packItem(), "remaining_units")).isEqualTo("92");
+        assertThat(hash(bonusItem(), "held_micros")).isEqualTo("0");
+        assertThat(hash(bonusItem(), "remaining_micros")).isEqualTo("4900");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+        assertThat(hash(wallet(), "cash_micros")).isEqualTo("9800");
     }
 
-    private long wallet(UUID orgId, String field) {
-        Object value = redis.opsForHash().get(GatewayRedisKeys.wallet(orgId), field).block();
-        return value == null ? 0L : Long.parseLong(String.valueOf(value));
+    @Test
+    void settlementIsIdempotent() {
+        seedPack(100L);
+        admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L)));
+        List<AllocationLeg> charges = List.of(AllocationLeg.pack(packId, 10L, 500L));
+
+        service.settle("h1", orgId, charges, "{}", 3600L, 300_000L, false, 300L).block();
+        PreHoldService.SettleOutcome second =
+                service.settle("h1", orgId, charges, "{}", 3600L, 300_000L, false, 300L).block();
+
+        assertThat(second.alreadySettled()).isTrue();
+        assertThat(hash(packItem(), "remaining_units")).isEqualTo("90");
     }
 
-    private long stringValue(String key) {
-        String value = redis.opsForValue().get(key).block();
-        return value == null ? 0L : Long.parseLong(value);
+    @Test
+    void releaseReturnsTheFreezeWithoutCharging() {
+        seedPack(100L);
+        admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L), AllocationLeg.cash(0L)));
+
+        service.release("h1", orgId, 3600L).block();
+
+        assertThat(hash(packItem(), "held_units")).isEqualTo("0");
+        assertThat(hash(packItem(), "remaining_units")).isEqualTo("100");
     }
 
-    private static RedisScript<String> admitScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_admit.lua"), String.class);
+    @Test
+    void reclaimOnlyReleasesAHoldWhoseLeaseExpired() {
+        seedPack(100L);
+        admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L)));
+
+        assertThat(service.reclaimExpired(10).block()).isZero();
+        assertThat(hash(packItem(), "held_units")).isEqualTo("10");
+
+        redis.opsForZSet().add(GatewayRedisKeys.holdsExpiry(), "h1", 1d).block();
+
+        assertThat(service.reclaimExpired(10).block()).isEqualTo(1);
+        assertThat(hash(packItem(), "held_units")).isEqualTo("0");
     }
 
-    private static RedisScript<Long> renewScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_renew.lua"), Long.class);
+    @Test
+    void concurrentAdmissionsCannotOversellOneBatch() {
+        seedPack(40L);
+
+        List<String> verdicts = Flux.range(1, 50)
+                .flatMap(index -> admitAsync("h" + index, List.of(AllocationLeg.pack(packId, 1L, 10L))))
+                .collectList()
+                .block();
+
+        assertThat(verdicts.stream().filter("OK"::equals).count()).isEqualTo(40);
+        assertThat(hash(packItem(), "held_units")).isEqualTo("40");
     }
 
-    @SuppressWarnings("rawtypes")
-    private static RedisScript<List> settleScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_settle.lua"), List.class);
+    private String admit(String holdId, List<AllocationLeg> legs) {
+        return admitAsync(holdId, legs).block();
     }
 
-    private static RedisScript<String> releaseScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_release.lua"), String.class);
+    private reactor.core.publisher.Mono<String> admitAsync(String holdId, List<AllocationLeg> legs) {
+        return service.admit(new PreHoldService.AdmitCommand(
+                holdId, orgId, projectId, null, "gpt", legs,
+                null, null, null, null, 0, 300L, false));
     }
 
-    private static RedisScript<String> reclaimScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_reclaim.lua"), String.class);
+    private void seedWallet(long cash) {
+        redis.opsForHash().putAll(wallet(), Map.of(
+                "cash_micros", String.valueOf(cash),
+                "held_cash_micros", "0",
+                "status", "ACTIVE")).block();
     }
 
-    private static final class RedisConnections {
-        private RedisConnections() {
-        }
+    private void seedPack(long remaining) {
+        long expiresAt = System.currentTimeMillis() + 60_000L;
+        redis.opsForZSet().add(GatewayRedisKeys.pack(orgId, "gpt"), packId.toString(), expiresAt).block();
+        redis.opsForHash().putAll(packItem(), Map.of(
+                "remaining_units", String.valueOf(remaining),
+                "held_units", "0",
+                "unit_type", "TOKENS",
+                "expires_at", String.valueOf(expiresAt))).block();
+    }
 
-        static void flush(ReactiveStringRedisTemplate template) {
-            template.execute(connection -> connection.serverCommands().flushDb()).blockLast(Duration.ofSeconds(5));
-        }
+    private void seedGrant(long remaining) {
+        long expiresAt = System.currentTimeMillis() + 60_000L;
+        redis.opsForZSet().add(GatewayRedisKeys.bonus(orgId), grantId.toString(), expiresAt).block();
+        redis.opsForHash().putAll(bonusItem(), Map.of(
+                "remaining_micros", String.valueOf(remaining),
+                "held_micros", "0",
+                "expires_at", String.valueOf(expiresAt))).block();
+    }
+
+    private String wallet() {
+        return GatewayRedisKeys.wallet(orgId);
+    }
+
+    private String packItem() {
+        return GatewayRedisKeys.packItem(packId);
+    }
+
+    private String bonusItem() {
+        return GatewayRedisKeys.bonusItem(grantId);
+    }
+
+    private String hash(String key, String field) {
+        Object value = redis.opsForHash().get(key, field).block();
+        return value == null ? null : String.valueOf(value);
     }
 }
