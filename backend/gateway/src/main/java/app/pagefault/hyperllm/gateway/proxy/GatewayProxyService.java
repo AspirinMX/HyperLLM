@@ -261,6 +261,7 @@ public class GatewayProxyService {
     ) {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
+        AtomicBoolean served = new AtomicBoolean();
 
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
@@ -274,6 +275,11 @@ public class GatewayProxyService {
                         return clientResponse.releaseBody()
                                 .thenMany(Flux.error(new RetryableUpstreamException(
                                         status, "Upstream returned retryable status " + status)));
+                    }
+                    if (clientResponse.statusCode().is2xxSuccessful()) {
+                        // The upstream accepted and answered, so the prompt has been processed:
+                        // from here on a reclaimed lease may settle at the prompt-only floor.
+                        markServedOnce(lease, served);
                     }
                     if (!isStream || !clientResponse.statusCode().is2xxSuccessful()) {
                         return clientResponse.bodyToMono(byte[].class)
@@ -636,6 +642,20 @@ public class GatewayProxyService {
         preHoldService.renew(
                         lease.holdId(), lease.orgId(), lease.concurrencyKeys(),
                         properties.getBilling().getLeaseTtlSeconds(), true)
+                .subscribe(ok -> { }, ex -> { });
+    }
+
+    /**
+     * Records the first accepted upstream response for this request, at most once.
+     *
+     * <p>The marker is written before any body is emitted, so a stream that dies mid-flight still
+     * counts as served: the upstream did the work and the client did receive a response.
+     */
+    private void markServedOnce(GatewayAdmissionService.AdmissionLease lease, AtomicBoolean served) {
+        if (lease == null || lease.holdId() == null || !served.compareAndSet(false, true)) {
+            return;
+        }
+        preHoldService.markServed(lease.holdId(), properties.getBilling().getLeaseTtlSeconds())
                 .subscribe(ok -> { }, ex -> { });
     }
 
