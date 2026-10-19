@@ -546,11 +546,8 @@ public class GatewayProxyService {
                     long bonusLeg = sumLegs(plan, AllocationType.BONUS);
                     long packUnits = sumPackUnits(plan);
                     String detailJson = AllocationDetailCodec.encodeV1(resolved, billable, plan);
-                    Mono<Deduction> deduction = lease.holdId() == null
-                            ? admissionService.deductExact(caller.orgId(), cashLeg, bonusLeg)
-                                    .map(applied -> new Deduction(
-                                            applied.cashDeductedMicros(), applied.bonusDeductedMicros(), false, false))
-                            : preHoldService.settle(
+                    Mono<Deduction> deduction =
+                            preHoldService.settle(
                                             lease.holdId(), caller.orgId(), charges.legs(), detailJson,
                                             properties.getBilling().getLeaseTtlSeconds() * 12L,
                                             300_000L,
@@ -662,17 +659,6 @@ public class GatewayProxyService {
             CanonicalChatRequest canonical
     ) {
         GatewayProperties.Billing billing = properties.getBilling();
-        if (!billing.isPreholdEnabled() || !preholdAppliesTo(caller.orgId())) {
-            return legacyAdmit(caller);
-        }
-        if (billing.isPreholdShadow()) {
-            // Shadow mode never reserves: it computes what the hold would have been, logs whether it
-            // would have rejected the request, and then admits through the Phase 1 path.
-            return dryRunPreHold(caller, route, canonical)
-                    .onErrorResume(ex -> Mono.empty())
-                    .then(legacyAdmit(caller));
-        }
-
         String modelCode = route.model().modelCode();
         long promptEstimate = Math.max(0L, tokenEstimator.estimatePromptTokens(canonical));
         int outputCap = canonical.maxTokens() != null && canonical.maxTokens() > 0
@@ -700,61 +686,6 @@ public class GatewayProxyService {
                             .then(mirrorService.read(caller.orgId(), modelCode, true))
                             .flatMap(mirror -> admitWithEstimate(
                                     caller, modelCode, target, billable, mirror.snapshot()));
-                });
-    }
-
-    private Mono<GatewayAdmissionService.AdmissionLease> legacyAdmit(CallerContext caller) {
-        return admissionService.admit(
-                caller.orgId(), caller.projectId(), caller.apiKeyId(),
-                caller.keyRpmLimit(), caller.projRpmLimit(),
-                caller.keyMaxConcurrency(), caller.projMaxConcurrency(),
-                caller.orgMaxConcurrency()
-        );
-    }
-
-    private Mono<Void> dryRunPreHold(CallerContext caller, GatewayModelRoute route, CanonicalChatRequest canonical) {
-        GatewayProperties.Billing billing = properties.getBilling();
-        long promptEstimate = Math.max(0L, tokenEstimator.estimatePromptTokens(canonical));
-        int outputCap = canonical.maxTokens() != null && canonical.maxTokens() > 0
-                ? canonical.maxTokens()
-                : billing.getDefaultOutputTokens();
-        return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())
-                .map(override -> PricingResolver.resolve(
-                        caller.orgDiscountRatioBps(), caller.tierDefaultDiscountBps(),
-                        route.activePricing(), override, promptEstimate))
-                .defaultIfEmpty(PricingResolver.resolve(
-                        caller.orgDiscountRatioBps(), caller.tierDefaultDiscountBps(),
-                        route.activePricing(), null, promptEstimate))
-                .flatMap(resolved -> {
-                    long raw = CostMath.rawCostMicros(
-                            promptEstimate, outputCap, 0L, 0L, 0L,
-                            resolved.inputPriceMicros1m(), resolved.outputPriceMicros1m(),
-                            resolved.cacheReadPriceMicros1m(), resolved.cacheWritePriceMicros1m(),
-                            resolved.reasoningPriceMicros1m());
-                    long target = CostMath.discountedCostMicros(
-                            CostMath.discountedCostMicros(raw, resolved.discountBps()),
-                            billing.getSafetyFactorBps());
-                    return Mono.zip(
-                                    cacheService.readWalletSnapshot(caller.orgId()),
-                                    cacheService.ensurePackAvailability(
-                                            caller.orgId(), route.model().modelCode()))
-                            .doOnNext(resources -> {
-                                AllocationPlan plan = EntitlementAllocator.allocate(
-                                        target, promptEstimate + outputCap,
-                                        new EntitlementSnapshot(
-                                                List.of(new EntitlementSnapshot.PackBucket(
-                                                        null, PackUnitType.TOKENS,
-                                                        Math.max(0L, resources.getT2()))),
-                                                List.of(new EntitlementSnapshot.BonusBucket(
-                                                        null, Math.max(0L, resources.getT1().bonusMicros()))),
-                                                Math.max(0L, resources.getT1().cashMicros())));
-                                long held = sumLegs(plan, AllocationType.CASH)
-                                        + sumLegs(plan, AllocationType.BONUS);
-                                log.info("prehold shadow org={} model={} estimate={} holdable={} wouldReject={}",
-                                        caller.orgId(), route.model().modelCode(), target, held,
-                                        held == 0L && target > 0L);
-                            })
-                            .then();
                 });
     }
 
@@ -788,10 +719,6 @@ public class GatewayProxyService {
                 });
     }
 
-    private boolean preholdAppliesTo(UUID orgId) {
-        List<String> whitelist = properties.getBilling().getPreholdOrgWhitelist();
-        return whitelist == null || whitelist.isEmpty() || whitelist.contains(orgId.toString());
-    }
 
     private static List<String> concurrencyKeys(CallerContext caller) {
         UUID effectiveKeyId = caller.apiKeyId() != null ? caller.apiKeyId() : caller.projectId();

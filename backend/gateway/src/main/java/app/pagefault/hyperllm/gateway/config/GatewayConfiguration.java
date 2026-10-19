@@ -38,23 +38,6 @@ public class GatewayConfiguration {
         return Schedulers.fromExecutorService(Executors.newVirtualThreadPerTaskExecutor(), "domain-fallback");
     }
 
-    @Bean
-    public RedisScript<String> admissionLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/admission.lua"), String.class);
-    }
-
-    @SuppressWarnings("rawtypes")
-    @Bean
-    public RedisScript<java.util.List> deductWalletLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/deduct_wallet.lua"), java.util.List.class);
-    }
-
-    @SuppressWarnings("rawtypes")
-    @Bean
-    public RedisScript<java.util.List> deductWalletSplitLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/deduct_wallet_split.lua"), java.util.List.class);
-    }
-
     @SuppressWarnings("rawtypes")
     @Bean(name = "preholdSnapshotLuaScript")
     public RedisScript<java.util.List> preholdSnapshotLuaScript() {

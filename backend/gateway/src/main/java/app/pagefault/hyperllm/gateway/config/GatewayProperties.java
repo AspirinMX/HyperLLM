@@ -51,9 +51,6 @@ public class GatewayProperties {
      */
     @Data
     public static class Billing {
-        private boolean preholdEnabled = true;
-        private boolean preholdShadow = false;
-        private List<String> preholdOrgWhitelist = new ArrayList<>();
         private long leaseTtlSeconds = 300;
         private long heartbeatMinIntervalSeconds = 15;
         private int safetyFactorBps = 11500;
