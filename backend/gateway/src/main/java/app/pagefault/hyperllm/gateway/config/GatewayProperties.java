@@ -14,6 +14,7 @@ public class GatewayProperties {
     private Cache cache = new Cache();
     private Upstream upstream = new Upstream();
     private Billing billing = new Billing();
+    private Outbox outbox = new Outbox();
 
     @Data
     public static class Security {
@@ -49,6 +50,30 @@ public class GatewayProperties {
      * Pre-hold tuning. The switches exist so a bad rollout can fall back to Phase 1 post-charge
      * behaviour without a redeploy.
      */
+    /**
+     * Outbox write tuning. The gateway appends one row per settled request, so the write is shaped
+     * as an append: a bounded queue drained by a single writer, never a statement per request.
+     */
+    @Data
+    public static class Outbox {
+        /** How long the writer waits for a batch to fill before flushing what it has. */
+        private long flushIntervalMs = 20;
+        /** Rows that make a batch full enough to flush early. */
+        private int batchSize = 200;
+        /** Upper bound on rows in one insert, so a burst cannot build an unbounded statement. */
+        private int maxBatchRows = 500;
+        /** Bound on queued rows; the depth is what a saturation alarm reads. */
+        private int queueCapacity = 100_000;
+        /** Queue depth ratio at which admission should stop rather than grow the backlog. */
+        private double admissionPauseRatio = 0.5;
+        /** After this long, a failing insert is abandoned and counted as a hole. */
+        private long retryDeadlineSeconds = 600;
+        /** Backoff between insert attempts. */
+        private long retryBackoffMs = 200;
+        /** Topic suffix every money event is routed to. */
+        private String aggregateType = "billing";
+    }
+
     @Data
     public static class Billing {
         private long leaseTtlSeconds = 300;
