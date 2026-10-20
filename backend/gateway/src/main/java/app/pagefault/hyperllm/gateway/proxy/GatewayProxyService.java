@@ -581,6 +581,7 @@ public class GatewayProxyService {
                             -packUnits,
                             deducted.shortfallMicros(),
                             charges.legs().stream().map(GatewayProxyService::toMoneyLeg).toList(),
+                            detailJson,
                             lease.holdId() == null ? null : UUID.fromString(lease.holdId()),
                             deducted.afterReclaim(),
                             "Model " + route.model().modelCode()
