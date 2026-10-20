@@ -1,7 +1,7 @@
 package app.pagefault.hyperllm.admin;
 
 import app.pagefault.hyperllm.common.id.UuidV7;
-import app.pagefault.hyperllm.common.messaging.BillingSettlementEvent;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.domain.model.auth.User;
@@ -112,13 +112,27 @@ class SettlementPipelineIT {
         ));
         walletRepository.insert(new Wallet(orgId, 1_000_000L, 0L, 1_000_000L, 0L, 0L, 0L, null, 0L, now));
 
-        BillingSettlementEvent event = new BillingSettlementEvent(
-                "req-pipeline-1", now, orgId, null, null,
-                -250_000L, 0L, 0L, "req:req-pipeline-1", "Kafka pipeline integration", null, null, false
+        BillingMoneyEvent event = new BillingMoneyEvent(
+                UuidV7.next(),
+                BillingMoneyEvent.EventType.CONSUME,
+                now,
+                orgId,
+                null,
+                null,
+                "req:req-pipeline-1",
+                -250_000L,
+                0L,
+                0L,
+                0L,
+                java.util.List.of(BillingMoneyEvent.Leg.cash(250_000L)),
+                "{\"v\":1}",
+                null,
+                false,
+                "Kafka pipeline integration"
         );
         String payload = objectMapper.writeValueAsString(event);
 
-        kafkaTemplate.send(KafkaTopics.LLM_BILLING_SETTLEMENT, payload).get();
+        kafkaTemplate.send(KafkaTopics.CDC_BILLING, orgId.toString(), payload).get();
 
         assertThat(awaitLedgerRows(orgId, 1))
                 .as("settlement event was not persisted through the Kafka listener")
@@ -127,7 +141,7 @@ class SettlementPipelineIT {
                 .isEqualTo(750_000L);
 
         // Replaying the same event must not create a second ledger row nor deduct twice.
-        kafkaTemplate.send(KafkaTopics.LLM_BILLING_SETTLEMENT, payload).get();
+        kafkaTemplate.send(KafkaTopics.CDC_BILLING, orgId.toString(), payload).get();
         Thread.sleep(2_000L);
 
         assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).total())

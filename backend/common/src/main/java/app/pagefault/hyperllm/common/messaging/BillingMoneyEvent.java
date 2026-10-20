@@ -29,6 +29,8 @@ public record BillingMoneyEvent(
         long packDeltaUnits,
         long shortfallMicros,
         List<Leg> legs,
+        /** Self-contained allocation detail; the ledger stores it verbatim. */
+        String allocationDetailJson,
         UUID holdId,
         boolean settledAfterReclaim,
         String description

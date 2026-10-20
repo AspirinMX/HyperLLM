@@ -39,6 +39,7 @@ class BillingMoneyEventTest {
                         BillingMoneyEvent.Leg.bonus(grantId, 200L),
                         BillingMoneyEvent.Leg.virtualBonus(400L),
                         BillingMoneyEvent.Leg.cash(300L)),
+                "{\"v\":1}",
                 holdId,
                 true,
                 "gpt-4o");
@@ -57,7 +58,8 @@ class BillingMoneyEventTest {
     void treatsAMissingLegListAsEmptyRatherThanNull() {
         BillingMoneyEvent event = new BillingMoneyEvent(
                 UUID.randomUUID(), BillingMoneyEvent.EventType.ADJUST, OffsetDateTime.now(ZoneOffset.UTC),
-                UUID.randomUUID(), null, null, "adj-1", 0L, 0L, 0L, 0L, null, null, false, null);
+                UUID.randomUUID(), null, null, "adj-1", 0L, 0L, 0L, 0L, null, null, null, false,
+                "adjustment");
 
         assertThat(event.legs()).isEmpty();
     }

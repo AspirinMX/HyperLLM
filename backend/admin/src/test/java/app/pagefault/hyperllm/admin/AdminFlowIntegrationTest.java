@@ -4,7 +4,7 @@ import app.pagefault.hyperllm.admin.config.TotpService;
 import app.pagefault.hyperllm.admin.consumer.BillingSettlementConsumer;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
-import app.pagefault.hyperllm.common.messaging.BillingSettlementEvent;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.auth.User;
 import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
@@ -92,7 +92,7 @@ class AdminFlowIntegrationTest {
     @Autowired private OrganizationRepository organizationRepository;
     @Autowired private WalletRepository walletRepository;
     @Autowired private WalletLedgerRepository walletLedgerRepository;
-    @Autowired private BillingSettlementConsumer settlementConsumer;
+    @Autowired private app.pagefault.hyperllm.admin.consumer.LedgerFolder ledgerFolder;
 
     @Test
     void enforcesBootstrapAdminTotpSetupEncryptedChannelProbePricingOverlapAndIdempotentSettlement() throws Exception {
@@ -265,12 +265,26 @@ class AdminFlowIntegrationTest {
                 .isEqualTo("1000000");
 
         // Consume settlement event twice; second replay must be ignored idempotently
-        BillingSettlementEvent event = new BillingSettlementEvent(
-                "req-settlement-1", now, orgId, null, null,
-                -250_000L, 0L, 0L, "req:req-settlement-1", "Gateway consume test", null, null, false
+        BillingMoneyEvent event = new BillingMoneyEvent(
+                app.pagefault.hyperllm.common.id.UuidV7.next(),
+                BillingMoneyEvent.EventType.CONSUME,
+                now,
+                orgId,
+                null,
+                null,
+                "req:req-settlement-1",
+                -250_000L,
+                0L,
+                0L,
+                0L,
+                java.util.List.of(BillingMoneyEvent.Leg.cash(250_000L)),
+                "{\"v\":1}",
+                null,
+                false,
+                "Gateway consume test"
         );
-        assertThat(settlementConsumer.ingestIdempotent(event)).isTrue();
-        assertThat(settlementConsumer.ingestIdempotent(event)).isFalse();
+        assertThat(ledgerFolder.fold(event)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
 
         Wallet settled = walletRepository.findByOrgId(orgId).orElseThrow();
         assertThat(settled.cashBalanceMicros()).isEqualTo(750_000L);
