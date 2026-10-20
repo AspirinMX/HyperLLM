@@ -6,7 +6,7 @@ import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
-import app.pagefault.hyperllm.common.messaging.BillingSettlementEvent;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.money.CostMath;
 import app.pagefault.hyperllm.domain.billing.AllocationDetailCodec;
 import app.pagefault.hyperllm.domain.billing.AllocationLeg;
@@ -561,23 +561,29 @@ public class GatewayProxyService {
                                             properties.getBilling().getLeaseTtlSeconds())
                                     .map(outcome -> new Deduction(
                                             outcome.cashCharged(), outcome.bonusCharged(),
-                                            outcome.alreadySettled(), outcome.settledAfterReclaim()));
+                                            outcome.alreadySettled(), outcome.settledAfterReclaim(),
+                                            outcome.shortfallMicros()));
                     return deduction
                             .flatMap(deducted -> {
-                    BillingSettlementEvent settlement = new BillingSettlementEvent(
-                            requestId,
+                    UUID eventId = lease.holdId() == null
+                            ? UuidV7.next()
+                            : UUID.fromString(lease.holdId());
+                    BillingMoneyEvent settlement = new BillingMoneyEvent(
+                            eventId,
+                            BillingMoneyEvent.EventType.CONSUME,
                             eventCreatedAt,
                             caller.orgId(),
                             caller.projectId(),
                             caller.apiKeyId(),
+                            "req:" + requestId,
                             -deducted.cashMicros(),
                             -deducted.bonusMicros(),
                             -packUnits,
-                            "req:" + requestId,
-                            "Model " + route.model().modelCode(),
-                            detailJson,
+                            deducted.shortfallMicros(),
+                            charges.legs().stream().map(GatewayProxyService::toMoneyLeg).toList(),
                             lease.holdId() == null ? null : UUID.fromString(lease.holdId()),
-                            deducted.afterReclaim()
+                            deducted.afterReclaim(),
+                            "Model " + route.model().modelCode()
                     );
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,
@@ -621,7 +627,24 @@ public class GatewayProxyService {
                 });
     }
 
-    private record Deduction(long cashMicros, long bonusMicros, boolean alreadySettled, boolean afterReclaim) {
+    private record Deduction(
+            long cashMicros,
+            long bonusMicros,
+            boolean alreadySettled,
+            boolean afterReclaim,
+            long shortfallMicros
+    ) {
+    }
+
+    /** One allocation leg as the ledger event states it. */
+    private static BillingMoneyEvent.Leg toMoneyLeg(AllocationLeg leg) {
+        return switch (leg.type()) {
+            case PACK -> BillingMoneyEvent.Leg.pack(leg.id(), leg.units(), leg.micros());
+            case BONUS -> leg.id() == null
+                    ? BillingMoneyEvent.Leg.virtualBonus(leg.micros())
+                    : BillingMoneyEvent.Leg.bonus(leg.id(), leg.micros());
+            case CASH -> BillingMoneyEvent.Leg.cash(leg.micros());
+        };
     }
 
     /**

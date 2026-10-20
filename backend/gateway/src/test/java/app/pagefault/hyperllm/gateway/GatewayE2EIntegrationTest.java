@@ -158,6 +158,8 @@ class GatewayE2EIntegrationTest {
     @Autowired private ProjectRepository projectRepository;
     @Autowired private ApiKeyRepository apiKeyRepository;
     @Autowired private WalletRepository walletRepository;
+    @Autowired private app.pagefault.hyperllm.domain.repository.BonusGrantRepository bonusGrantRepository;
+    @Autowired private org.jooq.DSLContext dsl;
     @Autowired private ProviderRepository providerRepository;
     @Autowired private ChannelRepository channelRepository;
     @Autowired private VirtualModelRepository modelRepository;
@@ -185,8 +187,17 @@ class GatewayE2EIntegrationTest {
                 List.of("gpt-gw-test", "claude-gw-test"), 5, null, null, false, (short) 7,
                 null, ProjectStatus.ACTIVE, null, 0L, now, now
         ));
-        // 5_000 bonus + 20_000 cash = 25_000 micros
+        // 5_000 bonus + 20_000 cash = 25_000 micros. The bonus is modelled as a batch, because the
+        // mirror is built from batches: there is no aggregate bonus field to read any more.
         walletRepository.insert(new Wallet(orgId, 20_000L, 5_000L, 20_000L, 5_000L, 0L, 0L, null, 0L, now));
+        UUID grantId = UuidV7.next();
+        bonusGrantRepository.insert(new app.pagefault.hyperllm.domain.model.billing.BonusGrant(
+                grantId, orgId,
+                app.pagefault.hyperllm.domain.model.enums.GrantSource.SIGNUP,
+                null, null, null, 5_000L, 5_000L,
+                now.plusDays(30),
+                app.pagefault.hyperllm.domain.model.enums.EntitlementStatus.ACTIVE,
+                0L, now, now));
 
         ApiKeyGenerator.GeneratedApiKey generated = ApiKeyGenerator.generateLiveKey();
         String keyHash = HmacSha256.hmacHex(generated.rawKey(), "gateway-test-pepper-v1");
@@ -306,17 +317,15 @@ class GatewayE2EIntegrationTest {
                 .withRequestBody(containing("\"gpt-4o-mini\"")));
 
         String walletRedisKey = GatewayRedisKeys.wallet(orgId);
-        assertThat(redisTemplate.opsForHash().get(walletRedisKey, "general_bonus_micros").block()).isEqualTo("0");
         assertThat(redisTemplate.opsForHash().get(walletRedisKey, "cash_micros").block()).isEqualTo("14000");
+        // The whole bonus batch was spent: the freeze was released and the batch decremented.
+        String grantItemKey = GatewayRedisKeys.bonusItem(grantId);
+        assertThat(redisTemplate.opsForHash().get(grantItemKey, "remaining_micros").block()).isEqualTo("0");
+        assertThat(redisTemplate.opsForHash().get(grantItemKey, "held_micros").block()).isEqualTo("0");
 
-        // Verify settlement event landed in Kafka topic
-        try (KafkaConsumer<String, String> consumer = createConsumer()) {
-            consumer.subscribe(List.of(KafkaTopics.LLM_BILLING_SETTLEMENT));
-            BillingSettlementEvent consumed = pollForOrgEvent(consumer, orgId);
-            assertThat(consumed).isNotNull();
-            assertThat(consumed.bonusDeltaMicros()).isEqualTo(-5_000L);
-            assertThat(consumed.cashDeltaMicros()).isEqualTo(-6_000L);
-        }
+        // The settlement is a row in the outbox, not a Kafka message: the ledger is fed from the
+        // table's write-ahead log, so the row itself is the message.
+        assertThat(pollOutboxForOrg(orgId)).isTrue();
 
         // 2. Anthropic non-streaming /v1/messages using x-api-key -> second request within RPM=2 succeeds
         webTestClient.post()
@@ -395,6 +404,21 @@ class GatewayE2EIntegrationTest {
                 ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
                 ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class
         ));
+    }
+
+    /** Waits for the writer to append this organisation's settlement row. */
+    private boolean pollOutboxForOrg(UUID orgId) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while (System.currentTimeMillis() < deadline) {
+            Integer count = dsl.fetchOne(
+                    "select count(*) from outbox_events where aggregateid = ?", orgId.toString())
+                    .get(0, Integer.class);
+            if (count != null && count > 0) {
+                return true;
+            }
+            Thread.sleep(100L);
+        }
+        return false;
     }
 
     private BillingSettlementEvent pollForOrgEvent(KafkaConsumer<String, String> consumer, UUID orgId) throws Exception {

@@ -1,8 +1,10 @@
 package app.pagefault.hyperllm.gateway.billing;
 
-import app.pagefault.hyperllm.common.messaging.BillingSettlementEvent;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.common.messaging.LlmRequestEvent;
+import app.pagefault.hyperllm.gateway.outbox.OutboxQueue;
+import app.pagefault.hyperllm.gateway.outbox.PendingMoneyEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,7 +12,11 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * Publishes asynchronous billing settlement and denormalized request telemetry events to Kafka.
+ * Hands the two kinds of telemetry to their transports.
+ *
+ * <p>A money event is appended to the outbox queue, never sent to Kafka directly: the ledger is fed
+ * by reading the table's write-ahead log, so the row is the message. Request telemetry carries no
+ * money and keeps its direct path.
  */
 @Slf4j
 @Service
@@ -19,16 +25,42 @@ public class GatewayTelemetryService {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final OutboxQueue outboxQueue;
 
-    public void emitSettlementAndRequestEvent(
-            BillingSettlementEvent settlement,
-            LlmRequestEvent requestEvent
-    ) {
-        if (settlement != null && (settlement.cashDeltaMicros() != 0L || settlement.bonusDeltaMicros() != 0L)) {
-            sendAsync(KafkaTopics.LLM_BILLING_SETTLEMENT, settlement.orgId().toString(), settlement);
+    public void emitSettlementAndRequestEvent(BillingMoneyEvent settlement, LlmRequestEvent requestEvent) {
+        if (settlement != null && changesSomething(settlement)) {
+            enqueueSettlement(settlement);
         }
         if (requestEvent != null) {
             sendAsync(KafkaTopics.LLM_REQUEST_EVENTS, requestEvent.orgId().toString(), requestEvent);
+        }
+    }
+
+    /**
+     * Any of the three buckets moving is enough to require a ledger row; a charge covered entirely
+     * by pack units changes nothing else and still has to be booked.
+     */
+    private static boolean changesSomething(BillingMoneyEvent event) {
+        return event.cashDeltaMicros() != 0L
+                || event.bonusDeltaMicros() != 0L
+                || event.packDeltaUnits() != 0L;
+    }
+
+    private void enqueueSettlement(BillingMoneyEvent settlement) {
+        try {
+            String payload = objectMapper.writeValueAsString(settlement);
+            boolean queued = outboxQueue.offer(new PendingMoneyEvent(
+                    settlement.eventId(),
+                    settlement.orgId().toString(),
+                    settlement.eventType().name(),
+                    payload,
+                    settlement.occurredAt()));
+            if (!queued) {
+                log.error("outbox queue full, settlement not queued event={} org={}",
+                        settlement.eventId(), settlement.orgId());
+            }
+        } catch (Exception ex) {
+            log.error("cannot serialise settlement event={}", settlement.eventId(), ex);
         }
     }
 

@@ -104,7 +104,8 @@ public class EntitlementMirrorService {
         return redisTemplate.execute(snapshotScript, keys, args)
                 .next()
                 .map(values -> decode(text(values)))
-                .map(mirror -> MISS_WALLET.equals(mirror.orgStatus()) ? null : mirror);
+                // Reactor forbids a null from map; an empty Mono is what "not mirrored yet" means.
+                .filter(mirror -> !MISS_WALLET.equals(mirror.orgStatus()));
     }
 
     /** Fills every missing key of the tenant; never overwrites an existing one. */

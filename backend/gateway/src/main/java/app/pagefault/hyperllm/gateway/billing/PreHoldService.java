@@ -53,7 +53,8 @@ public class PreHoldService {
             long bonusCharged,
             boolean alreadySettled,
             boolean settledAfterReclaim,
-            boolean missingEntitlements
+            boolean missingEntitlements,
+            long shortfallMicros
     ) {
     }
 
@@ -173,15 +174,16 @@ public class PreHoldService {
                 .map(raw -> {
                     String status = String.valueOf(raw.get(0));
                     if ("ALREADY_SETTLED".equals(status)) {
-                        return new SettleOutcome(0L, 0L, true, false, false);
+                        return new SettleOutcome(0L, 0L, true, false, false, 0L);
                     }
                     if (MISS_ENTITLEMENTS.equals(status)) {
-                        return new SettleOutcome(0L, 0L, false, false, true);
+                        return new SettleOutcome(0L, 0L, false, false, true, 0L);
                     }
                     return new SettleOutcome(
-                            asLong(raw.get(1)), asLong(raw.get(2)), false, asLong(raw.get(3)) == 1L, false);
+                            asLong(raw.get(1)), asLong(raw.get(2)), false, asLong(raw.get(3)) == 1L, false,
+                            asLong(raw.get(4)));
                 })
-                .defaultIfEmpty(new SettleOutcome(0L, 0L, false, false, false));
+                .defaultIfEmpty(new SettleOutcome(0L, 0L, false, false, false, 0L));
     }
 
     public Mono<Boolean> release(String holdId, UUID orgId, long doneTtlSeconds) {
