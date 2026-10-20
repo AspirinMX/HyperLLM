@@ -41,7 +41,7 @@ public class HyperLlmIdempotencyAutoConfiguration {
     }
 
     @Bean
-    @ConditionalOnClass(name = "reactor.core.publisher.Mono")
+    @ConditionalOnClass(name = {"reactor.core.publisher.Mono", "org.aspectj.lang.annotation.Aspect"})
     @ConditionalOnMissingBean
     public ReactiveIdempotentAspect reactiveIdempotentAspect(IdempotencyStore store) {
         return new ReactiveIdempotentAspect(store);
