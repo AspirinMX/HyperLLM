@@ -41,6 +41,8 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 .set(WALLET_LEDGER.REF_ADJUSTMENT_ID, entry.refAdjustmentId())
                 .set(WALLET_LEDGER.DESCRIPTION, entry.description())
                 .set(WALLET_LEDGER.HOLD_ID, entry.holdId())
+                .set(WALLET_LEDGER.SHORTFALL_MICROS, entry.shortfallMicros())
+                .set(WALLET_LEDGER.SETTLED_AFTER_RECLAIM, entry.settledAfterReclaim())
                 .set(WALLET_LEDGER.CREATED_AT, entry.createdAt())
                 .onConflict(WALLET_LEDGER.IDEMPOTENCY_KEY, WALLET_LEDGER.CREATED_AT)
                 .doNothing()
@@ -80,7 +82,9 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 r.getRefAdjustmentId(),
                 r.getDescription(),
                 r.getCreatedAt(),
-                r.getHoldId()
+                r.getHoldId(),
+                r.getShortfallMicros() == null ? 0L : r.getShortfallMicros(),
+                Boolean.TRUE.equals(r.getSettledAfterReclaim())
         );
     }
 }
