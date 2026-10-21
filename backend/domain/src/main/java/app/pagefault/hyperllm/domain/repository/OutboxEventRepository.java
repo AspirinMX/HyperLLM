@@ -25,6 +25,9 @@ public interface OutboxEventRepository {
     /** Consumers' delivery watermark, empty before the first confirmation. */
     Optional<UUID> watermark();
 
+    /** When the watermark last moved; used to decide that delivery has stalled. */
+    Optional<java.time.OffsetDateTime> watermarkUpdatedAt();
+
     /** Advances the watermark; it never moves backwards. */
     void advanceWatermark(UUID eventId);
 

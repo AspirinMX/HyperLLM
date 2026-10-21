@@ -167,6 +167,11 @@ class OutboxWriterTest {
         }
 
         @Override
+        public Optional<OffsetDateTime> watermarkUpdatedAt() {
+            return Optional.empty();
+        }
+
+        @Override
         public void advanceWatermark(UUID eventId) {
         }
 

@@ -58,6 +58,14 @@ public class JooqOutboxEventRepository implements OutboxEventRepository {
     }
 
     @Override
+    public Optional<OffsetDateTime> watermarkUpdatedAt() {
+        return dsl.select(OUTBOX_WATERMARK.UPDATED_AT)
+                .from(OUTBOX_WATERMARK)
+                .where(OUTBOX_WATERMARK.ID.isTrue())
+                .fetchOptional(OUTBOX_WATERMARK.UPDATED_AT);
+    }
+
+    @Override
     public void advanceWatermark(UUID eventId) {
         dsl.update(OUTBOX_WATERMARK)
                 .set(OUTBOX_WATERMARK.LAST_EVENT_ID, eventId)
