@@ -28,6 +28,12 @@ public interface ResourcePackRepository {
 
     boolean revoke(UUID packId, long expectedVersion, OffsetDateTime updatedAt);
 
+    /** Packs that are still ACTIVE but whose expiry has passed, oldest expiry first. */
+    List<ResourcePack> listExpiredActive(OffsetDateTime at, int limit);
+
+    /** Marks a pack EXPIRED; only an ACTIVE pack is touched, so a concurrent change wins. */
+    boolean expire(UUID packId, OffsetDateTime updatedAt);
+
     /** Sum of remaining units across consumable packs; feeds the gateway availability aggregate. */
     long sumRemainingUnits(UUID orgId, String modelCode, OffsetDateTime at);
 

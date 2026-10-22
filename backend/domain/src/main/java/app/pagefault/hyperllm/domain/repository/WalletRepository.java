@@ -51,5 +51,14 @@ public interface WalletRepository {
             OffsetDateTime updatedAt
     );
 
+    /**
+     * Moves the bonus snapshot when a batch expires.
+     *
+     * <p>Leaves the fold position untouched: this is not an event from the delivery channel, so
+     * moving {@code last_applied_event_id} here would make the position skip backwards or forwards
+     * for reasons unrelated to what the consumer has folded.
+     */
+    boolean applyExpiryDelta(UUID orgId, long bonusDeltaMicros, OffsetDateTime updatedAt);
+
     boolean updateLowBalanceThreshold(UUID orgId, Long thresholdMicros, long expectedVersion, OffsetDateTime updatedAt);
 }

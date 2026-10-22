@@ -78,6 +78,27 @@ public class JooqResourcePackRepository implements ResourcePackRepository {
     }
 
     @Override
+    public List<ResourcePack> listExpiredActive(OffsetDateTime at, int limit) {
+        return dsl.selectFrom(RESOURCE_PACKS)
+                .where(RESOURCE_PACKS.STATUS.eq(EntitlementStatus.ACTIVE.name()))
+                .and(RESOURCE_PACKS.EXPIRES_AT.lessOrEqual(at))
+                .orderBy(RESOURCE_PACKS.EXPIRES_AT.asc(), RESOURCE_PACKS.ID.asc())
+                .limit(limit)
+                .fetch(this::toDomain);
+    }
+
+    @Override
+    public boolean expire(UUID packId, OffsetDateTime updatedAt) {
+        return dsl.update(RESOURCE_PACKS)
+                .set(RESOURCE_PACKS.STATUS, EntitlementStatus.EXPIRED.name())
+                .set(RESOURCE_PACKS.VERSION, RESOURCE_PACKS.VERSION.plus(1))
+                .set(RESOURCE_PACKS.UPDATED_AT, updatedAt)
+                .where(RESOURCE_PACKS.ID.eq(packId))
+                .and(RESOURCE_PACKS.STATUS.eq(EntitlementStatus.ACTIVE.name()))
+                .execute() == 1;
+    }
+
+    @Override
     public boolean revoke(UUID packId, long expectedVersion, OffsetDateTime updatedAt) {
         int updated = dsl.update(RESOURCE_PACKS)
                 .set(RESOURCE_PACKS.STATUS, EntitlementStatus.REVOKED.name())

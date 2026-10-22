@@ -119,6 +119,17 @@ public class JooqWalletRepository implements WalletRepository {
     }
 
     @Override
+    public boolean applyExpiryDelta(UUID orgId, long bonusDeltaMicros, OffsetDateTime updatedAt) {
+        int updated = dsl.update(WALLETS)
+                .set(WALLETS.BONUS_BALANCE_MICROS, WALLETS.BONUS_BALANCE_MICROS.plus(bonusDeltaMicros))
+                .set(WALLETS.VERSION, WALLETS.VERSION.plus(1))
+                .set(WALLETS.UPDATED_AT, updatedAt)
+                .where(WALLETS.ORG_ID.eq(orgId))
+                .execute();
+        return updated == 1;
+    }
+
+    @Override
     public boolean updateLowBalanceThreshold(UUID orgId, Long thresholdMicros, long expectedVersion, OffsetDateTime updatedAt) {
         int updated = dsl.update(WALLETS)
                 .set(WALLETS.LOW_BALANCE_THRESHOLD_MICROS, thresholdMicros)

@@ -25,6 +25,12 @@ public interface BonusGrantRepository {
 
     boolean revoke(UUID grantId, long expectedVersion, OffsetDateTime updatedAt);
 
+    /** Grants that are still ACTIVE but whose expiry has passed, oldest expiry first. */
+    List<BonusGrant> listExpiredActive(OffsetDateTime at, int limit);
+
+    /** Marks a grant EXPIRED; only an ACTIVE grant is touched, so a concurrent change wins. */
+    boolean expire(UUID grantId, OffsetDateTime updatedAt);
+
     /** Authoritative batch total used by reconciliation, not by the admission path. */
     long sumRemainingMicros(UUID orgId);
 

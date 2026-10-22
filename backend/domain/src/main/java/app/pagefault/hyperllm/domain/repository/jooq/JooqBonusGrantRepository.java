@@ -78,6 +78,28 @@ public class JooqBonusGrantRepository implements BonusGrantRepository {
     }
 
     @Override
+    public List<BonusGrant> listExpiredActive(OffsetDateTime at, int limit) {
+        return dsl.selectFrom(BONUS_GRANTS)
+                .where(BONUS_GRANTS.STATUS.eq(EntitlementStatus.ACTIVE.name()))
+                .and(BONUS_GRANTS.EXPIRES_AT.isNotNull())
+                .and(BONUS_GRANTS.EXPIRES_AT.lessOrEqual(at))
+                .orderBy(BONUS_GRANTS.EXPIRES_AT.asc(), BONUS_GRANTS.ID.asc())
+                .limit(limit)
+                .fetch(this::toDomain);
+    }
+
+    @Override
+    public boolean expire(UUID grantId, OffsetDateTime updatedAt) {
+        return dsl.update(BONUS_GRANTS)
+                .set(BONUS_GRANTS.STATUS, EntitlementStatus.EXPIRED.name())
+                .set(BONUS_GRANTS.VERSION, BONUS_GRANTS.VERSION.plus(1))
+                .set(BONUS_GRANTS.UPDATED_AT, updatedAt)
+                .where(BONUS_GRANTS.ID.eq(grantId))
+                .and(BONUS_GRANTS.STATUS.eq(EntitlementStatus.ACTIVE.name()))
+                .execute() == 1;
+    }
+
+    @Override
     public boolean revoke(UUID grantId, long expectedVersion, OffsetDateTime updatedAt) {
         int updated = dsl.update(BONUS_GRANTS)
                 .set(BONUS_GRANTS.STATUS, EntitlementStatus.REVOKED.name())
