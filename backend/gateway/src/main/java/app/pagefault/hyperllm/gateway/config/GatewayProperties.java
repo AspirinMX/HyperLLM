@@ -78,6 +78,10 @@ public class GatewayProperties {
     public static class Billing {
         private long leaseTtlSeconds = 300;
         private long heartbeatMinIntervalSeconds = 15;
+        /** How often the background sweep reclaims expired holds, in seconds. */
+        private long reclaimSweepSeconds = 30;
+        /** Holds reclaimed per sweep; the sweep runs again long before this becomes a backlog. */
+        private int reclaimSweepBatch = 200;
         private int safetyFactorBps = 11500;
         private int defaultOutputTokens = 8192;
         private int lazyReclaimBatch = 3;
