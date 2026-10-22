@@ -44,6 +44,7 @@ public class ConsoleCatalogAndWalletService {
     private final PricingRuleRepository pricingRuleRepository;
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
+    private final LiveWalletReader liveWalletReader;
 
     public List<PublicModelCatalogDto> listPublicModels() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -52,12 +53,28 @@ public class ConsoleCatalogAndWalletService {
                 .toList();
     }
 
+    /**
+     * Balances come from the live mirror when the tenant has one, because that is what the gateway
+     * charges against and it is the only place that knows about reservations. Before the tenant is
+     * mirrored - or if the mirror was lost - the database snapshot is served and the response says
+     * so, rather than presenting a trailing number as if it were live.
+     */
     public WalletDto getWallet(UUID orgId, UUID userId) {
         rbac.requireOrgRole(orgId, userId, OrgRole.OWNER, OrgRole.ADMIN, OrgRole.BILLING);
         Wallet wallet = walletRepository.findByOrgId(orgId)
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND, "Wallet not found for org"));
+        LiveWalletReader.LiveWallet live = liveWalletReader.read(orgId);
+        long cash = live != null ? live.cashMicros() : wallet.cashBalanceMicros();
+        long bonus = live != null ? live.bonusMicros() : wallet.bonusBalanceMicros();
+        if (live != null && bonus == 0L && wallet.bonusBalanceMicros() > 0L) {
+            // A balance granted before batches existed has no batch row behind it. It is still
+            // spendable, so reporting zero here would hide money the tenant owns.
+            bonus = wallet.bonusBalanceMicros();
+        }
+        long held = live != null ? live.heldMicros() : 0L;
+        long available = live != null ? live.availableMicros() : cash + bonus;
         return new WalletDto(
-                wallet.orgId(), wallet.cashBalanceMicros(), wallet.bonusBalanceMicros(),
+                wallet.orgId(), cash, bonus, held, available, live == null,
                 wallet.totalRechargedMicros(), wallet.totalBonusGrantedMicros(),
                 wallet.totalConsumedCashMicros(), wallet.totalConsumedBonusMicros(),
                 wallet.lowBalanceThresholdMicros(), wallet.version(), wallet.updatedAt()

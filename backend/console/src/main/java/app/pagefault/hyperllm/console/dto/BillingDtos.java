@@ -44,10 +44,20 @@ public final class BillingDtos {
     ) {
     }
 
+    /**
+     * @param cashBalanceMicros live cash, read from the same source the gateway charges
+     * @param bonusBalanceMicros live unexpired bonus, summed across batches
+     * @param heldMicros         reserved by requests still in flight; only Redis knows this
+     * @param availableMicros    balance minus held; what a new request can actually spend
+     * @param ledgerConfirmed    true when the totals come from the ledger fold rather than live state
+     */
     public record WalletDto(
             UUID orgId,
             long cashBalanceMicros,
             long bonusBalanceMicros,
+            long heldMicros,
+            long availableMicros,
+            boolean ledgerConfirmed,
             long totalRechargedMicros,
             long totalBonusGrantedMicros,
             long totalConsumedCashMicros,
