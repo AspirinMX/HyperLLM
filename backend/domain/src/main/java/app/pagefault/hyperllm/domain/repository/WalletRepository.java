@@ -12,6 +12,18 @@ public interface WalletRepository {
 
     Optional<Wallet> findByOrgId(UUID orgId);
 
+    /** Cash and bonus of many organisations in one query, for list screens. */
+    record Balance(long cashMicros, long bonusMicros) {
+    }
+
+    /**
+     * Balances of the given organisations, keyed by organisation.
+     *
+     * <p>One statement for the whole page: a list must not turn into a query per row, and Redis is
+     * the wrong source here because a list shows the ledger-confirmed value, not the live one.
+     */
+    java.util.Map<UUID, Balance> findBalancesByOrgIds(java.util.Collection<UUID> orgIds);
+
     boolean applyDelta(
             UUID orgId,
             long cashDeltaMicros,

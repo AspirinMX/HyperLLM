@@ -44,6 +44,21 @@ public class JooqWalletRepository implements WalletRepository {
     }
 
     @Override
+    public java.util.Map<UUID, Balance> findBalancesByOrgIds(java.util.Collection<UUID> orgIds) {
+        if (orgIds == null || orgIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        return dsl.select(WALLETS.ORG_ID, WALLETS.CASH_BALANCE_MICROS, WALLETS.BONUS_BALANCE_MICROS)
+                .from(WALLETS)
+                .where(WALLETS.ORG_ID.in(orgIds))
+                .fetchMap(
+                        record -> record.get(WALLETS.ORG_ID),
+                        record -> new Balance(
+                                record.get(WALLETS.CASH_BALANCE_MICROS),
+                                record.get(WALLETS.BONUS_BALANCE_MICROS)));
+    }
+
+    @Override
     public boolean applyDelta(
             UUID orgId,
             long cashDeltaMicros,
