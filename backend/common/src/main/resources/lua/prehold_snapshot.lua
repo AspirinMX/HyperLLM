@@ -73,4 +73,7 @@ if renew then
     redis.call('PEXPIRE', KEYS[1], ttl)
 end
 
+-- Last element: 1 when the tenant was filled from the database, 0 when only the wallet hash exists
+-- (a control-plane write, or a load that was interrupted). Trailing so the indexes above stay put.
+table.insert(out, tostring(redis.call('HGET', KEYS[1], 'loaded') or '0'))
 return out

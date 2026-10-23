@@ -45,6 +45,8 @@ local function putItem(key, flat)
     return true
 end
 
+-- Marked on the wallet, always: a control-plane write can create the hash without filling the
+-- batches, and "has a wallet" must therefore not be read as "is fully mirrored".
 if redis.call('EXISTS', KEYS[1]) == 0 then
     local wallet = split(ARGV[2])
     redis.call('HSET', KEYS[1],
@@ -53,6 +55,8 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
             'status', wallet[3] or 'ACTIVE')
     redis.call('PEXPIRE', KEYS[1], ttl)
 end
+
+redis.call('HSET', KEYS[1], 'loaded', '1')
 
 local cursor = 3
 local packCount = tonumber(ARGV[cursor]) or 0
