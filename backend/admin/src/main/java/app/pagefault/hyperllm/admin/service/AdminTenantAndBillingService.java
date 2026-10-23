@@ -47,8 +47,14 @@ public class AdminTenantAndBillingService {
 
     public PageResponse<AdminOrgDto> listOrganizations(OrgStatus statusFilter, PageQuery pageQuery) {
         PageResponse<Organization> page = organizationRepository.listPage(statusFilter, pageQuery);
+        // One extra statement for the whole page rather than one per row. The values are the ledger
+        // folded snapshot: a list has no business showing a live number nobody can reconcile.
+        Map<UUID, WalletRepository.Balance> balances = walletRepository.findBalancesByOrgIds(
+                page.items().stream().map(Organization::id).toList());
         return new PageResponse<>(
-                page.items().stream().map(AdminTenantAndBillingService::toOrgDto).toList(),
+                page.items().stream()
+                        .map(org -> toOrgDto(org, balances.get(org.id())))
+                        .toList(),
                 page.page(), page.pageSize(), page.total()
         );
     }
@@ -150,9 +156,16 @@ public class AdminTenantAndBillingService {
     }
 
     private static AdminOrgDto toOrgDto(Organization o) {
+        return toOrgDto(o, null);
+    }
+
+    private static AdminOrgDto toOrgDto(Organization o, WalletRepository.Balance balance) {
         return new AdminOrgDto(
                 o.id(), o.name(), o.slug(), o.ownerUserId(), o.tierId(),
                 o.discountRatioBps(), o.maxConcurrency(), o.personal(), o.status(),
+                balance == null ? null : balance.cashMicros(),
+                balance == null ? null : balance.bonusMicros(),
+                true,
                 o.version(), o.createdAt(), o.updatedAt()
         );
     }

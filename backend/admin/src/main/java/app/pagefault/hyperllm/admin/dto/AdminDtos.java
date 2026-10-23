@@ -250,6 +250,14 @@ public final class AdminDtos {
     ) {
     }
 
+    /**
+     * A tenant as the operator list shows it.
+     *
+     * @param cashBalanceMicros the ledger-confirmed cash, {@code null} when no wallet exists yet
+     * @param bonusBalanceMicros the ledger-confirmed bonus
+     * @param liveDetailAvailable true when the detail endpoint can also show frozen and available;
+     *                            a list cannot, because the database has no concept of a reservation
+     */
     public record AdminOrgDto(
             UUID id,
             String name,
@@ -260,6 +268,9 @@ public final class AdminDtos {
             int maxConcurrency,
             boolean personal,
             OrgStatus status,
+            Long cashBalanceMicros,
+            Long bonusBalanceMicros,
+            boolean liveDetailAvailable,
             long version,
             OffsetDateTime createdAt,
             OffsetDateTime updatedAt

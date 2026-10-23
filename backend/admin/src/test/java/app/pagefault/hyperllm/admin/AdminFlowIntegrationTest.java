@@ -264,6 +264,14 @@ class AdminFlowIntegrationTest {
         assertThat(redisTemplate.opsForHash().get(GatewayRedisKeys.wallet(orgId), "cash_micros"))
                 .isEqualTo("1000000");
 
+        // The tenant list shows the ledger-confirmed balance inline: one extra statement for the
+        // page, never a query per row, and no live value that a list could not reconcile.
+        mockMvc.perform(get("/api/v1/admin/orgs").header("Authorization", "Bearer " + adminJwt))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[?(@.id=='" + orgId + "')].cashBalanceMicros").value(1_000_000))
+                .andExpect(jsonPath("$.items[?(@.id=='" + orgId + "')].bonusBalanceMicros").value(0))
+                .andExpect(jsonPath("$.items[?(@.id=='" + orgId + "')].liveDetailAvailable").value(true));
+
         // Consume settlement event twice; second replay must be ignored idempotently
         BillingMoneyEvent event = new BillingMoneyEvent(
                 app.pagefault.hyperllm.common.id.UuidV7.next(),
