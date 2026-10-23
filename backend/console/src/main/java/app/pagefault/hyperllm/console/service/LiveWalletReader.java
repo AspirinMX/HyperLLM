@@ -73,6 +73,11 @@ public class LiveWalletReader {
             heldBonus += parse(values.get(cursor + 2));
             cursor += 4;
         }
+        boolean loaded = cursor < values.size() && "1".equals(values.get(cursor));
+        if (!loaded) {
+            // The batches were never filled, so the bonus sum here is not the tenant's balance.
+            return null;
+        }
         return new LiveWallet(cash, bonus, heldCash + heldBonus);
     }
 

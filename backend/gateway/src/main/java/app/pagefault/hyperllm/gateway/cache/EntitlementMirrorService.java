@@ -37,8 +37,13 @@ import java.util.UUID;
 @Service
 public class EntitlementMirrorService {
 
-    /** Mirror state of one tenant for one model, ready to be turned into an allocation. */
-    public record Mirror(EntitlementSnapshot snapshot, String orgStatus) {
+    /**
+     * Mirror state of one tenant for one model, ready to be turned into an allocation.
+     *
+     * @param loaded whether the batches were ever filled; a wallet written by the control plane has
+     *               a hash but no loads behind it, and must not be served as if it were complete
+     */
+    public record Mirror(EntitlementSnapshot snapshot, String orgStatus, boolean loaded) {
     }
 
     private static final long NO_EXPIRY_EPOCH_MS = 4_102_444_800_000L;
@@ -105,7 +110,7 @@ public class EntitlementMirrorService {
                 .next()
                 .map(values -> decode(text(values)))
                 // Reactor forbids a null from map; an empty Mono is what "not mirrored yet" means.
-                .filter(mirror -> !MISS_WALLET.equals(mirror.orgStatus()));
+                .filter(mirror -> !MISS_WALLET.equals(mirror.orgStatus()) && mirror.loaded());
     }
 
     /** Fills every missing key of the tenant; never overwrites an existing one. */
@@ -158,11 +163,23 @@ public class EntitlementMirrorService {
             args.add(pack.id() + "|" + pack.remainingUnits() + "|0|" + pack.unitType() + "|"
                     + epochMillis(pack.expiresAt()));
         }
-        args.add(String.valueOf(grants.size()));
+        long mirroredMicros = grants.stream().mapToLong(BonusGrant::remainingMicros).sum();
+        long unmirrored = wallet == null ? 0L : Math.max(0L, wallet.bonusBalanceMicros() - mirroredMicros);
+
+        List<String> grantArgs = new ArrayList<>();
         for (BonusGrant grant : grants) {
-            args.add(grant.id() + "|" + grant.remainingMicros() + "|0|"
+            grantArgs.add(grant.id() + "|" + grant.remainingMicros() + "|0|"
                     + epochMillis(grant.expiresAt()));
         }
+        if (unmirrored > 0L) {
+            // Balance granted before batches existed: carried as one synthetic batch so it stays
+            // spendable and is recognisable on the settlement side.
+            grantArgs.add(app.pagefault.hyperllm.common.billing.LegacyBonusBatch.idFor(orgId)
+                    + "|" + unmirrored + "|0|"
+                    + app.pagefault.hyperllm.common.billing.LegacyBonusBatch.NO_EXPIRY_EPOCH_MS);
+        }
+        args.add(String.valueOf(grantArgs.size()));
+        args.addAll(grantArgs);
         args.add(GatewayRedisKeys.packItemPrefix());
         args.add(GatewayRedisKeys.bonusItemPrefix());
         return args;
@@ -200,7 +217,7 @@ public class EntitlementMirrorService {
 
     static Mirror decode(List<String> values) {
         if (values.isEmpty() || MISS_WALLET.equals(values.get(0))) {
-            return new Mirror(EntitlementSnapshot.empty(0L), MISS_WALLET);
+            return new Mirror(EntitlementSnapshot.empty(0L), MISS_WALLET, false);
         }
         long cash = Long.parseLong(values.get(1));
         long heldCash = Long.parseLong(values.get(2));
@@ -229,6 +246,7 @@ public class EntitlementMirrorService {
             grants.add(new EntitlementSnapshot.BonusBucket(id, Math.max(0L, remaining - held)));
             cursor += 4;
         }
-        return new Mirror(new EntitlementSnapshot(packs, grants, Math.max(0L, cash - heldCash)), status);
+        boolean loaded = cursor < values.size() && "1".equals(values.get(cursor));
+        return new Mirror(new EntitlementSnapshot(packs, grants, Math.max(0L, cash - heldCash)), status, loaded);
     }
 }

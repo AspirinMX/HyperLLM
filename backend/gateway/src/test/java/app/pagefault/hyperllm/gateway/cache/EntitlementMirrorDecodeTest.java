@@ -18,7 +18,8 @@ class EntitlementMirrorDecodeTest {
         List<String> reply = List.of(
                 "OK", "1000", "300", "ACTIVE",
                 "1", packId.toString(), "50", "10", "TOKENS", "4102444800000",
-                "1", grantId.toString(), "7000", "500", "4102444800000");
+                "1", grantId.toString(), "7000", "500", "4102444800000",
+                "1");
 
         EntitlementMirrorService.Mirror mirror = EntitlementMirrorService.decode(reply);
 
@@ -46,7 +47,8 @@ class EntitlementMirrorDecodeTest {
         List<String> reply = List.of(
                 "OK", "100", "500", "ACTIVE",
                 "1", packId.toString(), "10", "40", "TOKENS", "4102444800000",
-                "0");
+                "0",
+                "1");
 
         EntitlementMirrorService.Mirror mirror = EntitlementMirrorService.decode(reply);
 

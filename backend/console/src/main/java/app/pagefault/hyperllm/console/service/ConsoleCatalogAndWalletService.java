@@ -66,11 +66,7 @@ public class ConsoleCatalogAndWalletService {
         LiveWalletReader.LiveWallet live = liveWalletReader.read(orgId);
         long cash = live != null ? live.cashMicros() : wallet.cashBalanceMicros();
         long bonus = live != null ? live.bonusMicros() : wallet.bonusBalanceMicros();
-        if (live != null && bonus == 0L && wallet.bonusBalanceMicros() > 0L) {
-            // A balance granted before batches existed has no batch row behind it. It is still
-            // spendable, so reporting zero here would hide money the tenant owns.
-            bonus = wallet.bonusBalanceMicros();
-        }
+
         long held = live != null ? live.heldMicros() : 0L;
         long available = live != null ? live.availableMicros() : cash + bonus;
         return new WalletDto(

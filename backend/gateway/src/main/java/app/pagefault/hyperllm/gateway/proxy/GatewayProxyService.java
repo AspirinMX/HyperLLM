@@ -580,7 +580,7 @@ public class GatewayProxyService {
                             -deducted.bonusMicros(),
                             -packUnits,
                             deducted.shortfallMicros(),
-                            charges.legs().stream().map(GatewayProxyService::toMoneyLeg).toList(),
+                            charges.legs().stream().map(leg -> toMoneyLeg(leg, caller.orgId())).toList(),
                             detailJson,
                             lease.holdId() == null ? null : UUID.fromString(lease.holdId()),
                             deducted.afterReclaim(),
@@ -637,11 +637,17 @@ public class GatewayProxyService {
     ) {
     }
 
-    /** One allocation leg as the ledger event states it. */
-    private static BillingMoneyEvent.Leg toMoneyLeg(AllocationLeg leg) {
+    /**
+     * One allocation leg as the ledger event states it.
+     *
+     * <p>The synthetic legacy batch carries a real id but no row behind it, so it is reported as
+     * virtual; otherwise the consumer would look for a grant to decrement and find nothing.
+     */
+    private static BillingMoneyEvent.Leg toMoneyLeg(AllocationLeg leg, UUID orgId) {
         return switch (leg.type()) {
             case PACK -> BillingMoneyEvent.Leg.pack(leg.id(), leg.units(), leg.micros());
             case BONUS -> leg.id() == null
+                    || app.pagefault.hyperllm.common.billing.LegacyBonusBatch.isLegacy(orgId, leg.id())
                     ? BillingMoneyEvent.Leg.virtualBonus(leg.micros())
                     : BillingMoneyEvent.Leg.bonus(leg.id(), leg.micros());
             case CASH -> BillingMoneyEvent.Leg.cash(leg.micros());
