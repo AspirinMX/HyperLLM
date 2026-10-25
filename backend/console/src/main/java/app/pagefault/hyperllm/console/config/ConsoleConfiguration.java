@@ -20,17 +20,6 @@ public class ConsoleConfiguration {
         return new BCryptPasswordEncoder();
     }
 
-    /**
-     * The same snapshot script the gateway uses, loaded from the shared resources so the control
-     * plane and the data plane can never read a tenant's balance in two different ways.
-     */
-    @SuppressWarnings("rawtypes")
-    @Bean
-    public org.springframework.data.redis.core.script.RedisScript<java.util.List> walletSnapshotScript() {
-        return org.springframework.data.redis.core.script.RedisScript.of(
-                new org.springframework.core.io.ClassPathResource("lua/prehold_snapshot.lua"),
-                java.util.List.class);
-    }
 
     @Bean
     public OpenAPI consoleOpenApi() {

@@ -44,7 +44,7 @@ public class ConsoleCatalogAndWalletService {
     private final PricingRuleRepository pricingRuleRepository;
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
-    private final LiveWalletReader liveWalletReader;
+    private final app.pagefault.hyperllm.common.billing.LiveWalletReader liveWalletReader;
 
     public List<PublicModelCatalogDto> listPublicModels() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -63,7 +63,7 @@ public class ConsoleCatalogAndWalletService {
         rbac.requireOrgRole(orgId, userId, OrgRole.OWNER, OrgRole.ADMIN, OrgRole.BILLING);
         Wallet wallet = walletRepository.findByOrgId(orgId)
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND, "Wallet not found for org"));
-        LiveWalletReader.LiveWallet live = liveWalletReader.read(orgId);
+        app.pagefault.hyperllm.common.billing.LiveWalletReader.LiveWallet live = liveWalletReader.read(orgId);
         long cash = live != null ? live.cashMicros() : wallet.cashBalanceMicros();
         long bonus = live != null ? live.bonusMicros() : wallet.bonusBalanceMicros();
 

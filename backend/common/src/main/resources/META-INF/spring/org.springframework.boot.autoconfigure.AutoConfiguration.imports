@@ -1,1 +1,2 @@
 app.pagefault.hyperllm.common.idempotency.HyperLlmIdempotencyAutoConfiguration
+app.pagefault.hyperllm.common.billing.LiveWalletAutoConfiguration
