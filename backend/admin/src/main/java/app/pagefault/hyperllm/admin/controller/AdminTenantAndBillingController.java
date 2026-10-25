@@ -31,6 +31,7 @@ import java.util.UUID;
 public class AdminTenantAndBillingController {
 
     private final AdminTenantAndBillingService service;
+    private final app.pagefault.hyperllm.admin.service.AdminWalletReadService walletReadService;
 
     @GetMapping
     public PageResponse<AdminOrgDto> listOrganizations(
@@ -41,6 +42,19 @@ public class AdminTenantAndBillingController {
     ) {
         AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.OPS, AdminRole.FINANCE, AdminRole.AUDITOR);
         return service.listOrganizations(status, PageQuery.of(page, pageSize));
+    }
+
+    /**
+     * Live wallet of one tenant. A list cannot show this, because only the mirror knows what is
+     * reserved; the detail view is where an operator looks before touching a balance.
+     */
+    @GetMapping("/{orgId}/wallet")
+    public app.pagefault.hyperllm.admin.dto.AdminWalletDetailDto getWallet(
+            @PathVariable UUID orgId,
+            HttpServletRequest request
+    ) {
+        AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.OPS, AdminRole.FINANCE, AdminRole.AUDITOR);
+        return walletReadService.read(orgId);
     }
 
     @PatchMapping("/{orgId}/status")

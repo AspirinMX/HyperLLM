@@ -264,6 +264,18 @@ class AdminFlowIntegrationTest {
         assertThat(redisTemplate.opsForHash().get(GatewayRedisKeys.wallet(orgId), "cash_micros"))
                 .isEqualTo("1000000");
 
+        // Give the mirror something the database cannot know: a reservation still in flight.
+        redisTemplate.opsForHash().put(GatewayRedisKeys.wallet(orgId), "loaded", "1");
+        redisTemplate.opsForHash().put(GatewayRedisKeys.wallet(orgId), "held_cash_micros", "250000");
+
+        mockMvc.perform(get("/api/v1/admin/orgs/{orgId}/wallet", orgId)
+                        .header("Authorization", "Bearer " + adminJwt))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cashMicros").value(1_000_000))
+                .andExpect(jsonPath("$.heldMicros").value(250_000))
+                .andExpect(jsonPath("$.availableMicros").value(750_000))
+                .andExpect(jsonPath("$.ledgerConfirmed").value(false));
+
         // The tenant list shows the ledger-confirmed balance inline: one extra statement for the
         // page, never a query per row, and no live value that a list could not reconcile.
         mockMvc.perform(get("/api/v1/admin/orgs").header("Authorization", "Bearer " + adminJwt))
