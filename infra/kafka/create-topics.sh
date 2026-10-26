@@ -22,14 +22,19 @@ create_topic() {
 # Config CDC compacted stream consumed by every gateway instance to invalidate Caffeine L1
 create_topic "cdc.gateway.config" 6 --config cleanup.policy=compact
 
-# Outbox domain events (Phase 2 commercial billing & wallet grant sync)
-create_topic "cdc.wallet.topup" 6 --config cleanup.policy=delete --config retention.ms=604800000
-create_topic "cdc.wallet.adjust" 6 --config cleanup.policy=delete --config retention.ms=604800000
-create_topic "cdc.pack.grant" 6 --config cleanup.policy=delete --config retention.ms=604800000
-create_topic "cdc.bonus.grant" 6 --config cleanup.policy=delete --config retention.ms=604800000
+# Money events, delivered from the outbox table by the outbox connector.
+#
+# One topic for every change that moves a balance, keyed by organisation: consumption and issuance
+# for the same tenant have to stay in order, and splitting them by kind would put them on different
+# partitions. The order of magnitude of partitions is the consumer parallelism, not a correctness knob.
+create_topic "cdc.billing" 12 --config cleanup.policy=delete --config retention.ms=604800000
 
-# Gateway async telemetry & wallet ledger settlement streams
+# Gateway request telemetry: usage metadata for the warehouse, carries no money and never goes
+# through the outbox.
 create_topic "llm.request.events" 12 --config cleanup.policy=delete --config retention.ms=604800000
+
+# Retained only so an environment upgraded from the previous shape can drain it; the gateway no
+# longer publishes here and no service consumes it.
 create_topic "llm.billing.settlement" 12 --config cleanup.policy=delete --config retention.ms=604800000
 
 echo "All HyperLLM Kafka topics are ready."

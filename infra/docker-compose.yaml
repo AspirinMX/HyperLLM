@@ -153,7 +153,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-hyperllm}
       POSTGRES_USER: ${POSTGRES_USER:-hyperllm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hyperllm_dev_password}
-      ENABLE_OUTBOX_CONNECTOR: ${ENABLE_OUTBOX_CONNECTOR:-false}
+      ENABLE_OUTBOX_CONNECTOR: ${ENABLE_OUTBOX_CONNECTOR:-true}
     volumes:
       - ./debezium:/etc/hyperllm/debezium:ro
     entrypoint: ["sh", "/etc/hyperllm/debezium/register-connectors.sh"]

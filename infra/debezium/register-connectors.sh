@@ -45,8 +45,8 @@ register_connector() {
 
 register_connector "hyperllm-config-connector" "/etc/hyperllm/debezium/hyperllm-config-connector.json"
 
-if [ "${ENABLE_OUTBOX_CONNECTOR:-false}" = "true" ]; then
+if [ "${ENABLE_OUTBOX_CONNECTOR:-true}" = "true" ]; then
     register_connector "hyperllm-outbox-connector" "/etc/hyperllm/debezium/hyperllm-outbox-connector.json"
 else
-    echo "Skipping hyperllm-outbox-connector (ENABLE_OUTBOX_CONNECTOR=false; enable after V4 outbox migration)."
+    echo "Skipping hyperllm-outbox-connector (ENABLE_OUTBOX_CONNECTOR=false). Settlements are not delivered without it."
 fi
