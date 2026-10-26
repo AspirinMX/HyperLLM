@@ -58,6 +58,7 @@ public class EntitlementMirrorService {
     private final Scheduler domainFallbackScheduler;
     private final RedisScript<List> snapshotScript;
     private final RedisScript<List> loadScript;
+    private final LedgerHealthGate healthGate;
 
     @SuppressWarnings("rawtypes")
     public EntitlementMirrorService(
@@ -69,7 +70,8 @@ public class EntitlementMirrorService {
             BonusGrantRepository grantRepository,
             @Qualifier("domainFallbackScheduler") Scheduler domainFallbackScheduler,
             @Qualifier("preholdSnapshotLuaScript") RedisScript<List> snapshotScript,
-            @Qualifier("loadTenantLuaScript") RedisScript<List> loadScript
+            @Qualifier("loadTenantLuaScript") RedisScript<List> loadScript,
+            LedgerHealthGate healthGate
     ) {
         this.redisTemplate = redisTemplate;
         this.properties = properties;
@@ -80,6 +82,7 @@ public class EntitlementMirrorService {
         this.domainFallbackScheduler = domainFallbackScheduler;
         this.snapshotScript = snapshotScript;
         this.loadScript = loadScript;
+        this.healthGate = healthGate;
     }
 
     /**
@@ -87,8 +90,15 @@ public class EntitlementMirrorService {
      */
     public Mono<Mirror> read(UUID orgId, String modelCode, boolean renew) {
         return readOnce(orgId, modelCode, renew)
-                .switchIfEmpty(Mono.defer(() -> load(orgId, modelCode)
-                        .then(readOnce(orgId, modelCode, renew))))
+                .switchIfEmpty(Mono.defer(() -> {
+                    if (healthGate.blocksRebuild()) {
+                        // Rebuilding now would write a snapshot known to trail the deductions the
+                        // gateway has already applied, handing the tenant back money it has spent.
+                        return Mono.error(new app.pagefault.hyperllm.common.error.HyperLlmException(
+                                app.pagefault.hyperllm.common.error.ErrorCode.LEDGER_BACKLOG));
+                    }
+                    return load(orgId, modelCode).then(readOnce(orgId, modelCode, renew));
+                }))
                 .switchIfEmpty(Mono.error(new IllegalStateException(
                         "tenant mirror still missing after load, org=" + orgId)));
     }
@@ -102,7 +112,9 @@ public class EntitlementMirrorService {
                 GatewayRedisKeys.bonus(orgId));
         List<String> args = List.of(
                 String.valueOf(System.currentTimeMillis()),
-                renew ? "1" : "0",
+                // Freezing is preferred over renewing while the ledger is behind, so a touched key
+                // cannot expire and be rebuilt from a stale snapshot.
+                renew ? (healthGate.blocksRebuild() ? "2" : "1") : "0",
                 String.valueOf(ttlMillis),
                 GatewayRedisKeys.packItemPrefix(),
                 GatewayRedisKeys.bonusItemPrefix());

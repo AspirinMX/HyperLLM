@@ -45,6 +45,7 @@ public enum ErrorCode {
     PROTOCOL_INVALID_REQUEST(400, "Invalid request payload"),
     UPSTREAM_ERROR(502, "Upstream provider error"),
     CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),
+    LEDGER_BACKLOG(503, "The billing ledger is behind; retry shortly"),
     IDEMPOTENT_IN_FLIGHT(409, "An identical request is still in flight"),
     IDEMPOTENT_REPLAYED(409, "Duplicate request rejected by idempotency key");
 

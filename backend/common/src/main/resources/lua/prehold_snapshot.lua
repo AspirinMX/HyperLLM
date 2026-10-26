@@ -24,7 +24,10 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
 end
 
 local now = tonumber(ARGV[1]) or 0
-local renew = ARGV[2] == '1'
+-- '1' renews the TTL, '2' removes it. Freezing is what keeps a key from expiring while the ledger
+-- is behind: an expiring key would be rebuilt from a snapshot that trails the deductions.
+local freeze = ARGV[2] == '2'
+local renew = ARGV[2] == '1' or freeze
 local ttl = tonumber(ARGV[3]) or 0
 local packPrefix = ARGV[4]
 local bonusPrefix = ARGV[5]
@@ -52,7 +55,9 @@ local function collect(zsetKey, prefix, fields)
             for j = 1, #fields do
                 table.insert(rows, tostring(values[j] or '0'))
             end
-            if renew then
+            if freeze then
+                redis.call('PERSIST', itemKey)
+            elseif renew then
                 redis.call('PEXPIRE', itemKey, ttl)
             end
         end
@@ -61,7 +66,9 @@ local function collect(zsetKey, prefix, fields)
     for _, value in ipairs(rows) do
         table.insert(out, value)
     end
-    if renew and redis.call('EXISTS', zsetKey) == 1 then
+    if freeze and redis.call('EXISTS', zsetKey) == 1 then
+        redis.call('PERSIST', zsetKey)
+    elseif renew and redis.call('EXISTS', zsetKey) == 1 then
         redis.call('PEXPIRE', zsetKey, ttl)
     end
 end
@@ -69,7 +76,9 @@ end
 collect(KEYS[2], packPrefix, {'remaining_units', 'held_units', 'unit_type', 'expires_at'})
 collect(KEYS[3], bonusPrefix, {'remaining_micros', 'held_micros', 'expires_at'})
 
-if renew then
+if freeze then
+    redis.call('PERSIST', KEYS[1])
+elseif renew then
     redis.call('PEXPIRE', KEYS[1], ttl)
 end
 
