@@ -163,17 +163,19 @@
 
 > 本阶段完成后，方案 B1「键存活期间 Redis 是唯一权威」才真正成立。机制、时序与配置以 [04-04 第 2 节](./design/04-04-settlement-pipeline.md) 为准。
 
-- [ ] **逐批次冻结**：准入携带逐条腿（PACK 带 packId 与 units、BONUS 带 grantId、CASH 无 id），item 键上记 `held_units` / `held_micros`，hold 存 `legs`；结算以 hold 的腿为快照重跑分摊，不再重新查询（D-1、D-2、D-8）。
-- [ ] **废除三个聚合字段**：`general_bonus_micros`、`gw:pack:avail`、`gw:pack:held`。赠金总额由快照脚本按 `score > now` 现算，连带关闭「TTL 冻结时过期赠金仍可花」的漏洞（D-9 作废）。
-- [ ] **快照读原语** `prehold_snapshot.lua`：一次往返返回钱包与逐条腿，网关准入、结算重分摊、console 与 admin 单租户查询共用。该脚本先 ZRANGE 再拼 item 键，**与 Redis Cluster 不兼容**，计费实例必须按租户分 cell。
-- [ ] **加载协议**：只补缺失（存在即跳过）、键级互斥（缺失时禁止 delta 写入）、单 Lua 原子写入后统一 PEXPIRE。
+- [x] **逐批次冻结**：准入携带逐条腿（PACK 带 packId 与 units、BONUS 带 grantId、CASH 无 id），item 键上记 `held_units` / `held_micros`，hold 存 `legs`；结算以 hold 的腿为快照重跑分摊，不再重新查询（D-1、D-2、D-8）。
+- [x] **废除三个聚合字段**：`general_bonus_micros`、`gw:pack:avail`、`gw:pack:held`。赠金总额由快照脚本按 `score > now` 现算，连带关闭「TTL 冻结时过期赠金仍可花」的漏洞（D-9 作废）。
+- [x] **快照读原语** `prehold_snapshot.lua`：一次往返返回钱包与逐条腿，网关准入、结算重分摊、console 与 admin 单租户查询共用。该脚本先 ZRANGE 再拼 item 键，**与 Redis Cluster 不兼容**，计费实例必须按租户分 cell。
+- [x] **加载协议**：只补缺失（存在即跳过）、键级互斥（缺失时禁止 delta 写入）、单 Lua 原子写入后统一 PEXPIRE。
 - [ ] **滑动 TTL 全续期点**：补 `prehold_renew.lua` 的钱包与批次键（D-3），修正心跳把 orgId 当 projectId 传入（D-10），并实现实例本地续期节流（每键 60 秒最多一次）。
-- [ ] **事件门禁**补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
-- [ ] **控制面读 Redis**：console 单租户钱包改读快照脚本；admin 新增单租户实时查询，改余额前先加载（D-11）；租户列表 `organizations LEFT JOIN wallets` 内联余额并标注「账本已确认」（D-12）。
+- [x] **事件门禁**补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
+- [x] **控制面读 Redis**：console 单租户钱包改读快照脚本；admin 新增单租户实时查询，改余额前先加载（D-11）；租户列表 `organizations LEFT JOIN wallets` 内联余额并标注「账本已确认」（D-12）。
 - [ ] **健康信号与全局重建闸门**：admin 写 `gw:health:ledger-lag` 与 `:armed`；网关本地缓存 5 秒，DEGRADED 时对触碰到的键 PERSIST，**键缺失则返回 503 `LEDGER_BACKLOG`**（`Retry-After` 取 `drainSeconds`）。闸门是全局判据，不引入逐租户状态；监视器失联按 OK 处理并打 P1。
 - [ ] **重建偏差度量**：`gateway_rebuild_stale_delta_micros`（按桶）与 `gateway_rebuild_while_degraded_total`（按组织）。
-- [ ] 删除 `gw:org:holds`，惰性回收改为按 `gw:holds:exp` 全局扫描。
-- [ ] 配置项落地：`sliding-ttl.*`、`lag-monitor.*`。
+- [x] 删除 `gw:org:holds`，惰性回收改为按 `gw:holds:exp` 全局扫描。
+- [x] 配置项落地：`sliding-ttl.*`、`lag-monitor.*`。
+
+> **本阶段未完成**：续期本地节流（当前每请求都续）、`gateway_rebuild_stale_delta_micros` 度量、DEGRADED 时 503 的 `Retry-After` 响应头。
 
 **验收手段**
 - 容器测试：长流跨 TTL 后钱包键仍存在；空闲 300 秒后键消失且可从 checkpoint 重建。
@@ -189,13 +191,15 @@
 
 > 以 [04-04 第 3 节](./design/04-04-settlement-pipeline.md) 为准。
 
-- [ ] **消费者事务边界**：把幂等写入移到独立 Bean 或显式事务模板，消除自调用绕过代理（D-7、G7）。
-- [ ] **按逐腿明细扣减** `resource_packs.remaining_units` 与 `bonus_grants.remaining_micros`，余量归零且 ACTIVE 时置 `EXHAUSTED`（D-6）。
-- [ ] **明细落库**：`allocation_detail_json`、`hold_id`、`shortfall_micros`、`settled_after_reclaim`（D-5）。
-- [ ] **不钳位**：事件只带实扣量，落库一律加法；触发负余额即判错账并告警，不得静默 `GREATEST(0, ...)`。
-- [ ] **`folded` 落 PostgreSQL**：同一事务内推进 `wallets.last_applied_event_id`；`produced` 留在 `gw:ledger:pos`。
-- [ ] **定时作业**：僵尸预占周期回收（含 `served` 兜底结算）、批次过期 sweeper（只改 PG + 写 `BONUS_EXPIRE`）、`wallet_ledger` 与 `audit_logs` 分区预建（D-13、G8）。
-- [ ] **投递水位回传**：消费者每批写 `outbox_watermark`（单行表，含 `updated_at`）。
+- [x] **消费者事务边界**：把幂等写入移到独立 Bean 或显式事务模板，消除自调用绕过代理（D-7、G7）。
+- [x] **按逐腿明细扣减** `resource_packs.remaining_units` 与 `bonus_grants.remaining_micros`，余量归零且 ACTIVE 时置 `EXHAUSTED`（D-6）。
+- [x] **明细落库**：`allocation_detail_json`、`hold_id`、`shortfall_micros`、`settled_after_reclaim`（D-5）。
+- [x] **不钳位**：事件只带实扣量，落库一律加法；触发负余额即判错账并告警，不得静默 `GREATEST(0, ...)`。
+- [x] **`folded` 落 PostgreSQL**：同一事务内推进 `wallets.last_applied_event_id`；`produced` 留在 `gw:ledger:pos`。
+- [x] **定时作业**：僵尸预占周期回收（后台 sweep + 惰性回收）、批次过期 sweeper（只改 PG + 写 `BONUS_EXPIRE`）、`wallet_ledger` 与 `audit_logs` 分区预建（D-13、G8）。
+
+> **本阶段未完成**：`served` 兜底下界结算（标记已写、结算未接）、余额归零置 `EXHAUSTED`、对账工单四级阶梯。
+- [x] **投递水位回传**：消费者每批写 `outbox_watermark`（单行表，含 `updated_at`）。
 - [ ] **对账工单四级阶梯**：L1 重投 / L2 修链路 / L3 补 `ADJUST`（三态判定）/ L4 无条件认亏；工单不参与请求路径。
 
 **验收手段**
@@ -210,13 +214,13 @@
 
 > 以 [04-04 第 4 节](./design/04-04-settlement-pipeline.md) 为准。本阶段完成后，网关不再直投 Kafka。
 
-- [ ] **单一金额 topic**：connector 的 `route.topic.replacement` 改为 `cdc.billing`，Kafka key = `orgId`，`OutboxAggregateType` 收敛为一个值；`llm.request.events` 仍直投。
-- [ ] **消耗路径批量写入**：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接。退避重试，不得因次数上限丢弃，超过 `retry-deadline` 才放弃并计入孤儿指标。
-- [ ] **事件副本与巡检重投**：结算 Lua 内 `SET gw:settle:evt PX 300000` + `ZADD gw:settle:pending`；消费者落账后 `ZREM`；admin 每 30 秒把超时未确认的重投回 outbox（主键幂等）。
-- [ ] **准入闸门**：队列水位 > 50% 持续 30 秒，或失败率 > 1% 且 1 分钟内 ≥ 50 条 ⇒ 该实例停止准入返回 503；**钱一旦动了，响应里不再有错误码**。
-- [ ] **停用直投**：删除 `GatewayTelemetryService` 的结算事件直发路径。
-- [ ] **水位删除作业**：每 30 秒 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；不设保留期；水位停滞 24 小时按时间兜底并打 P1。
-- [ ] **`V4_2` 迁移**：删 `idx_outbox_events_created`、`outbox_events` 设 `fillfactor = 100`、`wallet_ledger` 增 `shortfall_micros` 与 `settled_after_reclaim`、`wallets` 增 `last_applied_event_id`、新增 `outbox_watermark` 单行表；同步刷新 `-Pjooq`。
+- [x] **单一金额 topic**：connector 的 `route.topic.replacement` 改为 `cdc.billing`，Kafka key = `orgId`，`OutboxAggregateType` 收敛为一个值；`llm.request.events` 仍直投。
+- [x] **消耗路径批量写入**：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接。退避重试，不得因次数上限丢弃，超过 `retry-deadline` 才放弃并计入孤儿指标。
+- [x] **事件副本与巡检重投**：结算 Lua 内 `SET gw:settle:evt PX 300000` + `ZADD gw:settle:pending`；消费者落账后 `ZREM`；admin 每 30 秒把超时未确认的重投回 outbox（主键幂等）。
+- [ ] **准入闸门**：队列水位 > 50% 持续 30 秒（当前队列满只记日志，未停准入），或失败率 > 1% 且 1 分钟内 ≥ 50 条 ⇒ 该实例停止准入返回 503；**钱一旦动了，响应里不再有错误码**。
+- [x] **停用直投**：删除 `GatewayTelemetryService` 的结算事件直发路径。
+- [x] **水位删除作业**：每 30 秒 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；不设保留期；水位停滞 24 小时按时间兜底并打 P1。
+- [x] **`V4_2` 迁移**：删 `idx_outbox_events_created`、`outbox_events` 设 `fillfactor = 100`、`wallet_ledger` 增 `shortfall_micros` 与 `settled_after_reclaim`、`wallets` 增 `last_applied_event_id`、新增 `outbox_watermark` 单行表；同步刷新 `-Pjooq`。
 
 **验收手段**
 - 容器测试：批量插入行数正确、UUIDv7 单调、无二级索引仍可按区间删除。
