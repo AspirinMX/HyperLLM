@@ -177,11 +177,19 @@ class V4SchemaConstraintIT extends AbstractPostgresIntegrationTest {
 
     @Test
     void carriesTheSettlementPipelineColumns() {
-        assertThat(dsl.fetchOne("SELECT shortfall_micros, settled_after_reclaim FROM wallet_ledger LIMIT 0"))
-                .isNotNull();
-        assertThat(dsl.fetchOne("SELECT last_applied_event_id FROM wallets LIMIT 0")).isNotNull();
-        assertThat(dsl.fetchOne("SELECT last_event_id, updated_at FROM outbox_watermark LIMIT 0")).isNotNull();
-        assertThat(dsl.fetchValue("SELECT count(*) FROM outbox_watermark", Integer.class)).isEqualTo(1);
+        // Asked of the catalogue rather than of a row: a partitioned table has no rows to select
+        // from in an empty database, and LIMIT 0 would return nothing no matter what the schema is.
+        assertThat(columnsOf("wallet_ledger"))
+                .contains("shortfall_micros", "settled_after_reclaim", "hold_id");
+        assertThat(columnsOf("wallets")).contains("last_applied_event_id");
+        assertThat(columnsOf("outbox_watermark")).contains("last_event_id", "updated_at");
+        assertThat(dsl.fetchValue("SELECT count(*) FROM outbox_watermark", Long.class)).isEqualTo(1L);
+    }
+
+    private List<String> columnsOf(String table) {
+        return dsl.fetch("SELECT column_name FROM information_schema.columns"
+                        + " WHERE table_schema = 'public' AND table_name = ?", table)
+                .getValues(0, String.class);
     }
 
     private void insertOrder(String orderNo, String idempotencyKey, UUID orgId, String externalTxId) {
