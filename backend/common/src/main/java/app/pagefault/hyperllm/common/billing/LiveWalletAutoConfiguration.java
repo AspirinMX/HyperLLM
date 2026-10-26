@@ -16,7 +16,7 @@ import java.util.List;
  * <p>The script and the reader are both defined once, so the console and the operator console can
  * never answer "what can this tenant spend" in two different ways.
  */
-@AutoConfiguration
+@AutoConfiguration(afterName = "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration")
 @ConditionalOnClass(StringRedisTemplate.class)
 public class LiveWalletAutoConfiguration {
 
@@ -27,8 +27,9 @@ public class LiveWalletAutoConfiguration {
         return RedisScript.of(new ClassPathResource("lua/prehold_snapshot.lua"), List.class);
     }
 
-    /** Requires a Redis client: a service without one should exclude this configuration. */
+    /** Skipped wherever there is no Redis client, so a module without one still boots. */
     @Bean
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnBean(StringRedisTemplate.class)
     @ConditionalOnMissingBean
     public LiveWalletReader liveWalletReader(
             StringRedisTemplate redisTemplate,
