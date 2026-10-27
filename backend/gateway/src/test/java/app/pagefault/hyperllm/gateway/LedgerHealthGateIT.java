@@ -54,35 +54,35 @@ class LedgerHealthGateIT {
 
     @Test
     void blocksNothingWhenTheFeatureWasNeverDeployed() {
-        assertThat(gate.blocksRebuild()).isFalse();
+        assertThat(gate.current().block(Duration.ofSeconds(2)).degraded()).isFalse();
     }
 
     @Test
     void blocksARebuildWhileTheConsumerIsBehind() {
         publish(LedgerLagSignal.degraded(9_000L, 120d, System.currentTimeMillis()), true);
 
-        assertThat(gate.blocksRebuild()).isTrue();
+        assertThat(gate.current().block(Duration.ofSeconds(2)).degraded()).isTrue();
     }
 
     @Test
     void letsARebuildThroughOnceTheSignalStoppedBeingRefreshed() {
         publish(LedgerLagSignal.degraded(9_000L, 120d, System.currentTimeMillis() - 200_000L), true);
 
-        assertThat(gate.blocksRebuild()).isFalse();
+        assertThat(gate.current().block(Duration.ofSeconds(2)).degraded()).isFalse();
     }
 
     @Test
     void letsARebuildThroughWhenOnlyTheMarkerRemains() {
         redis.opsForValue().set(GatewayRedisKeys.ledgerLagArmed(), "1").block();
 
-        assertThat(gate.blocksRebuild()).isFalse();
+        assertThat(gate.current().block(Duration.ofSeconds(2)).degraded()).isFalse();
     }
 
     @Test
     void letsARebuildThroughWhenTheConsumerIsKeepingUp() {
         publish(LedgerLagSignal.healthy(10L, 0.5d, System.currentTimeMillis()), true);
 
-        assertThat(gate.blocksRebuild()).isFalse();
+        assertThat(gate.current().block(Duration.ofSeconds(2)).degraded()).isFalse();
     }
 
     private void publish(LedgerLagSignal signal, boolean armed) {

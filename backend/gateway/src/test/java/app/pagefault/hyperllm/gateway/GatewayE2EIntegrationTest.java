@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.gateway;
 
+import app.pagefault.hyperllm.common.billing.LedgerLagSignal;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.crypto.AesGcmCipher;
 import app.pagefault.hyperllm.common.crypto.ApiKeyGenerator;
@@ -42,6 +43,7 @@ import app.pagefault.hyperllm.domain.repository.ProviderRepository;
 import app.pagefault.hyperllm.domain.repository.UserRepository;
 import app.pagefault.hyperllm.domain.repository.VirtualModelRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
+import app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
@@ -59,6 +61,7 @@ import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWeb
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -148,6 +151,7 @@ class GatewayE2EIntegrationTest {
 
     @Autowired private WebTestClient webTestClient;
     @Autowired private ReactiveStringRedisTemplate redisTemplate;
+    @Autowired private EntitlementMirrorService mirrorService;
     @Autowired private KafkaTemplate<String, String> kafkaTemplate;
     @Autowired private AesGcmCipher aesGcmCipher;
     @Autowired private ObjectMapper objectMapper;
@@ -297,6 +301,22 @@ class GatewayE2EIntegrationTest {
                 .willReturn(aResponse().withStatus(200)
                         .withHeader("Content-Type", "application/json")
                         .withBody("{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":500,\"output_tokens\":500}}")));
+
+        String signalKey = GatewayRedisKeys.ledgerLagSignal();
+        var lag = LedgerLagSignal.degraded(5_000L, 41.4, System.currentTimeMillis());
+        redisTemplate.opsForValue().set(signalKey, objectMapper.writeValueAsString(lag), Duration.ofSeconds(60)).block();
+        webTestClient.post()
+                .uri("/v1/chat/completions")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"model\":\"gpt-gw-test\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}")
+                .exchange()
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "42")
+                .expectBody().jsonPath("$.error.code").isEqualTo("LEDGER_BACKLOG");
+        assertThat(redisTemplate.hasKey(GatewayRedisKeys.wallet(orgId)).block()).isFalse();
+        // Seed the already-live case. The same signal permits using an existing mirror.
+        mirrorService.load(orgId, "gpt-gw-test").block();
 
         // 1. OpenAI streaming call: retries Tier-1 503 -> succeeds Tier-2, strips injected usage, deducts 11_000 micros (5_000 bonus + 6_000 cash)
         String body = webTestClient.post()

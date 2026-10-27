@@ -1,6 +1,9 @@
 package app.pagefault.hyperllm.gateway.cache;
 
+import app.pagefault.hyperllm.common.billing.LedgerLagSignal;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.error.ErrorCode;
+import app.pagefault.hyperllm.gateway.billing.BillingAdmissionException;
 import app.pagefault.hyperllm.domain.billing.EntitlementSnapshot;
 import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
 import app.pagefault.hyperllm.domain.model.billing.ResourcePack;
@@ -89,22 +92,20 @@ public class EntitlementMirrorService {
      * @param renew whether this call should extend the TTLs of everything it touched
      */
     public Mono<Mirror> read(UUID orgId, String modelCode, boolean renew) {
-        return readOnce(orgId, modelCode, renew)
+        return healthGate.current().flatMap(signal -> readOnce(orgId, modelCode, renew, signal)
                 .switchIfEmpty(Mono.defer(() -> {
-                    if (healthGate.blocksRebuild()) {
-                        // Rebuilding now would write a snapshot known to trail the deductions the
-                        // gateway has already applied, handing the tenant back money it has spent.
-                        return Mono.error(new app.pagefault.hyperllm.common.error.HyperLlmException(
-                                app.pagefault.hyperllm.common.error.ErrorCode.LEDGER_BACKLOG));
+                    if (signal.degraded()) {
+                        return Mono.error(new BillingAdmissionException(
+                                ErrorCode.LEDGER_BACKLOG, signal.retryAfterSeconds()));
                     }
-                    return load(orgId, modelCode).then(readOnce(orgId, modelCode, renew));
-                }))
+                    return load(orgId, modelCode).then(Mono.defer(() -> readOnce(orgId, modelCode, renew, signal)));
+                })))
                 .switchIfEmpty(Mono.error(new IllegalStateException(
                         "tenant mirror still missing after load, org=" + orgId)));
     }
 
     /** @return {@code null} when the wallet has not been mirrored yet. */
-    private Mono<Mirror> readOnce(UUID orgId, String modelCode, boolean renew) {
+    private Mono<Mirror> readOnce(UUID orgId, String modelCode, boolean renew, LedgerLagSignal signal) {
         long ttlMillis = properties.getCache().getSlidingTtlSeconds() * 1000L;
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId),
@@ -114,7 +115,7 @@ public class EntitlementMirrorService {
                 String.valueOf(System.currentTimeMillis()),
                 // Freezing is preferred over renewing while the ledger is behind, so a touched key
                 // cannot expire and be rebuilt from a stale snapshot.
-                renew ? (healthGate.blocksRebuild() ? "2" : "1") : "0",
+                renew ? (signal.degraded() ? "2" : "1") : "0",
                 String.valueOf(ttlMillis),
                 GatewayRedisKeys.packItemPrefix(),
                 GatewayRedisKeys.bonusItemPrefix());
