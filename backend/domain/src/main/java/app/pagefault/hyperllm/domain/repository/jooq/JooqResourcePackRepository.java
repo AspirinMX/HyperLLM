@@ -68,6 +68,8 @@ public class JooqResourcePackRepository implements ResourcePackRepository {
     public boolean decrementUnits(UUID packId, long units, OffsetDateTime updatedAt) {
         int updated = dsl.update(RESOURCE_PACKS)
                 .set(RESOURCE_PACKS.REMAINING_UNITS, RESOURCE_PACKS.REMAINING_UNITS.minus(units))
+                .set(RESOURCE_PACKS.STATUS, DSL.when(RESOURCE_PACKS.REMAINING_UNITS.eq(units),
+                        EntitlementStatus.EXHAUSTED.name()).otherwise(RESOURCE_PACKS.STATUS))
                 .set(RESOURCE_PACKS.VERSION, RESOURCE_PACKS.VERSION.plus(1))
                 .set(RESOURCE_PACKS.UPDATED_AT, updatedAt)
                 .where(RESOURCE_PACKS.ID.eq(packId))

@@ -68,6 +68,8 @@ public class JooqBonusGrantRepository implements BonusGrantRepository {
     public boolean decrementMicros(UUID grantId, long micros, OffsetDateTime updatedAt) {
         int updated = dsl.update(BONUS_GRANTS)
                 .set(BONUS_GRANTS.REMAINING_MICROS, BONUS_GRANTS.REMAINING_MICROS.minus(micros))
+                .set(BONUS_GRANTS.STATUS, DSL.when(BONUS_GRANTS.REMAINING_MICROS.eq(micros),
+                        EntitlementStatus.EXHAUSTED.name()).otherwise(BONUS_GRANTS.STATUS))
                 .set(BONUS_GRANTS.VERSION, BONUS_GRANTS.VERSION.plus(1))
                 .set(BONUS_GRANTS.UPDATED_AT, updatedAt)
                 .where(BONUS_GRANTS.ID.eq(grantId))

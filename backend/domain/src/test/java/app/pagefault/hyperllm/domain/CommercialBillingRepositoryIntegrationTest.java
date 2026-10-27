@@ -120,6 +120,7 @@ class CommercialBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
 
         assertThat(resourcePackRepository.decrementUnits(sooner.id(), 50, now)).isTrue();
         assertThat(resourcePackRepository.findById(sooner.id()).orElseThrow().remainingUnits()).isZero();
+        assertThat(resourcePackRepository.findById(sooner.id()).orElseThrow().status()).isEqualTo(EntitlementStatus.EXHAUSTED);
 
         assertThat(resourcePackRepository.decrementUnits(sooner.id(), 1, now))
                 .as("decrement below zero must fail and leave the balance untouched")
@@ -144,6 +145,9 @@ class CommercialBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
         assertThat(bonusGrantRepository.decrementMicros(universal.id(), 400, now)).isTrue();
         assertThat(bonusGrantRepository.decrementMicros(universal.id(), 601, now)).isFalse();
         assertThat(bonusGrantRepository.sumRemainingMicros(orgId)).isEqualTo(2_600L);
+        assertThat(bonusGrantRepository.findById(universal.id()).orElseThrow().status()).isEqualTo(EntitlementStatus.ACTIVE);
+        assertThat(bonusGrantRepository.decrementMicros(universal.id(), 600, now)).isTrue();
+        assertThat(bonusGrantRepository.findById(universal.id()).orElseThrow().status()).isEqualTo(EntitlementStatus.EXHAUSTED);
     }
 
     @Test
