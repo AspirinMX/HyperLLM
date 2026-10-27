@@ -46,6 +46,7 @@ public enum ErrorCode {
     UPSTREAM_ERROR(502, "Upstream provider error"),
     CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),
     LEDGER_BACKLOG(503, "The billing ledger is behind; retry shortly"),
+    OUTBOX_UNAVAILABLE(503, "The billing outbox is unavailable; retry shortly"),
     IDEMPOTENT_IN_FLIGHT(409, "An identical request is still in flight"),
     IDEMPOTENT_REPLAYED(409, "Duplicate request rejected by idempotency key");
 

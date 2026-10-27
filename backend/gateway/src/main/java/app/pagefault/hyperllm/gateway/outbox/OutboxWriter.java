@@ -27,6 +27,7 @@ public class OutboxWriter implements SmartLifecycle {
 
     private final OutboxQueue queue;
     private final OutboxEventRepository repository;
+    private final OutboxAdmissionGate admissionGate;
     private final GatewayProperties.Outbox settings;
     private final ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry;
     private final AtomicLong inserted = new AtomicLong();
@@ -39,11 +40,13 @@ public class OutboxWriter implements SmartLifecycle {
     public OutboxWriter(
             OutboxQueue queue,
             OutboxEventRepository repository,
+            OutboxAdmissionGate admissionGate,
             GatewayProperties properties,
             ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry
     ) {
         this.queue = queue;
         this.repository = repository;
+        this.admissionGate = admissionGate;
         this.settings = properties.getOutbox();
         this.meterRegistry = meterRegistry;
     }
@@ -95,9 +98,11 @@ public class OutboxWriter implements SmartLifecycle {
         while (true) {
             try {
                 int written = repository.insertIfAbsent(events);
+                admissionGate.recordWrite(events.size(), true);
                 inserted.addAndGet(written);
                 return;
             } catch (RuntimeException ex) {
+                admissionGate.recordWrite(events.size(), false);
                 failures.incrementAndGet();
                 if (System.currentTimeMillis() >= deadline) {
                     abandoned.addAndGet(events.size());

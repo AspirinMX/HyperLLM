@@ -37,6 +37,7 @@ import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
 import app.pagefault.hyperllm.gateway.cache.GatewayConfigCacheService;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
+import app.pagefault.hyperllm.gateway.outbox.OutboxAdmissionGate;
 import app.pagefault.hyperllm.gateway.routing.ChannelSelector;
 import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
 import app.pagefault.hyperllm.protocol.adapter.ProtocolAdapter;
@@ -115,6 +116,7 @@ public class GatewayProxyService {
 
     private final GatewayConfigCacheService cacheService;
     private final GatewayAdmissionService admissionService;
+    private final OutboxAdmissionGate outboxAdmissionGate;
     private final PreHoldService preHoldService;
     private final GatewayTelemetryService telemetryService;
     private final GatewayProperties properties;
@@ -708,6 +710,7 @@ public class GatewayProxyService {
             GatewayModelRoute route,
             CanonicalChatRequest canonical
     ) {
+        outboxAdmissionGate.check();
         GatewayProperties.Billing billing = properties.getBilling();
         String modelCode = route.model().modelCode();
         long promptEstimate = Math.max(0L, tokenEstimator.estimatePromptTokens(canonical));
@@ -746,6 +749,7 @@ public class GatewayProxyService {
             long billableTokens,
             EntitlementSnapshot snapshot
     ) {
+        outboxAdmissionGate.check();
         AllocationPlan plan = EntitlementAllocator.allocate(holdTarget, billableTokens, snapshot);
         if (plan.legs().isEmpty()) {
             return Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));

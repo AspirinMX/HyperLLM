@@ -96,6 +96,7 @@ class OutboxWriterTest {
         return new OutboxWriter(
                 queue,
                 repository,
+                new OutboxAdmissionGate(queue),
                 properties,
                 new StaticListableBeanFactory().getBeanProvider(io.micrometer.core.instrument.MeterRegistry.class));
     }
