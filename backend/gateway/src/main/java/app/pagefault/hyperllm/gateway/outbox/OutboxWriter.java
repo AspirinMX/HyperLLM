@@ -5,6 +5,7 @@ import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
@@ -39,7 +40,7 @@ public class OutboxWriter implements SmartLifecycle {
 
     public OutboxWriter(
             OutboxQueue queue,
-            OutboxEventRepository repository,
+            @Qualifier("gatewayOutboxRepository") OutboxEventRepository repository,
             OutboxAdmissionGate admissionGate,
             GatewayProperties properties,
             ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry

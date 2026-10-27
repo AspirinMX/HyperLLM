@@ -47,6 +47,7 @@ import app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import com.zaxxer.hikari.HikariDataSource;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -57,6 +58,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -150,6 +152,8 @@ class GatewayE2EIntegrationTest {
     }
 
     @Autowired private WebTestClient webTestClient;
+    @Autowired private HikariDataSource primaryDataSource;
+    @Autowired @Qualifier("gatewayOutboxDataSource") private HikariDataSource outboxDataSource;
     @Autowired private ReactiveStringRedisTemplate redisTemplate;
     @Autowired private EntitlementMirrorService mirrorService;
     @Autowired private KafkaTemplate<String, String> kafkaTemplate;
@@ -169,6 +173,14 @@ class GatewayE2EIntegrationTest {
     @Autowired private VirtualModelRepository modelRepository;
     @Autowired private ModelChannelBindingRepository bindingRepository;
     @Autowired private PricingRuleRepository pricingRuleRepository;
+
+    @Test
+    void reservesTwoOfTheEightDatabaseConnectionsForTheOutbox() {
+        assertThat(outboxDataSource).isNotSameAs(primaryDataSource);
+        assertThat(outboxDataSource.getJdbcUrl()).isEqualTo(primaryDataSource.getJdbcUrl());
+        assertThat(outboxDataSource.getMaximumPoolSize()).isEqualTo(2);
+        assertThat(primaryDataSource.getMaximumPoolSize()).isEqualTo(6);
+    }
 
     @Test
     void proxiesOpenAiStreamingWithRetryBillingKafkaAndCdcEviction() throws Exception {
