@@ -19,6 +19,13 @@ public final class AllocationDetailCodec {
     }
 
     public static String encodeV1(ResolvedPricing pricing, BillableUsage usage, AllocationPlan plan) {
+        StringBuilder json = new StringBuilder(encodeContextV1(pricing, usage));
+        appendAllocation(json, plan);
+        return json.toString();
+    }
+
+    /** JSON prefix with the immutable pricing and usage fields. The settlement script adds the applied legs. */
+    public static String encodeContextV1(ResolvedPricing pricing, BillableUsage usage) {
         StringBuilder json = new StringBuilder(256);
         json.append("{\"v\":1,\"pricing\":{");
         json.append("\"source\":\"").append(pricing.source().name()).append("\",");
@@ -41,7 +48,10 @@ public final class AllocationDetailCodec {
         json.append("\"cacheWrite\":").append(usage.cacheWriteTokens()).append(',');
         json.append("\"reasoning\":").append(usage.reasoningTokens());
         json.append("},");
+        return json.toString();
+    }
 
+    private static void appendAllocation(StringBuilder json, AllocationPlan plan) {
         int emitted = Math.min(plan.legs().size(), MAX_LEGS);
         json.append("\"legs\":[");
         for (int i = 0; i < emitted; i++) {
@@ -66,7 +76,6 @@ public final class AllocationDetailCodec {
         json.append("\"degraded\":").append(plan.degraded()).append(',');
         json.append("\"truncatedLegs\":").append(plan.legs().size() - emitted);
         json.append("}}");
-        return json.toString();
     }
 
     /** Exposed for callers that only need the provenance half, such as pre-hold diagnostics. */

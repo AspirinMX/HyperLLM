@@ -6,16 +6,12 @@ import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
-import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.money.CostMath;
 import app.pagefault.hyperllm.domain.billing.AllocationDetailCodec;
-import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.domain.billing.AllocationPlan;
-import app.pagefault.hyperllm.domain.billing.AllocationType;
 import app.pagefault.hyperllm.domain.billing.BillableUsage;
 import app.pagefault.hyperllm.domain.billing.EntitlementAllocator;
 import app.pagefault.hyperllm.domain.billing.EntitlementSnapshot;
-import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 import app.pagefault.hyperllm.domain.pricing.PricingResolver;
 import app.pagefault.hyperllm.domain.pricing.ResolvedPricing;
 import app.pagefault.hyperllm.common.messaging.LlmRequestEvent;
@@ -31,7 +27,6 @@ import app.pagefault.hyperllm.domain.model.routing.GatewayModelRoute;
 import app.pagefault.hyperllm.domain.model.routing.PricingRule;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
-import app.pagefault.hyperllm.gateway.billing.GatewayAdmissionService;
 import app.pagefault.hyperllm.gateway.billing.HeldLegCharger;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
@@ -43,7 +38,6 @@ import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
 import app.pagefault.hyperllm.protocol.adapter.ProtocolAdapter;
 import app.pagefault.hyperllm.protocol.adapter.ProtocolRegistry;
 import app.pagefault.hyperllm.protocol.adapter.StreamUsageTracker;
-import app.pagefault.hyperllm.protocol.billing.UsageCostCalculator;
 import app.pagefault.hyperllm.protocol.ir.CanonicalChatRequest;
 import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamRequest;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
@@ -65,12 +59,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.reactivestreams.Subscription;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.Disposable;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -115,7 +111,6 @@ public class GatewayProxyService {
     }
 
     private final GatewayConfigCacheService cacheService;
-    private final GatewayAdmissionService admissionService;
     private final OutboxAdmissionGate outboxAdmissionGate;
     private final PreHoldService preHoldService;
     private final GatewayTelemetryService telemetryService;
@@ -191,7 +186,7 @@ public class GatewayProxyService {
                                             "No active channel matches protocol " + requiredFamily
                                     ));
                                 }
-                                return preparePreHold(caller, route, canonical)
+                                return preparePreHold(caller, route, canonical, requestId)
                                         .flatMap(lease -> dispatchWithRetry(
                                                 exchange, adapter, protocolKind, rawBody, canonical.stream(),
                                                 caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
@@ -209,7 +204,7 @@ public class GatewayProxyService {
             CallerContext caller,
             GatewayModelRoute route,
             List<GatewayChannelCandidate> candidates,
-            GatewayAdmissionService.AdmissionLease lease,
+            PreHoldService.Lease lease,
             long requestStartNanos,
             String requestId,
             String traceId,
@@ -253,7 +248,7 @@ public class GatewayProxyService {
             boolean isStream,
             CallerContext caller,
             GatewayModelRoute route,
-            GatewayAdmissionService.AdmissionLease lease,
+            PreHoldService.Lease lease,
             Set<UUID> excludedChannels,
             long requestStartNanos,
             String requestId,
@@ -263,7 +258,6 @@ public class GatewayProxyService {
     ) {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
-        AtomicBoolean served = new AtomicBoolean();
 
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
@@ -277,11 +271,6 @@ public class GatewayProxyService {
                         return clientResponse.releaseBody()
                                 .thenMany(Flux.error(new RetryableUpstreamException(
                                         status, "Upstream returned retryable status " + status)));
-                    }
-                    if (clientResponse.statusCode().is2xxSuccessful()) {
-                        // The upstream accepted and answered, so the prompt has been processed:
-                        // from here on a reclaimed lease may settle at the prompt-only floor.
-                        markServedOnce(lease, served);
                     }
                     if (!isStream || !clientResponse.statusCode().is2xxSuccessful()) {
                         return clientResponse.bodyToMono(byte[].class)
@@ -332,7 +321,7 @@ public class GatewayProxyService {
             CallerContext caller,
             GatewayModelRoute route,
             GatewayChannelCandidate candidate,
-            GatewayAdmissionService.AdmissionLease lease,
+            PreHoldService.Lease lease,
             long requestStartNanos,
             String requestId,
             String traceId,
@@ -344,7 +333,6 @@ public class GatewayProxyService {
         StreamUsageTracker tracker = adapter.newStreamTracker(prepared.canonicalRequest());
         AtomicBoolean settled = new AtomicBoolean(false);
         AtomicLong firstByteNanos = new AtomicLong(0L);
-        AtomicLong lastHeartbeatNanos = new AtomicLong(System.nanoTime());
         DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();
         Sinks.Many<byte[]> frameSink = Sinks.many().unicast().onBackpressureBuffer();
 
@@ -374,7 +362,7 @@ public class GatewayProxyService {
                 .contentType(MediaType.TEXT_EVENT_STREAM)
                 .body(clientFrames));
 
-        return clientResponse.bodyToFlux(DataBuffer.class)
+        return Flux.using(() -> startHeartbeat(lease), heartbeat -> clientResponse.bodyToFlux(DataBuffer.class)
                 .concatMapIterable(dataBuffer -> {
                     try {
                         byte[] bytes = new byte[dataBuffer.readableByteCount()];
@@ -385,9 +373,16 @@ public class GatewayProxyService {
                     }
                 })
                 .concatWith(Flux.defer(() -> Flux.fromIterable(tracker.complete())))
+                .concatMap(frame -> firstByteNanos.get() == 0L
+                        ? preHoldService.markServed(lease)
+                                .onErrorResume(ex -> {
+                                    log.warn("Cannot mark first response frame for hold {}", lease.holdId(), ex);
+                                    return Mono.empty();
+                                })
+                                .thenReturn(frame)
+                        : Mono.just(frame))
                 .doOnNext(frame -> {
                     firstByteNanos.compareAndSet(0L, System.nanoTime());
-                    renewHoldIfDue(lease, lastHeartbeatNanos);
                     frameSink.tryEmitNext(frame);
                 })
                 .then(Mono.defer(() -> settleReactive(
@@ -405,7 +400,7 @@ public class GatewayProxyService {
                         candidate.upstreamModelName(),
                         protocolKind, true, 200, "STREAM_INTERRUPTED", retryCount, clientIp, lease
                 ).then(Mono.fromRunnable(() -> frameSink.tryEmitError(ex))))
-                .thenMany(Flux.empty());
+                .thenMany(Flux.<Void>empty()), Disposable::dispose);
     }
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> handleNonStreamingResponse(
@@ -418,7 +413,7 @@ public class GatewayProxyService {
             CallerContext caller,
             GatewayModelRoute route,
             GatewayChannelCandidate candidate,
-            GatewayAdmissionService.AdmissionLease lease,
+            PreHoldService.Lease lease,
             long requestStartNanos,
             String requestId,
             String traceId,
@@ -439,7 +434,7 @@ public class GatewayProxyService {
         long nowNanos = System.nanoTime();
         String errorCode = status >= 400 ? "UPSTREAM_HTTP_" + status : null;
         return settleReactive(
-                settled, status < 400, usage,
+                settled, status >= 200 && status < 300, usage,
                 requestStartNanos, nowNanos,
                 requestId, traceId, caller, route, candidate,
                 candidate.upstreamModelName(), protocolKind, false, status, errorCode, retryCount, clientIp, lease
@@ -466,15 +461,18 @@ public class GatewayProxyService {
             String errorCode,
             int retryCount,
             String clientIp,
-            GatewayAdmissionService.AdmissionLease lease
+            PreHoldService.Lease lease
     ) {
         if (!settled.compareAndSet(false, true)) {
             return Mono.empty();
         }
+        if ((!cleanSuccess && firstByteNanos == 0L) || httpStatus < 200 || httpStatus >= 300) {
+            return releaseHold(lease);
+        }
         PricingRule pricing = route.activePricing();
         if (pricing == null) {
             log.warn("Settling request {} without an active pricing rule; no charge recorded", requestId);
-            return admissionService.releaseLease(lease);
+            return releaseHold(lease);
         }
 
         long endNanos = System.nanoTime();
@@ -500,8 +498,7 @@ public class GatewayProxyService {
                 .onErrorResume(ex -> {
                     log.error("Billing settlement failed for request {}", requestId, ex);
                     return Mono.empty();
-                })
-                .then(admissionService.releaseLease(lease));
+                });
     }
 
     private Mono<Void> chargeAndSettle(
@@ -525,7 +522,7 @@ public class GatewayProxyService {
             int durationMs,
             int ttftMs,
             double tpotMs,
-            GatewayAdmissionService.AdmissionLease lease
+            PreHoldService.Lease lease
     ) {
         long rawCost = CostMath.rawCostMicros(
                 billable.promptTokens(), billable.completionTokens(), billable.cacheReadTokens(),
@@ -543,51 +540,11 @@ public class GatewayProxyService {
                         pricing.reasoningPriceMicros1m()),
                 candidate.effectiveCostDiscountBps());
 
-        Mono<List<AllocationLeg>> heldLegs = lease.holdId() == null
-                ? Mono.just(List.of())
-                : mirrorService.heldLegs(lease.holdId());
-        return heldLegs
-                .map(legs -> HeldLegCharger.charge(legs, exactCostMicros))
-                .flatMap(charges -> {
-                    AllocationPlan plan = new AllocationPlan(charges.legs(), exactCostMicros, 0L, false);
-                    long cashLeg = sumLegs(plan, AllocationType.CASH);
-                    long bonusLeg = sumLegs(plan, AllocationType.BONUS);
-                    long packUnits = sumPackUnits(plan);
-                    String detailJson = AllocationDetailCodec.encodeV1(resolved, billable, plan);
-                    Mono<Deduction> deduction =
-                            preHoldService.settle(
-                                            lease.holdId(), caller.orgId(), charges.legs(), detailJson,
-                                            properties.getBilling().getLeaseTtlSeconds() * 12L,
-                                            300_000L,
-                                            true,
-                                            properties.getBilling().getLeaseTtlSeconds())
-                                    .map(outcome -> new Deduction(
-                                            outcome.cashCharged(), outcome.bonusCharged(),
-                                            outcome.alreadySettled(), outcome.settledAfterReclaim(),
-                                            outcome.shortfallMicros()));
-                    return deduction
-                            .flatMap(deducted -> {
-                    UUID eventId = lease.holdId() == null
-                            ? UuidV7.next()
-                            : UUID.fromString(lease.holdId());
-                    BillingMoneyEvent settlement = new BillingMoneyEvent(
-                            eventId,
-                            BillingMoneyEvent.EventType.CONSUME,
-                            eventCreatedAt,
-                            caller.orgId(),
-                            caller.projectId(),
-                            caller.apiKeyId(),
-                            "req:" + requestId,
-                            -deducted.cashMicros(),
-                            -deducted.bonusMicros(),
-                            -packUnits,
-                            deducted.shortfallMicros(),
-                            charges.legs().stream().map(leg -> toMoneyLeg(leg, caller.orgId())).toList(),
-                            detailJson,
-                            lease.holdId() == null ? null : UUID.fromString(lease.holdId()),
-                            deducted.afterReclaim(),
-                            "Model " + route.model().modelCode()
-                    );
+        return mirrorService.heldLegs(lease.holdId())
+                .map(legs -> HeldLegCharger.charge(legs, exactCostMicros).legs())
+                .flatMap(charges -> preHoldService.settle(lease, charges,
+                        AllocationDetailCodec.encodeContextV1(resolved, billable), eventCreatedAt))
+                .doOnNext(deducted -> {
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,
                             requestId,
@@ -614,8 +571,8 @@ public class GatewayProxyService {
                             usage.completionTokens(),
                             usage.reasoningTokens(),
                             exactCostMicros,
-                            deducted.cashMicros(),
-                            deducted.bonusMicros(),
+                            deducted.cashCharged(),
+                            deducted.bonusCharged(),
                             upstreamCostMicros,
                             0L,
                             ttftMs,
@@ -624,91 +581,31 @@ public class GatewayProxyService {
                             maskClientIp(clientIp),
                             candidate.region() != null ? candidate.region() : "default"
                     );
-                    telemetryService.emitSettlementAndRequestEvent(settlement, reqEvent);
-                    return Mono.<Void>empty();
-                            });
-                });
+                    telemetryService.emitRequestEvent(reqEvent);
+                }).then();
     }
 
-    private record Deduction(
-            long cashMicros,
-            long bonusMicros,
-            boolean alreadySettled,
-            boolean afterReclaim,
-            long shortfallMicros
-    ) {
-    }
-
-    /**
-     * One allocation leg as the ledger event states it.
-     *
-     * <p>The synthetic legacy batch carries a real id but no row behind it, so it is reported as
-     * virtual; otherwise the consumer would look for a grant to decrement and find nothing.
-     */
-    private static BillingMoneyEvent.Leg toMoneyLeg(AllocationLeg leg, UUID orgId) {
-        return switch (leg.type()) {
-            case PACK -> BillingMoneyEvent.Leg.pack(leg.id(), leg.units(), leg.micros());
-            case BONUS -> leg.id() == null
-                    || app.pagefault.hyperllm.common.billing.LegacyBonusBatch.isLegacy(orgId, leg.id())
-                    ? BillingMoneyEvent.Leg.virtualBonus(leg.micros())
-                    : BillingMoneyEvent.Leg.bonus(leg.id(), leg.micros());
-            case CASH -> BillingMoneyEvent.Leg.cash(leg.micros());
-        };
+    private Disposable startHeartbeat(PreHoldService.Lease lease) {
+        var billing = properties.getBilling();
+        long ttlSeconds = billing.getLeaseTtlSeconds();
+        long periodSeconds = Math.max(1, Math.min(billing.getHeartbeatMinIntervalSeconds(), ttlSeconds / 3));
+        return Flux.interval(Duration.ofSeconds(periodSeconds))
+                .concatMap(tick -> preHoldService.renew(lease, ttlSeconds).onErrorResume(ex -> {
+                    log.warn("Cannot renew hold {}", lease.holdId(), ex);
+                    return Mono.just(true); // retry on the next heartbeat
+                }))
+                .takeUntil(renewed -> !renewed)
+                .subscribe();
     }
 
     /**
-     * Renews the lease at most once per configured interval. The lease TTL is minutes, so a
-     * throttled renewal driven by stream chunks is enough; a dropped renewal only shortens the
-     * window before a reclaim, and a reclaim is safe because it is guarded by the expiry CAS.
+     * Reserves the estimated maximum and records a smaller prompt-only floor for crash recovery.
      */
-    private void renewHoldIfDue(GatewayAdmissionService.AdmissionLease lease, AtomicLong lastRenewNanos) {
-        if (lease.holdId() == null) {
-            return;
-        }
-        long now = System.nanoTime();
-        long previous = lastRenewNanos.getAndSet(now);
-        long intervalNanos = properties.getBilling().getHeartbeatMinIntervalSeconds() * 1_000_000_000L;
-        if (previous != 0L && now - previous < intervalNanos && previous != System.nanoTime()) {
-            return;
-        }
-        preHoldService.renew(
-                        lease.holdId(), lease.orgId(), lease.concurrencyKeys(),
-                        properties.getBilling().getLeaseTtlSeconds(), true)
-                .subscribe(ok -> { }, ex -> { });
-    }
-
-    /**
-     * Records the first accepted upstream response for this request, at most once.
-     *
-     * <p>The marker is written before any body is emitted, so a stream that dies mid-flight still
-     * counts as served: the upstream did the work and the client did receive a response.
-     */
-    private void markServedOnce(GatewayAdmissionService.AdmissionLease lease, AtomicBoolean served) {
-        if (lease == null || lease.holdId() == null || !served.compareAndSet(false, true)) {
-            return;
-        }
-        preHoldService.markServed(lease.holdId(), properties.getBilling().getLeaseTtlSeconds())
-                .subscribe(ok -> { }, ex -> { });
-    }
-
-    private static long sumLegs(AllocationPlan plan, AllocationType type) {
-        return plan.legs().stream().filter(leg -> leg.type() == type).mapToLong(AllocationLeg::micros).sum();
-    }
-
-    private static long sumPackUnits(AllocationPlan plan) {
-        return plan.legs().stream().filter(leg -> leg.type() == AllocationType.PACK)
-                .mapToLong(AllocationLeg::units).sum();
-    }
-
-    /**
-     * Estimates the worst-case cost, reserves it across packs, bonus and cash, and returns a lease
-     * that carries the hold id. Falls back to the Phase 1 style admission when pre-hold is disabled
-     * or the organisation is not in the rollout whitelist.
-     */
-    private Mono<GatewayAdmissionService.AdmissionLease> preparePreHold(
+    private Mono<PreHoldService.Lease> preparePreHold(
             CallerContext caller,
             GatewayModelRoute route,
-            CanonicalChatRequest canonical
+            CanonicalChatRequest canonical,
+            String requestId
     ) {
         outboxAdmissionGate.check();
         GatewayProperties.Billing billing = properties.getBilling();
@@ -734,20 +631,28 @@ public class GatewayProxyService {
                     long estimate = CostMath.discountedCostMicros(raw, resolved.discountBps());
                     long target = CostMath.discountedCostMicros(estimate, billing.getSafetyFactorBps());
                     long billable = promptEstimate + outputCap;
+                    long floorCost = CostMath.discountedCostMicros(CostMath.rawCostMicros(
+                            promptEstimate, 0L, 0L, 0L, 0L,
+                            resolved.inputPriceMicros1m(), 0L, 0L, 0L, 0L), resolved.discountBps());
                     return preHoldService.reclaimExpired(billing.getLazyReclaimBatch())
                             .onErrorResume(ex -> Mono.just(0))
                             .then(mirrorService.read(caller.orgId(), modelCode, true))
                             .flatMap(mirror -> admitWithEstimate(
-                                    caller, modelCode, target, billable, mirror.snapshot()));
+                                    caller, modelCode, target, billable, mirror.snapshot(),
+                                    requestId, promptEstimate, floorCost, resolved));
                 });
     }
 
-    private Mono<GatewayAdmissionService.AdmissionLease> admitWithEstimate(
+    private Mono<PreHoldService.Lease> admitWithEstimate(
             CallerContext caller,
             String modelCode,
             long holdTarget,
             long billableTokens,
-            EntitlementSnapshot snapshot
+            EntitlementSnapshot snapshot,
+            String requestId,
+            long promptTokens,
+            long floorCost,
+            ResolvedPricing pricing
     ) {
         outboxAdmissionGate.check();
         AllocationPlan plan = EntitlementAllocator.allocate(holdTarget, billableTokens, snapshot);
@@ -755,17 +660,20 @@ public class GatewayProxyService {
             return Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
         }
 
+        var floorUsage = new BillableUsage(promptTokens, 0L, 0L, 0L, 0L);
+        var floor = HeldLegCharger.promptFloor(plan.legs(), snapshot, floorCost, promptTokens);
         String holdId = UuidV7.next().toString();
         PreHoldService.AdmitCommand command = new PreHoldService.AdmitCommand(
                 holdId, caller.orgId(), caller.projectId(), caller.apiKeyId(), modelCode,
                 plan.legs(),
                 caller.keyRpmLimit(), caller.projRpmLimit(),
                 caller.keyMaxConcurrency(), caller.projMaxConcurrency(), caller.orgMaxConcurrency(),
-                properties.getBilling().getLeaseTtlSeconds(), true);
+                properties.getBilling().getLeaseTtlSeconds(), requestId, floor,
+                AllocationDetailCodec.encodeContextV1(pricing, floorUsage));
         List<String> concurrencyKeys = concurrencyKeys(caller);
         return preHoldService.admit(command)
                 .flatMap(status -> switch (status) {
-                    case "OK" -> Mono.just(new GatewayAdmissionService.AdmissionLease(
+                    case "OK" -> Mono.just(new PreHoldService.Lease(
                             caller.orgId(), concurrencyKeys, holdId));
                     case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
                     case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));
@@ -789,13 +697,11 @@ public class GatewayProxyService {
         return keys;
     }
 
-    private Mono<Void> releaseHold(GatewayAdmissionService.AdmissionLease lease) {
-        return Mono.defer(() -> lease.holdId() == null
-                        ? Mono.empty()
-                        : preHoldService.release(lease.holdId(), lease.orgId(),
-                        properties.getBilling().getLeaseTtlSeconds() * 12L))
-                .onErrorResume(ex -> Mono.empty())
-                .then(admissionService.releaseLease(lease));
+    private Mono<Void> releaseHold(PreHoldService.Lease lease) {
+        return preHoldService.release(lease).onErrorResume(ex -> {
+            log.warn("Cannot release hold {}", lease.holdId(), ex);
+            return Mono.empty();
+        });
     }
 
     private Mono<CallerContext> authenticateCaller(String rawToken, String clientIp) {

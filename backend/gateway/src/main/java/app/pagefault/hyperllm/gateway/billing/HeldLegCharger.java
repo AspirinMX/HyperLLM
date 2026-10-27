@@ -1,7 +1,10 @@
 package app.pagefault.hyperllm.gateway.billing;
 
+import app.pagefault.hyperllm.common.money.CostMath;
 import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.domain.billing.AllocationType;
+import app.pagefault.hyperllm.domain.billing.EntitlementSnapshot;
+import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -35,10 +38,7 @@ public final class HeldLegCharger {
                 continue;
             }
             if (leg.type() == AllocationType.PACK) {
-                long units = leg.micros() <= 0L || leg.units() <= 0L
-                        ? 0L
-                        : (long) Math.ceil((double) leg.units() * take / leg.micros());
-                units = Math.min(units, leg.units());
+                long units = CostMath.proportionalShareMicros(leg.units(), take, leg.micros());
                 if (units <= 0L) {
                     continue;
                 }
@@ -54,5 +54,40 @@ public final class HeldLegCharger {
             charges.add(AllocationLeg.cash(remaining));
         }
         return new Charges(charges, remaining);
+    }
+
+    /** The crash fallback uses only reserved funds and at most the prompt's token units. */
+    public static List<AllocationLeg> promptFloor(
+            List<AllocationLeg> held, EntitlementSnapshot snapshot, long floorMicros, long promptTokens
+    ) {
+        List<AllocationLeg> floor = new ArrayList<>();
+        long remaining = floorMicros;
+        long tokens = promptTokens;
+        for (AllocationLeg leg : held) {
+            if (remaining <= 0L) {
+                break;
+            }
+            long take = Math.min(leg.micros(), remaining);
+            switch (leg.type()) {
+                case PACK -> {
+                    PackUnitType unitType = snapshot.packs().stream()
+                            .filter(pack -> pack.packId().equals(leg.id()))
+                            .findFirst().orElseThrow().unitType();
+                    long units = unitType == PackUnitType.CALLS ? 1L : Math.min(leg.units(), tokens);
+                    if (units == 0L) {
+                        continue;
+                    }
+                    if (unitType == PackUnitType.TOKENS) {
+                        take = Math.min(take, CostMath.proportionalShareMicros(remaining, units, tokens));
+                        tokens -= units;
+                    }
+                    floor.add(AllocationLeg.pack(leg.id(), units, take));
+                }
+                case BONUS -> floor.add(AllocationLeg.bonus(leg.id(), take));
+                case CASH -> floor.add(AllocationLeg.cash(take));
+            }
+            remaining -= take;
+        }
+        return floor;
     }
 }

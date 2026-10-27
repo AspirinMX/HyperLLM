@@ -9,14 +9,14 @@
 -- and writing here would resurrect a half-built tenant.
 --
 -- KEYS[1] wallet hash
--- KEYS[2] fold position of the organisation
+-- KEYS[2] done marker for this hold
 -- KEYS[3] hold hash
 -- KEYS[4] holds expiry zset
 -- KEYS[5] key rpm counter, [6] project rpm counter, [7..9] concurrency counters
 -- ARGV[1] holdId, [2] nowMs, [3] ttlMs, [4] legs, [5] renew flag, [6] orgId, [7] projectId,
 --       [8] apiKeyId, [9] modelCode, [10] createdAtIso, [11] pack prefix, [12] bonus prefix,
 --       [13] key rpm limit, [14] project rpm limit, [15] key concurrency, [16] project concurrency,
---       [17] org concurrency
+--       [17] org concurrency, [18] request id, [19] floor legs, [20] floor detail prefix
 --
 -- Legs are encoded as "TYPE|id|units|micros" joined by ";". CASH legs carry no id and no units.
 local function splitLegs(raw)
@@ -35,6 +35,12 @@ local function splitLegs(raw)
     return legs
 end
 
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return 'OK'
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return 'REJECTED'
+end
 if redis.call('EXISTS', KEYS[1]) == 0 then
     return 'MISS_WALLET'
 end
@@ -104,7 +110,7 @@ for i = 1, 3 do
     if limits[i] > 0 then
         local concKey = KEYS[6 + i]
         local current = redis.call('INCR', concKey)
-        redis.call('PEXPIRE', concKey, tonumber(ARGV[3]))
+        redis.call('PEXPIRE', concKey, tonumber(ARGV[3]) * 2)
         table.insert(acquired, concKey)
         if current > limits[i] then
             for _, key in ipairs(acquired) do
@@ -135,9 +141,12 @@ redis.call('HSET', KEYS[3],
         'model_code', ARGV[9],
         'created_at', ARGV[10],
         'legs', ARGV[4],
+        'request_id', ARGV[18],
+        'fallback_legs', ARGV[19],
+        'fallback_detail', ARGV[20],
+        'concurrency_keys', table.concat(acquired, '|'),
         'served', '0',
         'cash_micros', tostring(cashNeeded))
-redis.call('PEXPIRE', KEYS[3], ttlMs * 2)
 redis.call('ZADD', KEYS[4], tonumber(ARGV[2]) + ttlMs, holdId)
 
 for _, item in ipairs(frozen) do
@@ -147,25 +156,16 @@ if cashNeeded > 0 then
     redis.call('HINCRBY', KEYS[1], 'held_cash_micros', cashNeeded)
 end
 
--- The fold position only moves forward, so a late admission can never rewind it.
-local produced = redis.call('HGET', KEYS[2], 'produced')
-if (not produced) or produced < holdId then
-    if not produced then
-        redis.call('HSET', KEYS[2], 'since', ARGV[10])
+-- A reservation keeps its authority alive through expiry and one sweep window.
+local function protect(key)
+    local remaining = redis.call('PTTL', key)
+    if remaining >= 0 and remaining < ttlMs * 2 then
+        redis.call('PEXPIRE', key, ttlMs * 2)
     end
-    redis.call('HSET', KEYS[2], 'produced', holdId)
 end
-
-if ARGV[5] == '1' then
-    redis.call('PEXPIRE', KEYS[1], ttlMs)
-    local idx = 5
-    for _, leg in ipairs(legs) do
-        if leg.kind == 'PACK' then
-            redis.call('PEXPIRE', packPrefix .. leg.id, ttlMs)
-        elseif leg.kind == 'BONUS' then
-            redis.call('PEXPIRE', bonusPrefix .. leg.id, ttlMs)
-        end
-    end
+protect(KEYS[1])
+for _, reservation in ipairs(frozen) do
+    protect(reservation.key)
 end
 
 return 'OK'

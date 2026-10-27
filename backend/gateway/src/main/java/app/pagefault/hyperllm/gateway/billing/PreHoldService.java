@@ -1,36 +1,35 @@
 package app.pagefault.hyperllm.gateway.billing;
 
+import app.pagefault.hyperllm.common.billing.LegacyBonusBatch;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
+import app.pagefault.hyperllm.gateway.outbox.OutboxQueue;
+import app.pagefault.hyperllm.gateway.outbox.PendingMoneyEvent;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.domain.Range;
+import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-/**
- * Pre-hold lifecycle on top of six atomic Lua scripts.
- *
- * <p>Reservations are frozen per batch, not in aggregate: a request reserves exactly the batches the
- * allocator picked, and the settlement later charges those same batches. That is what makes the
- * reservation exact - two requests can never be handed the same remainder of one batch.
- *
- * <p>Every script derives the batch keys it touches from a prefix instead of taking them as KEYS,
- * because the settlement does not know which batches the hold froze until it reads the hold. The
- * billing cluster is therefore addressed as whole instances per tenant shard, never as a cluster
- * that would need every key declared up front.
- */
+/** Owns the reservation and all of its terminal transitions. */
+@Slf4j
 @Service
 public class PreHoldService {
 
-    /** One request's reservation, expressed as the legs the allocator produced. */
+    private static final long EVIDENCE_TTL_MS = Duration.ofHours(1).toMillis();
+    private static final UUID NO_ORG = new UUID(0L, 0L);
+
     public record AdmitCommand(
             String holdId,
             UUID orgId,
@@ -44,31 +43,31 @@ public class PreHoldService {
             Integer projectMaxConcurrency,
             int orgMaxConcurrency,
             long ttlSeconds,
-            boolean renewKeys
+            String requestId,
+            List<AllocationLeg> fallbackLegs,
+            String fallbackDetail
     ) {
     }
 
-    public record SettleOutcome(
-            long cashCharged,
-            long bonusCharged,
-            boolean alreadySettled,
-            boolean settledAfterReclaim,
-            boolean missingEntitlements,
-            long shortfallMicros
-    ) {
+    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId) {
     }
 
-    private static final String MISS_ENTITLEMENTS = "MISS_ENTITLEMENTS";
+    public record SettleOutcome(String status, long cashCharged, long bonusCharged, long shortfallMicros) {
+        public boolean alreadySettled() {
+            return "ALREADY_SETTLED".equals(status);
+        }
+    }
+
+    private enum Transition { SETTLE, RELEASE, RECLAIM }
 
     private final ReactiveStringRedisTemplate redisTemplate;
-    private final GatewayProperties properties;
+    private final long doneTtlMillis;
     private final RedisScript<String> admitScript;
     private final RedisScript<Long> renewScript;
     @SuppressWarnings("rawtypes")
     private final RedisScript<List> settleScript;
-    private final RedisScript<String> releaseScript;
-    private final RedisScript<String> reclaimScript;
     private final RedisScript<Long> servedScript;
+    private final OutboxQueue outboxQueue;
 
     @SuppressWarnings("rawtypes")
     public PreHoldService(
@@ -77,228 +76,131 @@ public class PreHoldService {
             @Qualifier("preholdAdmitLuaScript") RedisScript<String> admitScript,
             @Qualifier("preholdRenewLuaScript") RedisScript<Long> renewScript,
             @Qualifier("preholdSettleLuaScript") RedisScript<List> settleScript,
-            @Qualifier("preholdReleaseLuaScript") RedisScript<String> releaseScript,
-            @Qualifier("preholdReclaimLuaScript") RedisScript<String> reclaimScript,
-            @Qualifier("preholdServedLuaScript") RedisScript<Long> servedScript
+            @Qualifier("preholdServedLuaScript") RedisScript<Long> servedScript,
+            OutboxQueue outboxQueue
     ) {
         this.redisTemplate = redisTemplate;
-        this.properties = properties;
+        this.doneTtlMillis = Duration.ofSeconds(properties.getBilling().getLeaseTtlSeconds()).toMillis() * 12L;
         this.admitScript = admitScript;
         this.renewScript = renewScript;
         this.settleScript = settleScript;
-        this.releaseScript = releaseScript;
-        this.reclaimScript = reclaimScript;
         this.servedScript = servedScript;
+        this.outboxQueue = outboxQueue;
     }
 
-    /** @return the script verdict: {@code OK} or a rejection reason the caller maps to an error. */
     public Mono<String> admit(AdmitCommand command) {
-        long now = System.currentTimeMillis();
-        long ttlMillis = command.ttlSeconds() * 1000L;
-        long epochMinute = Instant.now().getEpochSecond() / 60L;
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+        long now = at.toInstant().toEpochMilli();
+        long ttlMillis = Duration.ofSeconds(command.ttlSeconds()).toMillis();
+        long epochMinute = at.toEpochSecond() / 60L;
         UUID effectiveKeyId = command.apiKeyId() != null ? command.apiKeyId() : command.projectId();
-
         List<String> keys = List.of(
-                GatewayRedisKeys.wallet(command.orgId()),
-                GatewayRedisKeys.ledgerPosition(command.orgId()),
-                GatewayRedisKeys.hold(command.holdId()),
-                GatewayRedisKeys.holdsExpiry(),
+                GatewayRedisKeys.wallet(command.orgId()), GatewayRedisKeys.holdDone(command.holdId()),
+                GatewayRedisKeys.hold(command.holdId()), GatewayRedisKeys.holdsExpiry(),
                 GatewayRedisKeys.rpmCounter("key", effectiveKeyId, epochMinute),
                 GatewayRedisKeys.rpmCounter("proj", command.projectId(), epochMinute),
                 GatewayRedisKeys.concurrencyCounter("key", effectiveKeyId),
                 GatewayRedisKeys.concurrencyCounter("proj", command.projectId()),
                 GatewayRedisKeys.concurrencyCounter("org", command.orgId()));
         List<String> args = List.of(
-                command.holdId(),
-                String.valueOf(now),
-                String.valueOf(ttlMillis),
-                encodeLegs(command.legs()),
-                command.renewKeys() ? "1" : "0",
-                command.orgId().toString(),
-                command.projectId().toString(),
-                command.apiKeyId() == null ? "" : command.apiKeyId().toString(),
-                command.modelCode(),
-                Instant.ofEpochMilli(now).toString(),
-                GatewayRedisKeys.packItemPrefix(),
-                GatewayRedisKeys.bonusItemPrefix(),
-                limit(command.keyRpmLimit()),
-                limit(command.projectRpmLimit()),
-                limit(command.keyMaxConcurrency()),
-                limit(command.projectMaxConcurrency()),
-                String.valueOf(command.orgMaxConcurrency()));
-        return redisTemplate.execute(admitScript, keys, args)
-                .next()
-                .defaultIfEmpty("REJECTED")
-                .map(String::valueOf);
+                command.holdId(), Long.toString(now), Long.toString(ttlMillis), encodeLegs(command.legs()),
+                "0", command.orgId().toString(), command.projectId().toString(),
+                command.apiKeyId() == null ? "" : command.apiKeyId().toString(), command.modelCode(), at.toString(),
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(),
+                limit(command.keyRpmLimit()), limit(command.projectRpmLimit()), limit(command.keyMaxConcurrency()),
+                limit(command.projectMaxConcurrency()), limit(command.orgMaxConcurrency()),
+                command.requestId(), encodeLegs(command.fallbackLegs()), command.fallbackDetail());
+        return redisTemplate.execute(admitScript, keys, args).next().defaultIfEmpty("REJECTED");
     }
 
     public Mono<SettleOutcome> settle(
-            String holdId,
-            UUID orgId,
-            List<AllocationLeg> charges,
-            String eventPayload,
-            long doneTtlSeconds,
-            long payloadTtlMillis,
-            boolean renewKeys,
-            long ttlSeconds
+            Lease lease, List<AllocationLeg> charges, String detailPrefix, OffsetDateTime occurredAt
     ) {
-        long cash = sumMicros(charges, "CASH");
-        long bonus = sumMicros(charges, "BONUS");
-        long units = charges.stream()
-                .filter(leg -> "PACK".equals(leg.type().name()))
-                .mapToLong(AllocationLeg::units)
-                .sum();
+        return transition(lease.holdId(), lease.orgId(), Transition.SETTLE, charges, detailPrefix, occurredAt);
+    }
+
+    public Mono<Void> release(Lease lease) {
+        return transition(lease.holdId(), lease.orgId(), Transition.RELEASE, List.of(), "", utcNow()).then();
+    }
+
+    private Mono<SettleOutcome> transition(
+            String holdId, UUID orgId, Transition mode, List<AllocationLeg> charges, String detailPrefix,
+            OffsetDateTime occurredAt
+    ) {
         List<String> keys = List.of(
-                GatewayRedisKeys.wallet(orgId),
-                GatewayRedisKeys.hold(holdId),
-                GatewayRedisKeys.holdDone(holdId),
-                GatewayRedisKeys.holdsExpiry(),
-                GatewayRedisKeys.settleEvent(holdId),
-                GatewayRedisKeys.settlePending());
+                GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.hold(holdId), GatewayRedisKeys.holdDone(holdId),
+                GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.settleEvent(holdId), GatewayRedisKeys.settlePending(),
+                GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settlePendingOwners());
         List<String> args = List.of(
-                holdId,
-                String.valueOf(System.currentTimeMillis()),
-                String.valueOf(cash),
-                String.valueOf(bonus),
-                String.valueOf(units),
-                encodeLegs(charges),
-                eventPayload == null ? "{}" : eventPayload,
-                String.valueOf(doneTtlSeconds),
-                String.valueOf(payloadTtlMillis),
-                GatewayRedisKeys.packItemPrefix(),
-                GatewayRedisKeys.bonusItemPrefix(),
-                renewKeys ? "1" : "0",
-                String.valueOf(ttlSeconds * 1000L));
-        return redisTemplate.execute(settleScript, keys, args)
-                .next()
-                .map(raw -> {
-                    String status = String.valueOf(raw.get(0));
-                    if ("ALREADY_SETTLED".equals(status)) {
-                        return new SettleOutcome(0L, 0L, true, false, false, 0L);
-                    }
-                    if (MISS_ENTITLEMENTS.equals(status)) {
-                        return new SettleOutcome(0L, 0L, false, false, true, 0L);
-                    }
-                    return new SettleOutcome(
-                            asLong(raw.get(1)), asLong(raw.get(2)), false, asLong(raw.get(3)) == 1L, false,
-                            asLong(raw.get(4)));
-                })
-                .defaultIfEmpty(new SettleOutcome(0L, 0L, false, false, false, 0L));
+                holdId, Long.toString(occurredAt.toInstant().toEpochMilli()), occurredAt.toString(), mode.name(),
+                encodeLegs(charges), detailPrefix, Long.toString(doneTtlMillis), Long.toString(EVIDENCE_TTL_MS),
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), LegacyBonusBatch.idFor(orgId).toString());
+        return redisTemplate.execute(settleScript, keys, args).next().map(raw -> {
+            String status = String.valueOf(raw.getFirst());
+            if (raw.size() == 1) {
+                if ("INVALID_CHARGE".equals(status)) {
+                    throw new IllegalStateException("Settlement exceeds reservation for hold " + holdId);
+                }
+                return new SettleOutcome(status, 0L, 0L, 0L);
+            }
+            if ("SETTLED".equals(status) && !outboxQueue.offer(new PendingMoneyEvent(
+                    UUID.fromString(holdId), orgId.toString(), "CONSUME", String.valueOf(raw.get(4)), occurredAt))) {
+                log.warn("Outbox queue full, leaving settlement {} for replay", holdId);
+            }
+            return new SettleOutcome(status, number(raw.get(1)), number(raw.get(2)), number(raw.get(3)));
+        }).switchIfEmpty(Mono.error(new IllegalStateException("Redis returned no settlement verdict")));
     }
 
-    public Mono<Boolean> release(String holdId, UUID orgId, long doneTtlSeconds) {
-        List<String> keys = List.of(
-                GatewayRedisKeys.wallet(orgId),
-                GatewayRedisKeys.hold(holdId),
-                GatewayRedisKeys.holdDone(holdId),
-                GatewayRedisKeys.holdsExpiry());
-        return redisTemplate.execute(releaseScript, keys, List.of(
-                        holdId,
-                        GatewayRedisKeys.packItemPrefix(),
-                        GatewayRedisKeys.bonusItemPrefix(),
-                        String.valueOf(doneTtlSeconds)))
-                .hasElements();
+    public Mono<Boolean> renew(Lease lease, long ttlSeconds) {
+        long ttlMillis = Duration.ofSeconds(ttlSeconds).toMillis();
+        String hold = GatewayRedisKeys.hold(lease.holdId());
+        List<String> counters = lease.concurrencyKeys();
+        List<String> keys = List.of(hold, GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.wallet(lease.orgId()),
+                counters.size() > 0 ? counters.get(0) : hold,
+                counters.size() > 1 ? counters.get(1) : hold,
+                counters.size() > 2 ? counters.get(2) : hold);
+        return redisTemplate.execute(renewScript, keys, List.of(lease.holdId(),
+                        Long.toString(System.currentTimeMillis() + ttlMillis), Long.toString(ttlMillis), "0",
+                        GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix()))
+                .next().map(value -> value > 0L).defaultIfEmpty(false);
     }
 
-    /** @return true when the lease is still alive and was renewed. */
-    public Mono<Boolean> renew(
-            String holdId,
-            UUID orgId,
-            List<String> concurrencyKeys,
-            long ttlSeconds,
-            boolean renewKeys
-    ) {
-        long ttlMillis = ttlSeconds * 1000L;
-        List<String> keys = List.of(
-                GatewayRedisKeys.hold(holdId),
-                GatewayRedisKeys.holdsExpiry(),
-                GatewayRedisKeys.wallet(orgId),
-                concurrencyKeys.size() > 0 ? concurrencyKeys.get(0) : GatewayRedisKeys.hold(holdId),
-                concurrencyKeys.size() > 1 ? concurrencyKeys.get(1) : GatewayRedisKeys.hold(holdId),
-                concurrencyKeys.size() > 2 ? concurrencyKeys.get(2) : GatewayRedisKeys.hold(holdId));
-        return redisTemplate.execute(renewScript, keys, List.of(
-                        holdId,
-                        String.valueOf(System.currentTimeMillis() + ttlMillis),
-                        String.valueOf(ttlMillis),
-                        renewKeys ? "1" : "0",
-                        GatewayRedisKeys.packItemPrefix(),
-                        GatewayRedisKeys.bonusItemPrefix()))
-                .next()
-                .map(value -> value != null && value > 0L)
-                .defaultIfEmpty(false);
+    public Mono<Void> markServed(Lease lease) {
+        return redisTemplate.execute(servedScript, List.of(GatewayRedisKeys.hold(lease.holdId())), List.of()).then();
     }
 
-    /** Records that the client has received its first byte, which legitimises a floor settlement. */
-    public Mono<Boolean> markServed(String holdId, long ttlSeconds) {
-        return redisTemplate.execute(servedScript, List.of(GatewayRedisKeys.hold(holdId)),
-                        List.of(String.valueOf(ttlSeconds * 1000L)))
-                .next()
-                .map(value -> value != null && value > 0L)
-                .defaultIfEmpty(false);
-    }
-
-    /**
-     * Reclaims expired holds across every organisation. The expiry index is the only scan entry
-     * point; the script re-checks the score before releasing anything, so a heartbeat that lands
-     * first wins the race safely.
-     */
+    /** Rechecks the expiry score inside the terminal transition, after any concurrent heartbeat. */
     public Mono<Integer> reclaimExpired(int batch) {
         return redisTemplate.opsForZSet()
-                .rangeByScore(
-                        GatewayRedisKeys.holdsExpiry(),
-                        org.springframework.data.domain.Range.closed(0d, (double) System.currentTimeMillis()),
-                        org.springframework.data.redis.connection.Limit.limit().count(batch))
-                .flatMap(holdId -> redisTemplate.opsForHash()
-                        .get(GatewayRedisKeys.hold(holdId), "org_id")
-                        .map(String::valueOf)
-                        .flatMap(orgId -> reclaimOne(UUID.fromString(orgId), holdId))
-                        .defaultIfEmpty(0))
+                .rangeByScore(GatewayRedisKeys.holdsExpiry(), Range.closed(0d, (double) System.currentTimeMillis()),
+                        Limit.limit().count(batch))
+                .flatMap(holdId -> redisTemplate.opsForHash().get(GatewayRedisKeys.hold(holdId), "org_id")
+                        .map(value -> UUID.fromString(String.valueOf(value)))
+                        .defaultIfEmpty(NO_ORG)
+                        .flatMap(orgId -> transition(holdId, orgId, Transition.RECLAIM, List.of(), "", utcNow()))
+                        .map(outcome -> switch (outcome.status()) {
+                            case "SETTLED", "RELEASED", "MISS_ENTITLEMENTS" -> 1;
+                            default -> 0;
+                        }), 16)
                 .reduce(0, Integer::sum);
-    }
-
-    private Mono<Integer> reclaimOne(UUID orgId, String holdId) {
-        List<String> keys = List.of(
-                GatewayRedisKeys.hold(holdId),
-                GatewayRedisKeys.holdsExpiry(),
-                GatewayRedisKeys.wallet(orgId));
-        return redisTemplate.execute(reclaimScript, keys, List.of(
-                        holdId,
-                        String.valueOf(System.currentTimeMillis()),
-                        GatewayRedisKeys.packItemPrefix(),
-                        GatewayRedisKeys.bonusItemPrefix()))
-                .next()
-                .map(result -> "RELEASED".equals(String.valueOf(result)) ? 1 : 0)
-                .defaultIfEmpty(0);
     }
 
     static String encodeLegs(List<AllocationLeg> legs) {
         return legs.stream()
-                .map(leg -> leg.type().name()
-                        + "|" + (leg.id() == null ? "" : leg.id())
-                        + "|" + leg.units()
-                        + "|" + leg.micros())
+                .map(leg -> leg.type().name() + "|" + (leg.id() == null ? "" : leg.id())
+                        + "|" + leg.units() + "|" + leg.micros())
                 .collect(Collectors.joining(";"));
     }
 
-    private static long sumMicros(List<AllocationLeg> legs, String type) {
-        return legs.stream()
-                .filter(leg -> type.equals(leg.type().name()))
-                .mapToLong(AllocationLeg::micros)
-                .sum();
+    private static OffsetDateTime utcNow() {
+        return OffsetDateTime.now(ZoneOffset.UTC);
     }
 
     private static String limit(Integer value) {
-        return (value != null && value > 0) ? String.valueOf(value) : "0";
+        return value != null && value > 0 ? value.toString() : "0";
     }
 
-    private static long asLong(Object value) {
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        try {
-            return Long.parseLong(String.valueOf(value));
-        } catch (NumberFormatException ex) {
-            return 0L;
-        }
+    private static long number(Object value) {
+        return Long.parseLong(String.valueOf(value));
     }
 }

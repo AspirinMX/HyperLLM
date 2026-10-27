@@ -105,6 +105,11 @@ public final class GatewayRedisKeys {
         return "gw:settle:pending";
     }
 
+    /** Organisation and occurrence time of each unconfirmed settlement, even if its copy expires. */
+    public static String settlePendingOwners() {
+        return "gw:settle:owners";
+    }
+
     /** Published backlog signal read by every gateway instance. */
     public static String ledgerLagSignal() {
         return "gw:health:ledger-lag";

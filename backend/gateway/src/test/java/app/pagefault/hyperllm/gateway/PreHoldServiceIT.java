@@ -1,6 +1,10 @@
 package app.pagefault.hyperllm.gateway;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
+import app.pagefault.hyperllm.gateway.outbox.OutboxQueue;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
@@ -15,10 +19,11 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.testcontainers.containers.GenericContainer;
 import reactor.core.publisher.Flux;
 
+import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,6 +47,7 @@ class PreHoldServiceIT {
     private LettuceConnectionFactory factory;
     private ReactiveStringRedisTemplate redis;
     private PreHoldService service;
+    private OutboxQueue queue;
     private UUID orgId;
     private UUID projectId;
     private UUID packId;
@@ -55,15 +61,15 @@ class PreHoldServiceIT {
         redis.execute(connection -> connection.serverCommands().flushAll()).blockLast();
 
         GatewayProperties properties = new GatewayProperties();
+        queue = new OutboxQueue(properties);
         service = new PreHoldService(
                 redis,
                 properties,
                 RedisScript.of(new ClassPathResource("lua/prehold_admit.lua"), String.class),
                 RedisScript.of(new ClassPathResource("lua/prehold_renew.lua"), Long.class),
                 RedisScript.of(new ClassPathResource("lua/prehold_settle.lua"), List.class),
-                RedisScript.of(new ClassPathResource("lua/prehold_release.lua"), String.class),
-                RedisScript.of(new ClassPathResource("lua/prehold_reclaim.lua"), String.class),
-                RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class));
+                RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class),
+                queue);
 
         orgId = UUID.randomUUID();
         projectId = UUID.randomUUID();
@@ -90,7 +96,7 @@ class PreHoldServiceIT {
         assertThat(hash(packItem(), "held_units")).isEqualTo("10");
         assertThat(hash(bonusItem(), "held_micros")).isEqualTo("200");
         assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("300");
-        assertThat(redis.opsForHash().get(GatewayRedisKeys.hold("h1"), "legs").block())
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.hold(id("h1")), "legs").block())
                 .isNotNull();
     }
 
@@ -100,7 +106,7 @@ class PreHoldServiceIT {
                 .isEqualTo("MISS_ENTITLEMENTS");
         // Nothing was frozen before the script gave up.
         assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
-        assertThat(redis.opsForZSet().score(GatewayRedisKeys.holdsExpiry(), "h1").block()).isNull();
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.holdsExpiry(), id("h1")).block()).isNull();
     }
 
     @Test
@@ -130,13 +136,8 @@ class PreHoldServiceIT {
                 AllocationLeg.bonus(grantId, 200L),
                 AllocationLeg.cash(300L)));
 
-        PreHoldService.SettleOutcome outcome = service.settle(
-                        "h1", orgId,
-                        List.of(AllocationLeg.pack(packId, 8L, 400L),
-                                AllocationLeg.bonus(grantId, 100L),
-                                AllocationLeg.cash(200L)),
-                        "{}", 3600L, 300_000L, false, 300L)
-                .block();
+        PreHoldService.SettleOutcome outcome = settle("h1", List.of(
+                AllocationLeg.pack(packId, 8L, 400L), AllocationLeg.bonus(grantId, 100L), AllocationLeg.cash(200L)));
 
         assertThat(outcome.cashCharged()).isEqualTo(200L);
         assertThat(outcome.bonusCharged()).isEqualTo(100L);
@@ -154,9 +155,8 @@ class PreHoldServiceIT {
         admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L)));
         List<AllocationLeg> charges = List.of(AllocationLeg.pack(packId, 10L, 500L));
 
-        service.settle("h1", orgId, charges, "{}", 3600L, 300_000L, false, 300L).block();
-        PreHoldService.SettleOutcome second =
-                service.settle("h1", orgId, charges, "{}", 3600L, 300_000L, false, 300L).block();
+        settle("h1", charges);
+        PreHoldService.SettleOutcome second = settle("h1", charges);
 
         assertThat(second.alreadySettled()).isTrue();
         assertThat(hash(packItem(), "remaining_units")).isEqualTo("90");
@@ -167,7 +167,7 @@ class PreHoldServiceIT {
         seedPack(100L);
         admit("h1", List.of(AllocationLeg.pack(packId, 10L, 500L), AllocationLeg.cash(0L)));
 
-        service.release("h1", orgId, 3600L).block();
+        service.release(lease("h1")).block();
 
         assertThat(hash(packItem(), "held_units")).isEqualTo("0");
         assertThat(hash(packItem(), "remaining_units")).isEqualTo("100");
@@ -181,7 +181,7 @@ class PreHoldServiceIT {
         assertThat(service.reclaimExpired(10).block()).isZero();
         assertThat(hash(packItem(), "held_units")).isEqualTo("10");
 
-        redis.opsForZSet().add(GatewayRedisKeys.holdsExpiry(), "h1", 1d).block();
+        redis.opsForZSet().add(GatewayRedisKeys.holdsExpiry(), id("h1"), 1d).block();
 
         assertThat(service.reclaimExpired(10).block()).isEqualTo(1);
         assertThat(hash(packItem(), "held_units")).isEqualTo("0");
@@ -200,14 +200,93 @@ class PreHoldServiceIT {
         assertThat(hash(packItem(), "held_units")).isEqualTo("40");
     }
 
+    @Test
+    void servedReclaimChargesOnlyTheFloorAndCopiesTheSameAppliedEventToTheOutbox() throws Exception {
+        seedPack(100L);
+        seedGrant(5_000L);
+        var held = List.of(AllocationLeg.pack(packId, 10, 500),
+                AllocationLeg.bonus(grantId, 400), AllocationLeg.cash(600));
+        var floor = List.of(AllocationLeg.pack(packId, 3, 150),
+                AllocationLeg.bonus(grantId, 100), AllocationLeg.cash(200));
+        assertThat(service.admit(new PreHoldService.AdmitCommand(id("h1"), orgId, projectId, null,
+                "gpt", held, null, null, null, null, 1, 300L, "request-1", floor, "")).block()).isEqualTo("OK");
+        service.markServed(lease("h1")).block();
+        redis.opsForZSet().add(GatewayRedisKeys.holdsExpiry(), id("h1"), 1d).block();
+
+        assertThat(service.reclaimExpired(10).block()).isEqualTo(1);
+        assertThat(settle("h1", held).alreadySettled()).isTrue();
+        assertThat(service.reclaimExpired(10).block()).isZero();
+        assertThat(hash(packItem(), "remaining_units")).isEqualTo("97");
+        assertThat(hash(bonusItem(), "remaining_micros")).isEqualTo("4900");
+        assertThat(hash(wallet(), "cash_micros")).isEqualTo("9800");
+        assertThat(hash(packItem(), "held_units")).isEqualTo("0");
+        assertThat(hash(bonusItem(), "held_micros")).isEqualTo("0");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+        assertThat(redis.opsForValue().get(GatewayRedisKeys.concurrencyCounter("org", orgId)).block()).isEqualTo("0");
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.ledgerPosition(orgId), "produced").block()).isEqualTo(id("h1"));
+
+        var written = queue.takeBatch(10, 0);
+        assertThat(written).hasSize(1);
+        String copy = redis.opsForValue().get(GatewayRedisKeys.settleEvent(id("h1"))).block();
+        assertThat(written.getFirst().payload()).isEqualTo(copy);
+        var mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var event = mapper.readValue(copy, BillingMoneyEvent.class);
+        assertThat(event.settledAfterReclaim()).isTrue();
+        assertThat(event.idempotencyKey()).isEqualTo("req:request-1");
+        assertThat(event.cashDeltaMicros()).isEqualTo(-200L);
+        assertThat(event.bonusDeltaMicros()).isEqualTo(-100L);
+        assertThat(event.packDeltaUnits()).isEqualTo(-3L);
+        assertThat(mapper.readTree(event.allocationDetailJson()).at("/totals/chargedMicros").asLong()).isEqualTo(450L);
+    }
+
+    @Test
+    void cashShortfallLeavesOtherReservationsAndBooksOnlyTheAppliedAmount() throws Exception {
+        seedWallet(500);
+        admit("h1", List.of(AllocationLeg.cash(100)));
+        admit("h2", List.of(AllocationLeg.cash(300)));
+        var outcome = settle("h1", List.of(AllocationLeg.cash(400)));
+        assertThat(outcome.cashCharged()).isEqualTo(200);
+        assertThat(outcome.shortfallMicros()).isEqualTo(200);
+        assertThat(hash(wallet(), "cash_micros")).isEqualTo("300");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("300");
+        var event = new ObjectMapper().registerModule(new JavaTimeModule()).readValue(
+                queue.takeBatch(10, 0).getFirst().payload(), BillingMoneyEvent.class);
+        assertThat(event.legs()).containsExactly(BillingMoneyEvent.Leg.cash(200));
+        assertThat(event.cashDeltaMicros()).isEqualTo(-200);
+    }
+
+    @Test
+    void missingBatchNeverReappearsDuringSettlement() {
+        seedPack(100);
+        admit("h1", List.of(AllocationLeg.pack(packId, 1, 100), AllocationLeg.cash(100)));
+        redis.delete(packItem()).block();
+        assertThat(settle("h1", List.of(AllocationLeg.cash(100))).status()).isEqualTo("MISS_ENTITLEMENTS");
+        assertThat(redis.hasKey(packItem()).block()).isFalse();
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+        assertThat(hash(wallet(), "cash_micros")).isEqualTo("10000");
+        assertThat(queue.depth()).isZero();
+    }
+
+    private PreHoldService.SettleOutcome settle(String key, List<AllocationLeg> charges) {
+        return service.settle(lease(key), charges, "", OffsetDateTime.now()).block();
+    }
+
+    private PreHoldService.Lease lease(String key) {
+        return new PreHoldService.Lease(orgId, List.of(), id(key));
+    }
+
+    private static String id(String key) {
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
     private String admit(String holdId, List<AllocationLeg> legs) {
         return admitAsync(holdId, legs).block();
     }
 
     private reactor.core.publisher.Mono<String> admitAsync(String holdId, List<AllocationLeg> legs) {
         return service.admit(new PreHoldService.AdmitCommand(
-                holdId, orgId, projectId, null, "gpt", legs,
-                null, null, null, null, 0, 300L, false));
+                id(holdId), orgId, projectId, null, "gpt", legs,
+                null, null, null, null, 0, 300L, holdId, List.of(), ""));
     }
 
     private void seedWallet(long cash) {

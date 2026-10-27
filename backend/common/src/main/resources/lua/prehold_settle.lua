@@ -1,100 +1,190 @@
--- Converts a pre-hold into a charge: releases what was frozen, then debits what was consumed.
---
--- The hold records the batches that were frozen, so the settlement charges exactly those and never
--- reaches for a batch some other request reserved. Charges are re-derived from the held legs by the
--- caller; a charge that names a batch the hold does not cover is refused rather than invented.
---
--- Deliberately still charges when the hold was already reclaimed: a crashed request must not become
--- a way to be served for free. The verdict reports that case so the caller can flag it.
---
--- KEYS[1] wallet hash, [2] hold, [3] done marker, [4] holds expiry zset,
---      [5] settlement payload copy, [6] settlements awaiting confirmation
--- ARGV[1] holdId, [2] nowMs, [3] cash to charge, [4] bonus to charge, [5] units to charge,
---       [6] charges, [7] event payload, [8] done TTL seconds, [9] payload TTL millis,
---       [10] pack prefix, [11] bonus prefix, [12] renew flag, [13] ttl millis
-local function splitLegs(raw)
-    local legs = {}
+-- Single terminal transition for a reservation. Expiry, explicit release and normal settlement
+-- contend on the same hold/done keys. The event records only deltas this invocation applied.
+-- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, event owner hash
+-- ARGV: holdId, nowMs, occurredAt, mode, charges, detail prefix, done TTL ms, evidence TTL ms,
+--       pack prefix, bonus prefix, legacy grant id
+local holdId, now, at, mode = ARGV[1], tonumber(ARGV[2]), ARGV[3], ARGV[4]
+local function digits(value)
+    return string.format('%.0f', value)
+end
+
+local function legs(raw)
+    local result = {}
     for segment in string.gmatch(raw, '([^;]+)') do
-        local kind, id, units, micros = string.match(segment, '([^|]*)|([^|]*)|([^|]*)|([^|]*)')
-        if kind then
-            table.insert(legs, {
-                kind = kind,
-                id = id,
-                units = tonumber(units) or 0,
-                micros = tonumber(micros) or 0
-            })
+        local kind, id, units, micros = string.match(segment, '^(%u+)|([^|]*)|(%d+)|(%d+)$')
+        if not kind then
+            error('invalid settlement leg')
         end
+        table.insert(result, {kind = kind, id = id, units = tonumber(units), micros = tonumber(micros)})
     end
-    return legs
+    return result
 end
 
+local function integer(value)
+    return value and value >= 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+
+local score = redis.call('ZSCORE', KEYS[4], holdId)
+if mode == 'RECLAIM' and (not score or tonumber(score) > now) then
+    return {'STALE'}
+end
 if redis.call('EXISTS', KEYS[3]) == 1 then
-    return {'ALREADY_SETTLED', '0', '0', '0'}
+    redis.call('ZREM', KEYS[4], holdId)
+    return {'ALREADY_SETTLED'}
+end
+local hold = redis.call('HMGET', KEYS[2], 'org_id', 'project_id', 'api_key_id', 'model_code',
+        'request_id', 'served', 'legs', 'fallback_legs', 'fallback_detail', 'concurrency_keys')
+if not hold[1] then
+    redis.call('ZREM', KEYS[4], holdId)
+    return {'MISSING_HOLD'}
 end
 
-local packPrefix = ARGV[10]
-local bonusPrefix = ARGV[11]
-local holdExists = redis.call('EXISTS', KEYS[2]) == 1
-local keyById = {}
-
-if holdExists then
-    local held = splitLegs(redis.call('HGET', KEYS[2], 'legs') or '')
-    for _, leg in ipairs(held) do
-        local itemKey
-        if leg.kind == 'PACK' then
-            itemKey = packPrefix .. leg.id
-            keyById[leg.id] = itemKey
-            redis.call('HINCRBY', itemKey, 'held_units', -leg.units)
-        elseif leg.kind == 'BONUS' then
-            itemKey = bonusPrefix .. leg.id
-            keyById[leg.id] = itemKey
-            redis.call('HINCRBY', itemKey, 'held_micros', -leg.micros)
-        end
-    end
-    local heldCash = tonumber(redis.call('HGET', KEYS[2], 'cash_micros') or '0') or 0
-    if heldCash > 0 then
-        redis.call('HINCRBY', KEYS[1], 'held_cash_micros', -heldCash)
-    end
-    redis.call('DEL', KEYS[2])
-    redis.call('ZREM', KEYS[4], ARGV[1])
+local reclaim = mode == 'RECLAIM'
+if mode == 'RELEASE' and hold[6] == '1' then
+    return {'SERVED'} -- the sweep owns the floor if a response was already delivered
+end
+local charge = mode == 'SETTLE' or (reclaim and hold[6] == '1')
+local requested = charge and legs(reclaim and (hold[8] or '') or ARGV[5]) or {}
+local detail = (reclaim and (hold[9] or '') or ARGV[6])
+if detail == '' then
+    detail = '{"v":1,'
 end
 
-for _, leg in ipairs(splitLegs(ARGV[6])) do
-    if leg.kind == 'PACK' then
-        local itemKey = keyById[leg.id]
-        if not itemKey then
-            return {'MISS_ENTITLEMENTS', '0', '0', '0'}
+local frozen, cashHeld = {}, 0
+local valid = redis.call('EXISTS', KEYS[1]) == 1
+for _, leg in ipairs(legs(hold[7] or '')) do
+    if leg.kind == 'CASH' then
+        cashHeld = cashHeld + leg.micros
+    else
+        local pack = leg.kind == 'PACK'
+        local key = (pack and ARGV[9] or ARGV[10]) .. leg.id
+        local remainingField = pack and 'remaining_units' or 'remaining_micros'
+        local heldField = pack and 'held_units' or 'held_micros'
+        local amount = pack and leg.units or leg.micros
+        local values = redis.call('HMGET', key, heldField, remainingField)
+        local held = tonumber(values[1])
+        local remaining = tonumber(values[2])
+        local entryValid = integer(amount) and integer(held) and integer(remaining)
+                and held >= amount and remaining >= held
+        frozen[leg.kind .. leg.id] = {key = key, heldField = heldField, remainingField = remainingField,
+                amount = amount, available = entryValid, charged = 0}
+        valid = valid and entryValid
+    end
+end
+local wallet = redis.call('HMGET', KEYS[1], 'cash_micros', 'held_cash_micros')
+local cash, totalCashHeld = tonumber(wallet[1]), tonumber(wallet[2] or '0')
+local walletValid = integer(cash) and integer(totalCashHeld) and integer(cashHeld)
+        and cash >= totalCashHeld and totalCashHeld >= cashHeld
+valid = valid and walletValid
+
+local wantedCash, bonus, units, value = 0, 0, 0, 0
+local applied = {}
+if charge and valid then
+    for _, leg in ipairs(requested) do
+        if not integer(leg.units) or not integer(leg.micros) then
+            return {'INVALID_CHARGE'}
         end
-        redis.call('HINCRBY', itemKey, 'remaining_units', -leg.units)
-    elseif leg.kind == 'BONUS' then
-        local itemKey = keyById[leg.id]
-        if not itemKey then
-            return {'MISS_ENTITLEMENTS', '0', '0', '0'}
+        if leg.kind == 'CASH' then
+            wantedCash = wantedCash + leg.micros
+        else
+            local entry = frozen[leg.kind .. leg.id]
+            if not entry then
+                return {'INVALID_CHARGE'}
+            end
+            local amount = leg.kind == 'PACK' and leg.units or leg.micros
+            entry.charged = entry.charged + amount
+            if entry.charged > entry.amount then
+                return {'INVALID_CHARGE'}
+            end
+            if amount > 0 then
+                table.insert(applied, leg)
+                value = value + leg.micros
+                if leg.kind == 'PACK' then
+                    units = units + leg.units
+                else
+                    bonus = bonus + leg.micros
+                end
+            end
         end
-        redis.call('HINCRBY', itemKey, 'remaining_micros', -leg.micros)
+    end
+    if not integer(wantedCash) or not integer(value + wantedCash) or not integer(units)
+            or (reclaim and wantedCash > cashHeld) then
+        return {'INVALID_CHARGE'}
     end
 end
 
--- The charge can exceed what the hold froze when the request cost more than estimated. Cash is
--- capped at what is actually available, and the caller learns the applied amount from the verdict
--- rather than being told a number Redis did not honour.
-local requestedCash = tonumber(ARGV[3]) or 0
-local cashBalance = tonumber(redis.call('HGET', KEYS[1], 'cash_micros') or '0') or 0
-local cashCharge = math.min(requestedCash, math.max(cashBalance, 0))
+local cashCharge, shortfall = 0, 0
+local payload = ''
+if valid and charge then
+    -- Unreserved cash may cover a shortfall, but cash frozen by other requests stays untouched.
+    cashCharge = math.min(wantedCash, cash - (totalCashHeld - cashHeld))
+    shortfall = wantedCash - cashCharge
+    if cashCharge > 0 then
+        table.insert(applied, {kind = 'CASH', id = '', units = 0, micros = cashCharge})
+    end
+    if cashCharge > 0 or bonus > 0 or units > 0 then
+        local messageLegs, detailLegs = {}, {}
+        for _, leg in ipairs(applied) do
+            local virtual = leg.kind == 'BONUS' and leg.id == ARGV[11]
+            local id = (leg.id == '' or virtual) and 'null' or cjson.encode(leg.id)
+            table.insert(messageLegs, '{"type":' .. cjson.encode(leg.kind) .. ',"batchId":' .. id
+                    .. ',"units":' .. digits(leg.units) .. ',"micros":' .. digits(leg.micros)
+                    .. ',"virtual":' .. tostring(virtual) .. '}')
+            if #detailLegs < 32 then
+                table.insert(detailLegs, '{"type":' .. cjson.encode(leg.kind)
+                        .. (leg.id == '' and '' or ',"id":' .. cjson.encode(leg.id))
+                        .. (leg.units == 0 and '' or ',"units":' .. digits(leg.units))
+                        .. ',"micros":' .. digits(leg.micros) .. '}')
+            end
+        end
+        detail = detail .. '"legs":[' .. table.concat(detailLegs, ',') .. '],"totals":{"chargedMicros":'
+                .. digits(value + cashCharge) .. ',"shortfallMicros":' .. digits(shortfall)
+                .. ',"degraded":' .. tostring(reclaim) .. ',"truncatedLegs":'
+                .. tostring(#applied - #detailLegs) .. '}}'
+        local requestId = (hold[5] and hold[5] ~= '') and hold[5] or holdId
+        payload = '{"eventId":' .. cjson.encode(holdId) .. ',"eventType":"CONSUME","occurredAt":'
+                .. cjson.encode(at) .. ',"orgId":' .. cjson.encode(hold[1]) .. ',"projectId":'
+                .. cjson.encode(hold[2]) .. ',"apiKeyId":' .. (hold[3] == '' and 'null' or cjson.encode(hold[3]))
+                .. ',"idempotencyKey":' .. cjson.encode('req:' .. requestId)
+                .. ',"cashDeltaMicros":' .. digits(-cashCharge) .. ',"bonusDeltaMicros":' .. digits(-bonus)
+                .. ',"packDeltaUnits":' .. digits(-units) .. ',"shortfallMicros":' .. digits(shortfall)
+                .. ',"legs":[' .. table.concat(messageLegs, ',') .. '],"allocationDetailJson":' .. cjson.encode(detail)
+                .. ',"holdId":' .. cjson.encode(holdId) .. ',"settledAfterReclaim":' .. tostring(reclaim)
+                .. ',"description":' .. cjson.encode('Model ' .. hold[4]) .. '}'
+    end
+end
+
+-- All validation and event construction is complete. Missing mirrors never get recreated here.
+for _, entry in pairs(frozen) do
+    if entry.available then
+        redis.call('HINCRBY', entry.key, entry.heldField, digits(-entry.amount))
+        if valid and entry.charged > 0 then
+            redis.call('HINCRBY', entry.key, entry.remainingField, digits(-entry.charged))
+        end
+    end
+end
+if walletValid and cashHeld > 0 then
+    redis.call('HINCRBY', KEYS[1], 'held_cash_micros', digits(-cashHeld))
+end
 if cashCharge > 0 then
-    redis.call('HINCRBY', KEYS[1], 'cash_micros', -cashCharge)
+    redis.call('HINCRBY', KEYS[1], 'cash_micros', digits(-cashCharge))
 end
-
-redis.call('SET', KEYS[3], ARGV[7], 'PX', tonumber(ARGV[8]) * 1000)
-redis.call('SET', KEYS[5], ARGV[7], 'PX', tonumber(ARGV[9]))
-redis.call('ZADD', KEYS[6], tonumber(ARGV[2]), ARGV[1])
-
-if ARGV[12] == '1' then
-    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[13]))
-    for _, itemKey in pairs(keyById) do
-        redis.call('PEXPIRE', itemKey, tonumber(ARGV[13]))
+for key in string.gmatch(hold[10] or '', '([^|]+)') do
+    if tonumber(redis.call('GET', key) or '0') > 0 then
+        redis.call('DECR', key)
     end
 end
-
-return {'OK', tostring(cashCharge), tostring(tonumber(ARGV[4]) or 0), holdExists and '0' or '1',
-        tostring(math.max(requestedCash - cashCharge, 0))}
+redis.call('DEL', KEYS[2])
+redis.call('ZREM', KEYS[4], holdId)
+redis.call('SET', KEYS[3], '1', 'PX', ARGV[7])
+if payload ~= '' then
+    redis.call('SET', KEYS[5], payload, 'PX', ARGV[8])
+    redis.call('HSET', KEYS[8], holdId, hold[1] .. '|' .. at)
+    redis.call('ZADD', KEYS[6], now, holdId)
+    local produced = redis.call('HGET', KEYS[7], 'produced')
+    if not produced or produced < holdId then
+        redis.call('HSET', KEYS[7], 'produced', holdId, 'since', at)
+    end
+end
+return {valid and (payload ~= '' and 'SETTLED' or 'RELEASED') or 'MISS_ENTITLEMENTS',
+        digits(cashCharge), digits(bonus), digits(shortfall), payload}

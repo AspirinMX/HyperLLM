@@ -66,23 +66,9 @@ public class GatewayConfiguration {
         return RedisScript.of(new ClassPathResource("lua/prehold_settle.lua"), java.util.List.class);
     }
 
-    @Bean(name = "preholdReleaseLuaScript")
-    public RedisScript<String> preholdReleaseLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_release.lua"), String.class);
-    }
-
     @Bean(name = "preholdServedLuaScript")
     public RedisScript<Long> preholdServedLuaScript() {
         return RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class);
     }
 
-    @Bean(name = "preholdReclaimLuaScript")
-    public RedisScript<String> preholdReclaimLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_reclaim.lua"), String.class);
-    }
-
-    @Bean
-    public RedisScript<Long> releaseConcurrencyLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/release_concurrency.lua"), Long.class);
-    }
 }

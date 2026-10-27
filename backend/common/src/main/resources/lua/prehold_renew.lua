@@ -24,21 +24,24 @@ end
 
 local ttlMs = tonumber(ARGV[3])
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
-redis.call('PEXPIRE', KEYS[1], ttlMs * 2)
 for i = 4, 6 do
-    if redis.call('EXISTS', KEYS[i]) == 1 then
-        redis.call('PEXPIRE', KEYS[i], ttlMs)
+    if KEYS[i] ~= KEYS[1] and redis.call('EXISTS', KEYS[i]) == 1 then
+        redis.call('PEXPIRE', KEYS[i], ttlMs * 2)
     end
 end
 
-if ARGV[4] == '1' then
-    redis.call('PEXPIRE', KEYS[3], ttlMs)
-    for _, leg in ipairs(splitLegs(redis.call('HGET', KEYS[1], 'legs') or '')) do
-        if leg.kind == 'PACK' then
-            redis.call('PEXPIRE', ARGV[5] .. leg.id, ttlMs)
-        elseif leg.kind == 'BONUS' then
-            redis.call('PEXPIRE', ARGV[6] .. leg.id, ttlMs)
-        end
+local function protect(key)
+    local remaining = redis.call('PTTL', key)
+    if remaining >= 0 and remaining < ttlMs * 2 then
+        redis.call('PEXPIRE', key, ttlMs * 2)
+    end
+end
+protect(KEYS[3])
+for _, leg in ipairs(splitLegs(redis.call('HGET', KEYS[1], 'legs') or '')) do
+    if leg.kind == 'PACK' then
+        protect(ARGV[5] .. leg.id)
+    elseif leg.kind == 'BONUS' then
+        protect(ARGV[6] .. leg.id)
     end
 end
 return 1
