@@ -65,6 +65,15 @@ public class JooqBonusGrantRepository implements BonusGrantRepository {
     }
 
     @Override
+    public List<BonusGrant> listActiveByOrg(UUID orgId) {
+        return dsl.selectFrom(BONUS_GRANTS)
+                .where(BONUS_GRANTS.ORG_ID.eq(orgId))
+                .and(BONUS_GRANTS.STATUS.eq(EntitlementStatus.ACTIVE.name()))
+                .orderBy(BONUS_GRANTS.EXPIRES_AT.asc().nullsLast(), BONUS_GRANTS.ID.asc())
+                .fetch(this::toDomain);
+    }
+
+    @Override
     public boolean decrementMicros(UUID grantId, long micros, OffsetDateTime updatedAt) {
         int updated = dsl.update(BONUS_GRANTS)
                 .set(BONUS_GRANTS.REMAINING_MICROS, BONUS_GRANTS.REMAINING_MICROS.minus(micros))

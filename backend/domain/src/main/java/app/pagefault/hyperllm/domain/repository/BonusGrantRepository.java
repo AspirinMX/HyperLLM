@@ -21,6 +21,9 @@ public interface BonusGrantRepository {
      */
     List<BonusGrant> listConsumableByOrgAndModel(UUID orgId, String modelCode, OffsetDateTime at);
 
+    /** Includes not-yet-folded expiry so a wallet projection can distinguish it from legacy bonus. */
+    List<BonusGrant> listActiveByOrg(UUID orgId);
+
     boolean decrementMicros(UUID grantId, long micros, OffsetDateTime updatedAt);
 
     boolean revoke(UUID grantId, long expectedVersion, OffsetDateTime updatedAt);

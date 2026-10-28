@@ -14,6 +14,8 @@ import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.OrganizationRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +23,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 
@@ -66,6 +71,8 @@ public class EntitlementMirrorService {
     private final RedisScript<List> loadScript;
     private final LedgerHealthGate healthGate;
     private final Cache<String, Boolean> renewals;
+    private final TransactionTemplate readSnapshot;
+    private final ObjectMapper objectMapper;
 
     @SuppressWarnings("rawtypes")
     public EntitlementMirrorService(
@@ -78,7 +85,9 @@ public class EntitlementMirrorService {
             @Qualifier("domainFallbackScheduler") Scheduler domainFallbackScheduler,
             @Qualifier("preholdSnapshotLuaScript") RedisScript<List> snapshotScript,
             @Qualifier("loadTenantLuaScript") RedisScript<List> loadScript,
-            LedgerHealthGate healthGate
+            LedgerHealthGate healthGate,
+            PlatformTransactionManager transactionManager,
+            ObjectMapper objectMapper
     ) {
         this.redisTemplate = redisTemplate;
         this.properties = properties;
@@ -90,6 +99,10 @@ public class EntitlementMirrorService {
         this.snapshotScript = snapshotScript;
         this.loadScript = loadScript;
         this.healthGate = healthGate;
+        this.objectMapper = objectMapper;
+        readSnapshot = new TransactionTemplate(transactionManager);
+        readSnapshot.setReadOnly(true);
+        readSnapshot.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         long ttl = Math.max(1, properties.getCache().getSlidingTtlSeconds());
         long interval = Math.max(0, Math.min(properties.getCache().getRenewThrottleSeconds(), ttl / 2));
         this.renewals = Caffeine.newBuilder()
@@ -127,7 +140,7 @@ public class EntitlementMirrorService {
         String packRenew = renewalMode(packs, renew, signal);
         List<String> args = List.of(
                 String.valueOf(System.currentTimeMillis()), orgRenew, String.valueOf(ttlMillis),
-                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), packRenew);
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), packRenew, modelCode);
         return redisTemplate.execute(snapshotScript, keys, args)
                 .next()
                 .map(values -> decode(text(values)))
@@ -155,7 +168,7 @@ public class EntitlementMirrorService {
 
     /** Fills every missing key of the tenant; never overwrites an existing one. */
     public Mono<Void> load(UUID orgId, String modelCode) {
-        return Mono.fromCallable(() -> buildLoadArguments(orgId, modelCode))
+        return Mono.fromCallable(() -> readSnapshot.execute(status -> buildLoadArguments(orgId, modelCode)))
                 .subscribeOn(domainFallbackScheduler)
                 .flatMap(args -> {
                     List<String> keys = List.of(
@@ -193,7 +206,7 @@ public class EntitlementMirrorService {
         Organization organization = organizationRepository.findById(orgId).orElse(null);
         String orgStatus = organization == null ? "ACTIVE" : organization.status().name();
         List<ResourcePack> packs = packRepository.listConsumableByOrgAndModel(orgId, modelCode, now);
-        List<BonusGrant> grants = grantRepository.listConsumableByOrgAndModel(orgId, modelCode, now);
+        List<BonusGrant> grants = grantRepository.listActiveByOrg(orgId);
 
         List<String> args = new ArrayList<>();
         args.add(String.valueOf(properties.getCache().getSlidingTtlSeconds() * 1000L));
@@ -208,21 +221,34 @@ public class EntitlementMirrorService {
 
         List<String> grantArgs = new ArrayList<>();
         for (BonusGrant grant : grants) {
-            grantArgs.add(grant.id() + "|" + grant.remainingMicros() + "|0|"
-                    + epochMillis(grant.expiresAt()));
+            if (grant.remainingMicros() > 0 && (grant.expiresAt() == null || grant.expiresAt().isAfter(now))) {
+                grantArgs.add(grant.id() + "|" + grant.remainingMicros() + "|0|"
+                        + epochMillis(grant.expiresAt()) + "|" + encodeModelScope(grant.applicableModels()));
+            }
         }
         if (unmirrored > 0L) {
             // Balance granted before batches existed: carried as one synthetic batch so it stays
             // spendable and is recognisable on the settlement side.
             grantArgs.add(app.pagefault.hyperllm.common.billing.LegacyBonusBatch.idFor(orgId)
                     + "|" + unmirrored + "|0|"
-                    + app.pagefault.hyperllm.common.billing.LegacyBonusBatch.NO_EXPIRY_EPOCH_MS);
+                    + app.pagefault.hyperllm.common.billing.LegacyBonusBatch.NO_EXPIRY_EPOCH_MS + "|legacy");
         }
         args.add(String.valueOf(grantArgs.size()));
         args.addAll(grantArgs);
         args.add(GatewayRedisKeys.packItemPrefix());
         args.add(GatewayRedisKeys.bonusItemPrefix());
         return args;
+    }
+
+    private String encodeModelScope(List<String> models) {
+        if (models == null) {
+            return "*";
+        }
+        try {
+            return objectMapper.writeValueAsString(models);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cannot encode bonus grant scope", ex);
+        }
     }
 
     private static long epochMillis(OffsetDateTime expiresAt) {

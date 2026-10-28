@@ -13,6 +13,7 @@
 -- ARGV[4] pack item key prefix
 -- ARGV[5] bonus item key prefix
 -- ARGV[6] pack renewal, defaults to the wallet/bonus mode
+-- ARGV[7] model code when checking bonus scope and index completeness
 --
 -- Returns a flat array of strings:
 --   {'OK', cash, heldCash, status, packCount, {id, remaining, held, unitType, expiresAt} * N,
@@ -39,6 +40,25 @@ local function touch(key, mode)
 end
 local packPrefix = ARGV[4]
 local bonusPrefix = ARGV[5]
+local model = ARGV[7]
+local function applies(item)
+    if not model then
+        return true
+    end
+    local scope = redis.call('HGET', item, 'applicable_models')
+    if scope == '*' then
+        return true
+    end
+    if not scope then
+        return false
+    end
+    for _, applicable in ipairs(cjson.decode(scope)) do
+        if applicable == model then
+            return true
+        end
+    end
+    return false
+end
 
 local out = {
     'OK',
@@ -47,7 +67,7 @@ local out = {
     tostring(redis.call('HGET', KEYS[1], 'status') or '')
 }
 
-local function collect(zsetKey, prefix, fields, mode)
+local function collect(zsetKey, prefix, fields, mode, scoped)
     local ids = redis.call('ZRANGEBYSCORE', zsetKey, now, '+inf')
     local rows = {}
     local count = 0
@@ -57,12 +77,14 @@ local function collect(zsetKey, prefix, fields, mode)
         end
         local itemKey = prefix .. ids[i]
         local values = redis.call('HMGET', itemKey, unpack(fields))
-        if values[1] then
+        if values[1] and (not scoped or applies(itemKey)) then
             count = count + 1
             table.insert(rows, ids[i])
             for j = 1, #fields do
                 table.insert(rows, tostring(values[j] or '0'))
             end
+        end
+        if values[1] and (not scoped or not model or redis.call('HEXISTS', itemKey, 'applicable_models') == 1) then
             touch(itemKey, mode)
         end
     end
@@ -74,10 +96,14 @@ local function collect(zsetKey, prefix, fields, mode)
 end
 
 collect(KEYS[2], packPrefix, {'remaining_units', 'held_units', 'unit_type', 'expires_at'}, packMode)
-collect(KEYS[3], bonusPrefix, {'remaining_micros', 'held_micros', 'expires_at'}, orgMode)
+collect(KEYS[3], bonusPrefix, {'remaining_micros', 'held_micros', 'expires_at'}, orgMode, true)
 touch(KEYS[1], orgMode)
 
 -- Last element: 1 when the tenant was filled from the database, 0 when only the wallet hash exists
 -- (a control-plane write, or a load that was interrupted). Trailing so the indexes above stay put.
-table.insert(out, tostring(redis.call('HGET', KEYS[1], 'loaded') or '0'))
+local loaded = redis.call('HGET', KEYS[1], 'loaded') == '1'
+if model then
+    loaded = loaded and redis.call('ZSCORE', KEYS[2], '__loaded_v2__') and redis.call('ZSCORE', KEYS[3], '__loaded_v2__')
+end
+table.insert(out, loaded and '1' or '0')
 return out

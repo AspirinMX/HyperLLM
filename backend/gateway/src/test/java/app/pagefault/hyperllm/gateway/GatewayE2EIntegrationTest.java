@@ -210,7 +210,7 @@ class GatewayE2EIntegrationTest {
         bonusGrantRepository.insert(new app.pagefault.hyperllm.domain.model.billing.BonusGrant(
                 grantId, orgId,
                 app.pagefault.hyperllm.domain.model.enums.GrantSource.SIGNUP,
-                null, null, null, 5_000L, 5_000L,
+                null, null, List.of("gpt-gw-test"), 5_000L, 5_000L,
                 now.plusDays(30),
                 app.pagefault.hyperllm.domain.model.enums.EntitlementStatus.ACTIVE,
                 0L, now, now));
@@ -329,6 +329,11 @@ class GatewayE2EIntegrationTest {
         assertThat(redisTemplate.hasKey(GatewayRedisKeys.wallet(orgId)).block()).isFalse();
         // Seed the already-live case. The same signal permits using an existing mirror.
         mirrorService.load(orgId, "gpt-gw-test").block();
+        mirrorService.load(orgId, "claude-gw-test").block();
+
+        // This batch is scoped to the OpenAI model and must not become a universal legacy balance.
+        assertThat(mirrorService.read(orgId, "gpt-gw-test", false).block().snapshot().grants()).hasSize(1);
+        assertThat(mirrorService.read(orgId, "claude-gw-test", false).block().snapshot().grants()).isEmpty();
 
         // 1. OpenAI streaming call: retries Tier-1 503 -> succeeds Tier-2, strips injected usage, deducts 11_000 micros (5_000 bonus + 6_000 cash)
         String body = webTestClient.post()
