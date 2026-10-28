@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.admin.consumer;
 
+import app.pagefault.hyperllm.admin.maintenance.SettlementWorklist;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
@@ -25,6 +26,7 @@ public class BillingSettlementConsumer {
     private final ObjectMapper objectMapper;
     private final LedgerFolder ledgerFolder;
     private final OutboxEventRepository outboxEventRepository;
+    private final SettlementWorklist worklist;
 
     @KafkaListener(
             topics = KafkaTopics.CDC_BILLING,
@@ -42,10 +44,16 @@ public class BillingSettlementConsumer {
         }
         try {
             boolean folded = ledgerFolder.fold(event);
-            if (folded) {
-                outboxEventRepository.advanceWatermark(event.eventId());
-            } else {
+            outboxEventRepository.advanceWatermark(event.eventId());
+            if (!folded) {
                 log.debug("money event already folded eventId={}", event.eventId());
+            }
+            if (event.eventType() == BillingMoneyEvent.EventType.CONSUME) {
+                try {
+                    worklist.resolve(event.eventId().toString());
+                } catch (RuntimeException ex) {
+                    log.warn("Cannot clear worklist for {}; the next sweep will check the ledger", event.eventId(), ex);
+                }
             }
             if (acknowledgment != null) {
                 acknowledgment.acknowledge();

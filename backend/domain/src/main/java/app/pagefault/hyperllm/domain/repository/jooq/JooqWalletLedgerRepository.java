@@ -44,8 +44,7 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 .set(WALLET_LEDGER.SHORTFALL_MICROS, entry.shortfallMicros())
                 .set(WALLET_LEDGER.SETTLED_AFTER_RECLAIM, entry.settledAfterReclaim())
                 .set(WALLET_LEDGER.CREATED_AT, entry.createdAt())
-                .onConflict(WALLET_LEDGER.IDEMPOTENCY_KEY, WALLET_LEDGER.CREATED_AT)
-                .doNothing()
+                .onConflictDoNothing()
                 .execute();
         return inserted == 1;
     }

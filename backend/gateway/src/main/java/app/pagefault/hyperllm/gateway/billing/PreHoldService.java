@@ -130,7 +130,8 @@ public class PreHoldService {
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.hold(holdId), GatewayRedisKeys.holdDone(holdId),
                 GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.settleEvent(holdId), GatewayRedisKeys.settlePending(),
-                GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settlePendingOwners());
+                GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settlePendingOwners(),
+                GatewayRedisKeys.settleProof(holdId));
         List<String> args = List.of(
                 holdId, Long.toString(occurredAt.toInstant().toEpochMilli()), occurredAt.toString(), mode.name(),
                 encodeLegs(charges), detailPrefix, Long.toString(doneTtlMillis), Long.toString(EVIDENCE_TTL_MS),

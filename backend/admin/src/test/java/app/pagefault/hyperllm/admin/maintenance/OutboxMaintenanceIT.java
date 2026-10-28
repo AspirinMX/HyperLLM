@@ -3,7 +3,6 @@ package app.pagefault.hyperllm.admin.maintenance;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -13,12 +12,9 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.testcontainers.containers.GenericContainer;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -94,41 +90,27 @@ class OutboxMaintenanceIT {
     }
 
     @Test
-    void reAppendsAPendingSettlementAndClearsTheIndex() {
-        String eventId = UUID.randomUUID().toString();
-        String payload = "{\"orgId\":\"org-1\",\"eventType\":\"CONSUME\"}";
-        redis.opsForValue().set(GatewayRedisKeys.settleEvent(eventId), payload, Duration.ofMinutes(5));
-        redis.opsForZSet().add(GatewayRedisKeys.settlePending(), eventId,
-                Instant.now().minusSeconds(120).toEpochMilli());
+    void confirmationClearsEvidenceAndCannotBeUndoneByRescheduling() {
+        String id = UUID.randomUUID().toString();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        redis.opsForValue().set(GatewayRedisKeys.settleEvent(id), "{}");
+        redis.opsForValue().set(GatewayRedisKeys.settleProof(id), "{}");
+        redis.opsForHash().put(GatewayRedisKeys.settlePendingOwners(), id, UUID.randomUUID() + "|" + now);
+        redis.opsForZSet().add(GatewayRedisKeys.settlePending(), id, now.toInstant().toEpochMilli());
+        var worklist = new SettlementWorklist(redis);
 
-        newRedeliveryJob().redeliver();
+        worklist.resolve(id);
+        worklist.defer(id, now.plusMinutes(5));
 
-        assertThat(repository.inserted).hasSize(1);
-        assertThat(repository.inserted.get(0).aggregateId()).isEqualTo("org-1");
-        assertThat(repository.inserted.get(0).type()).isEqualTo("CONSUME");
-        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), eventId)).isNull();
-    }
-
-    @Test
-    void dropsAPendingEntryWhosePayloadExpired() {
-        String eventId = UUID.randomUUID().toString();
-        redis.opsForZSet().add(GatewayRedisKeys.settlePending(), eventId,
-                Instant.now().minusSeconds(120).toEpochMilli());
-
-        newRedeliveryJob().redeliver();
-
-        assertThat(repository.inserted).isEmpty();
-        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), eventId)).isNull();
-    }
-
-    private OutboxRedeliveryJob newRedeliveryJob() {
-        return new OutboxRedeliveryJob(redis, repository, new ObjectMapper(), 60L, 100);
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), id)).isNull();
+        assertThat(worklist.owner(id)).isNull();
+        assertThat(worklist.payload(id)).isNull();
+        assertThat(redis.hasKey(GatewayRedisKeys.settleProof(id))).isFalse();
     }
 
     private static final class FakeRepository implements OutboxEventRepository {
 
         private final List<UUID> deletedUpTo = new ArrayList<>();
-        private final List<OutboxEvent> inserted = Collections.synchronizedList(new ArrayList<>());
         private Optional<UUID> watermark = Optional.empty();
         private Optional<OffsetDateTime> updatedAt = Optional.empty();
         private boolean deletedByAge;
@@ -136,13 +118,11 @@ class OutboxMaintenanceIT {
 
         @Override
         public boolean insertIfAbsent(OutboxEvent event) {
-            inserted.add(event);
             return true;
         }
 
         @Override
         public int insertIfAbsent(List<OutboxEvent> events) {
-            inserted.addAll(events);
             return events.size();
         }
 

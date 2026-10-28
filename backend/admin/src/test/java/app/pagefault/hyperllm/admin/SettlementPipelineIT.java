@@ -1,6 +1,12 @@
 package app.pagefault.hyperllm.admin;
 
+import app.pagefault.hyperllm.admin.consumer.LedgerFolder;
+import app.pagefault.hyperllm.admin.maintenance.OutboxRedeliveryJob;
+import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
+import app.pagefault.hyperllm.domain.model.enums.LedgerType;
+import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
+import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.common.page.PageQuery;
@@ -21,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -30,6 +37,8 @@ import org.testcontainers.kafka.KafkaContainer;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,7 +58,8 @@ import static org.assertj.core.api.Assertions.assertThat;
                 "hyperllm.admin.mfa.required=false",
                 "hyperllm.admin.bootstrap.email=",
                 "hyperllm.admin.bootstrap.password=",
-                "spring.kafka.consumer.auto-offset-reset=earliest"
+                "spring.kafka.consumer.auto-offset-reset=earliest",
+                "hyperllm.maintenance.enabled=false"
         }
 )
 class SettlementPipelineIT {
@@ -94,23 +104,16 @@ class SettlementPipelineIT {
     @Autowired private OrganizationRepository organizationRepository;
     @Autowired private WalletRepository walletRepository;
     @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private OutboxEventRepository outboxRepository;
+    @Autowired private AuditLogRepository auditRepository;
+    @Autowired private OutboxRedeliveryJob reconciliation;
+    @Autowired private LedgerFolder ledgerFolder;
+    @Autowired private StringRedisTemplate redis;
 
     @Test
     void persistsSettlementEventThroughTheRealKafkaListenerExactlyOnce() throws Exception {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        CustomerTier tier = tierRepository.findActiveByCode("STANDARD").orElseThrow();
-        UUID ownerId = UuidV7.next();
-        UUID orgId = UuidV7.next();
-
-        userRepository.insert(new User(
-                ownerId, "pipeline-" + ownerId + "@acme.dev", now, "Pipeline Owner",
-                null, "en-US", "USD", orgId, UserStatus.ACTIVE, now, null, 0L, now, now
-        ));
-        organizationRepository.insert(new Organization(
-                orgId, "Pipeline Org", "pipeline-" + orgId.toString().substring(0, 8),
-                ownerId, tier.id(), null, 50, false, OrgStatus.ACTIVE, null, 0L, now, now
-        ));
-        walletRepository.insert(new Wallet(orgId, 1_000_000L, 0L, 1_000_000L, 0L, 0L, 0L, null, 0L, now));
+        UUID orgId = seedWallet(now);
 
         BillingMoneyEvent event = new BillingMoneyEvent(
                 UuidV7.next(),
@@ -149,6 +152,95 @@ class SettlementPipelineIT {
                 .isEqualTo(1L);
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros())
                 .isEqualTo(750_000L);
+    }
+
+    @Test
+    void replaysOutboxCopyAndRepairsTheExistingRowThroughKafka() throws Exception {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(2);
+        UUID orgId = seedWallet(at);
+        var event = recordPendingDebit(orgId, at);
+
+        reconciliation.advance(at.plusMinutes(2));
+        assertThat(outboxRepository.exists(event.eventId())).isTrue();
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNotNull();
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).total()).isZero();
+
+        reconciliation.advance(at.plusMinutes(5));
+        assertThat(awaitLedgerRows(orgId, 1)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(750_000L);
+    }
+
+    @Test
+    void repairsAProvenDebitAndFencesLateDelivery() throws Exception {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(17);
+        UUID orgId = seedWallet(at);
+        var event = recordPendingDebit(orgId, at);
+
+        reconciliation.advance(at.plusMinutes(17));
+        assertThat(outboxRepository.exists(event.eventId())).isFalse();
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> {
+                    assertThat(row.id()).isEqualTo(event.eventId());
+                    assertThat(row.ledgerType()).isEqualTo(LedgerType.ADJUST);
+                    assertThat(row.cashDeltaMicros()).isEqualTo(-250_000L);
+                });
+        assertThat(auditRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> assertThat(row.action()).isEqualTo("billing.reconcile.adjust"));
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(750_000L);
+    }
+
+    @Test
+    void writesOffWithoutDebitingWhenTheMirrorWasRecreatedAndTheCopyExpired() throws Exception {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(17);
+        UUID orgId = seedWallet(at);
+        var event = recordPendingDebit(orgId, at);
+        redis.opsForHash().put(GatewayRedisKeys.wallet(orgId), "ledger_generation", "replacement");
+
+        reconciliation.advance(at.plusMinutes(17));
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).total()).isZero();
+        redis.delete(GatewayRedisKeys.settleEvent(event.eventId().toString()));
+
+        reconciliation.advance(at.plusMinutes(31));
+        assertThat(auditRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> assertThat(row.action()).isEqualTo("billing.reconcile.write_off"));
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+    }
+
+    private BillingMoneyEvent recordPendingDebit(UUID orgId, OffsetDateTime at) throws Exception {
+        UUID id = UuidV7.next();
+        var event = new BillingMoneyEvent(id, BillingMoneyEvent.EventType.CONSUME, at, orgId, null, null,
+                "req:" + id, -250_000L, 0, 0, 0, List.of(BillingMoneyEvent.Leg.cash(250_000)),
+                "{}", id, false, "Reconciliation integration");
+        String key = id.toString();
+        redis.opsForValue().set(GatewayRedisKeys.settleEvent(key), objectMapper.writeValueAsString(event));
+        redis.opsForHash().put(GatewayRedisKeys.settlePendingOwners(), key, orgId + "|" + at);
+        var wallet = GatewayRedisKeys.wallet(orgId);
+        redis.opsForHash().putAll(wallet, Map.of("cash_micros", "750000", "ledger_generation", key));
+        redis.opsForValue().set(GatewayRedisKeys.settleProof(key), objectMapper.writeValueAsString(Map.of(wallet, key)));
+        redis.opsForZSet().add(GatewayRedisKeys.settlePending(), key, at.toInstant().toEpochMilli());
+        return event;
+    }
+
+    private UUID seedWallet(OffsetDateTime now) {
+        CustomerTier tier = tierRepository.findActiveByCode("STANDARD").orElseThrow();
+        UUID ownerId = UuidV7.next();
+        UUID orgId = UuidV7.next();
+
+        userRepository.insert(new User(
+                ownerId, "pipeline-" + ownerId + "@acme.dev", now, "Pipeline Owner",
+                null, "en-US", "USD", orgId, UserStatus.ACTIVE, now, null, 0L, now, now
+        ));
+        organizationRepository.insert(new Organization(
+                orgId, "Pipeline Org", "pipeline-" + orgId,
+                ownerId, tier.id(), null, 50, false, OrgStatus.ACTIVE, null, 0L, now, now
+        ));
+        walletRepository.insert(new Wallet(orgId, 1_000_000L, 0L, 1_000_000L, 0L, 0L, 0L, null, 0L, now));
+        return orgId;
     }
 
     private boolean awaitLedgerRows(UUID orgId, long expected) throws InterruptedException {

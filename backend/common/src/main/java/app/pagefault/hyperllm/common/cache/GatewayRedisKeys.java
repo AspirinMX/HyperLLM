@@ -100,6 +100,11 @@ public final class GatewayRedisKeys {
         return "gw:settle:evt:" + eventId;
     }
 
+    /** Identity of the live keys that were debited, kept beside the immutable copy. */
+    public static String settleProof(String eventId) {
+        return "gw:settle:proof:" + eventId;
+    }
+
     /** Settlements awaiting the consumer's confirmation; the re-delivery job scans it. */
     public static String settlePending() {
         return "gw:settle:pending";
