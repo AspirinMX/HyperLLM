@@ -13,6 +13,14 @@
 -- ARGV[m] pack item prefix
 -- ARGV[m+1] bonus item prefix
 local ttl = tonumber(ARGV[1]) or 0
+-- Observations are taken before any inserts and sent as exact integers. A missing key has no live
+-- value to compare and is represented separately from a genuine zero balance.
+local result = {'OK'}
+local function observe(bucket, live, checkpoint)
+    table.insert(result, bucket)
+    table.insert(result, live or '')
+    table.insert(result, checkpoint)
+end
 
 -- Split on a literal '|'. A character-class repetition would also emit an empty match at every
 -- delimiter, which silently shifts every field by one.
@@ -47,8 +55,9 @@ end
 
 -- Marked on the wallet, always: a control-plane write can create the hash without filling the
 -- batches, and "has a wallet" must therefore not be read as "is fully mirrored".
+local wallet = split(ARGV[2])
+observe('cash', redis.call('HGET', KEYS[1], 'cash_micros'), wallet[1])
 if redis.call('EXISTS', KEYS[1]) == 0 then
-    local wallet = split(ARGV[2])
     redis.call('HSET', KEYS[1],
             'cash_micros', wallet[1] or '0',
             'held_cash_micros', wallet[2] or '0',
@@ -69,6 +78,7 @@ local function fill(zset, count, prefix, isBonus)
         if isBonus then
             local scope = entry[5] or '*'
             local existing = redis.call('HGET', item, 'remaining_micros')
+            observe('bonus', existing, entry[2])
             local trusted = scope ~= 'legacy' or not existing or redis.call('HEXISTS', item, 'applicable_models') == 1
                     or tonumber(existing) <= tonumber(entry[2])
             if trusted then
@@ -92,4 +102,4 @@ fill(KEYS[2], tonumber(ARGV[3]), ARGV[#ARGV - 1], false)
 local grantCount = tonumber(ARGV[cursor])
 cursor = cursor + 1
 fill(KEYS[3], grantCount, ARGV[#ARGV], true)
-return {'OK'}
+return result

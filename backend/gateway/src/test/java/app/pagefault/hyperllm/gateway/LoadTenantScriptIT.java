@@ -84,8 +84,10 @@ class LoadTenantScriptIT {
         UUID packId = UUID.randomUUID();
         seedWallet(orgId, 42L);
 
-        load(orgId, "gpt", packId, UUID.randomUUID(), 1_000L, 50L, 7_000L, System.currentTimeMillis() + 60_000L);
+        List<String> comparison = load(orgId, "gpt", packId, UUID.randomUUID(),
+                1_000L, 50L, 7_000L, System.currentTimeMillis() + 60_000L);
 
+        assertThat(comparison).containsExactly("OK", "cash", "42", "1000", "bonus", "", "7000");
         assertThat(string(redis.opsForHash().get(GatewayRedisKeys.wallet(orgId), "cash_micros").block()))
                 .isEqualTo("42");
         // The batch family was still missing, so it is filled even though the wallet was not.
@@ -108,7 +110,7 @@ class LoadTenantScriptIT {
                 .isEqualTo(1.0d);
     }
 
-    private void load(UUID orgId, String modelCode, UUID packId, UUID grantId,
+    private List<String> load(UUID orgId, String modelCode, UUID packId, UUID grantId,
                       long cash, long packUnits, long grantMicros, long expiresAt) {
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId),
@@ -123,7 +125,8 @@ class LoadTenantScriptIT {
         args.add(grantId + "|" + grantMicros + "|0|" + expiresAt);
         args.add(GatewayRedisKeys.packItemPrefix());
         args.add(GatewayRedisKeys.bonusItemPrefix());
-        redis.execute(script, keys, args).blockLast();
+        List<?> result = redis.execute(script, keys, args).blockLast();
+        return result.stream().map(LoadTenantScriptIT::string).toList();
     }
 
     private void seedWallet(UUID orgId, long cash) {

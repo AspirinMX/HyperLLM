@@ -18,6 +18,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -71,6 +72,8 @@ public class EntitlementMirrorService {
     private final RedisScript<List> loadScript;
     private final LedgerHealthGate healthGate;
     private final Cache<String, Boolean> renewals;
+    private final SingleFlight<String, Boolean> loads = new SingleFlight<>();
+    private final MeterRegistry meterRegistry;
     private final TransactionTemplate readSnapshot;
     private final ObjectMapper objectMapper;
 
@@ -87,7 +90,8 @@ public class EntitlementMirrorService {
             @Qualifier("loadTenantLuaScript") RedisScript<List> loadScript,
             LedgerHealthGate healthGate,
             PlatformTransactionManager transactionManager,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry
     ) {
         this.redisTemplate = redisTemplate;
         this.properties = properties;
@@ -100,6 +104,7 @@ public class EntitlementMirrorService {
         this.loadScript = loadScript;
         this.healthGate = healthGate;
         this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
         readSnapshot = new TransactionTemplate(transactionManager);
         readSnapshot.setReadOnly(true);
         readSnapshot.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -118,10 +123,10 @@ public class EntitlementMirrorService {
         return healthGate.current().flatMap(signal -> readOnce(orgId, modelCode, renew, signal)
                 .switchIfEmpty(Mono.defer(() -> {
                     if (signal.degraded()) {
-                        return Mono.error(new BillingAdmissionException(
-                                ErrorCode.LEDGER_BACKLOG, signal.retryAfterSeconds()));
+                        return blockedRebuild(orgId, signal);
                     }
-                    return load(orgId, modelCode).then(Mono.defer(() -> readOnce(orgId, modelCode, renew, signal)));
+                    return load(orgId, modelCode, true)
+                            .then(healthGate.current().flatMap(fresh -> readOnce(orgId, modelCode, renew, fresh)));
                 })))
                 .switchIfEmpty(Mono.error(new IllegalStateException(
                         "tenant mirror still missing after load, org=" + orgId)));
@@ -166,17 +171,46 @@ public class EntitlementMirrorService {
         return renew && renewals.asMap().putIfAbsent(scope, Boolean.TRUE) == null ? "1" : "0";
     }
 
-    /** Fills every missing key of the tenant; never overwrites an existing one. */
+    /** Coalesces cold reads for the same tenant and model while the snapshot is being filled. */
     public Mono<Void> load(UUID orgId, String modelCode) {
-        return Mono.fromCallable(() -> readSnapshot.execute(status -> buildLoadArguments(orgId, modelCode)))
-                .subscribeOn(domainFallbackScheduler)
-                .flatMap(args -> {
-                    List<String> keys = List.of(
-                            GatewayRedisKeys.wallet(orgId),
-                            GatewayRedisKeys.pack(orgId, modelCode),
-                            GatewayRedisKeys.bonus(orgId));
-                    return redisTemplate.execute(loadScript, keys, args).then();
-                });
+        return load(orgId, modelCode, false);
+    }
+
+    private Mono<Void> load(UUID orgId, String modelCode, boolean enforceGate) {
+        String flightKey = GatewayRedisKeys.pack(orgId, modelCode) + (enforceGate ? "" : ":forced");
+        return Mono.defer(() -> loads.execute(flightKey, () ->
+                Mono.fromCallable(() -> readSnapshot.execute(status -> buildLoadArguments(orgId, modelCode)))
+                        .subscribeOn(domainFallbackScheduler)
+                        .flatMap(args -> healthGate.current().flatMap(signal -> {
+                            if (enforceGate && signal.degraded()) {
+                                return blockedRebuild(orgId, signal);
+                            }
+                            List<String> keys = List.of(GatewayRedisKeys.wallet(orgId),
+                                    GatewayRedisKeys.pack(orgId, modelCode), GatewayRedisKeys.bonus(orgId));
+                            return redisTemplate.execute(loadScript, keys, args).next()
+                                    .doOnNext(raw -> recordRebuildDelta(text(raw))).thenReturn(true);
+                        })))).then();
+    }
+
+    private <T> Mono<T> blockedRebuild(UUID orgId, LedgerLagSignal signal) {
+        meterRegistry.counter("gateway_rebuild_while_degraded_total").increment();
+        log.debug("Ledger backlog prevented a mirror rebuild org={}", orgId);
+        return Mono.error(new BillingAdmissionException(ErrorCode.LEDGER_BACKLOG, signal.retryAfterSeconds()));
+    }
+
+    private void recordRebuildDelta(List<String> result) {
+        for (int i = 1; i < result.size(); i += 3) {
+            String bucket = result.get(i);
+            String live = result.get(i + 1);
+            if (live.isEmpty()) {
+                meterRegistry.counter("gateway_rebuild_live_balance_missing_total", "bucket", bucket).increment();
+                continue;
+            }
+            long difference = Long.parseLong(live) - Long.parseLong(result.get(i + 2));
+            String direction = difference < 0 ? "live_lower" : difference > 0 ? "live_higher" : "equal";
+            meterRegistry.summary("gateway_rebuild_stale_delta_micros", "bucket", bucket, "direction", direction)
+                    .record(Math.abs(difference));
+        }
     }
 
     /** The batches a hold froze, used to charge exactly what was reserved. */
