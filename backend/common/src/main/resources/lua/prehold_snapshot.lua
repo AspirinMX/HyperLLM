@@ -8,10 +8,11 @@
 -- KEYS[2] pack zset of this model
 -- KEYS[3] bonus zset
 -- ARGV[1] nowMs
--- ARGV[2] renew flag, '1' when this call should extend the TTLs
+-- ARGV[2] wallet/bonus renewal: 0 leave alone, 1 renew, 2 persist
 -- ARGV[3] ttl millis
 -- ARGV[4] pack item key prefix
 -- ARGV[5] bonus item key prefix
+-- ARGV[6] pack renewal, defaults to the wallet/bonus mode
 --
 -- Returns a flat array of strings:
 --   {'OK', cash, heldCash, status, packCount, {id, remaining, held, unitType, expiresAt} * N,
@@ -24,11 +25,18 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
 end
 
 local now = tonumber(ARGV[1]) or 0
--- '1' renews the TTL, '2' removes it. Freezing is what keeps a key from expiring while the ledger
--- is behind: an expiring key would be rebuilt from a snapshot that trails the deductions.
-local freeze = ARGV[2] == '2'
-local renew = ARGV[2] == '1' or freeze
+local orgMode, packMode = ARGV[2], ARGV[6] or ARGV[2]
 local ttl = tonumber(ARGV[3]) or 0
+local function touch(key, mode)
+    if mode == '2' then
+        redis.call('PERSIST', key)
+    elseif mode == '1' then
+        local remaining = redis.call('PTTL', key)
+        if remaining == -1 or (remaining >= 0 and remaining < ttl) then
+            redis.call('PEXPIRE', key, ttl)
+        end
+    end
+end
 local packPrefix = ARGV[4]
 local bonusPrefix = ARGV[5]
 
@@ -39,7 +47,7 @@ local out = {
     tostring(redis.call('HGET', KEYS[1], 'status') or '')
 }
 
-local function collect(zsetKey, prefix, fields)
+local function collect(zsetKey, prefix, fields, mode)
     local ids = redis.call('ZRANGEBYSCORE', zsetKey, now, '+inf')
     local rows = {}
     local count = 0
@@ -55,32 +63,19 @@ local function collect(zsetKey, prefix, fields)
             for j = 1, #fields do
                 table.insert(rows, tostring(values[j] or '0'))
             end
-            if freeze then
-                redis.call('PERSIST', itemKey)
-            elseif renew then
-                redis.call('PEXPIRE', itemKey, ttl)
-            end
+            touch(itemKey, mode)
         end
     end
     table.insert(out, tostring(count))
     for _, value in ipairs(rows) do
         table.insert(out, value)
     end
-    if freeze and redis.call('EXISTS', zsetKey) == 1 then
-        redis.call('PERSIST', zsetKey)
-    elseif renew and redis.call('EXISTS', zsetKey) == 1 then
-        redis.call('PEXPIRE', zsetKey, ttl)
-    end
+    touch(zsetKey, mode)
 end
 
-collect(KEYS[2], packPrefix, {'remaining_units', 'held_units', 'unit_type', 'expires_at'})
-collect(KEYS[3], bonusPrefix, {'remaining_micros', 'held_micros', 'expires_at'})
-
-if freeze then
-    redis.call('PERSIST', KEYS[1])
-elseif renew then
-    redis.call('PEXPIRE', KEYS[1], ttl)
-end
+collect(KEYS[2], packPrefix, {'remaining_units', 'held_units', 'unit_type', 'expires_at'}, packMode)
+collect(KEYS[3], bonusPrefix, {'remaining_micros', 'held_micros', 'expires_at'}, orgMode)
+touch(KEYS[1], orgMode)
 
 -- Last element: 1 when the tenant was filled from the database, 0 when only the wallet hash exists
 -- (a control-plane write, or a load that was interrupted). Trailing so the indexes above stay put.

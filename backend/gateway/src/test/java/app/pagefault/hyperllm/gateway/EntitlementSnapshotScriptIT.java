@@ -13,6 +13,7 @@ import org.testcontainers.containers.GenericContainer;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -117,6 +118,23 @@ class EntitlementSnapshotScriptIT {
     }
 
     @Test
+    void renewsPacksIndependentlyWithoutShorteningAnActiveWalletLease() {
+        UUID orgId = UUID.randomUUID();
+        UUID packId = UUID.randomUUID();
+        var wallet = GatewayRedisKeys.wallet(orgId);
+        seedWallet(orgId, 100L, 20L);
+        seedPack(orgId, "gpt", packId, 1L, 0L, System.currentTimeMillis() + 60_000L);
+        redis.expire(wallet, Duration.ofMinutes(8)).block();
+
+        read(orgId, "gpt", "1", "0");
+        assertThat(pttlOf(wallet)).isGreaterThan(TTL_MILLIS);
+        assertThat(pttlOf(GatewayRedisKeys.packItem(packId))).isEqualTo(-1L);
+
+        read(orgId, "gpt", "0", "1");
+        assertThat(pttlOf(GatewayRedisKeys.packItem(packId))).isPositive();
+    }
+
+    @Test
     void leavesTtlsAloneWhenNotAsked() {
         UUID orgId = UUID.randomUUID();
         UUID packId = UUID.randomUUID();
@@ -129,16 +147,19 @@ class EntitlementSnapshotScriptIT {
     }
 
     private Snapshot read(UUID orgId, String modelCode, boolean renew) {
+        String mode = renew ? "1" : "0";
+        return read(orgId, modelCode, mode, mode);
+    }
+
+    private Snapshot read(UUID orgId, String modelCode, String orgMode, String packMode) {
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId),
                 GatewayRedisKeys.pack(orgId, modelCode),
                 GatewayRedisKeys.bonus(orgId));
         List<String> args = List.of(
                 String.valueOf(System.currentTimeMillis()),
-                renew ? "1" : "0",
-                String.valueOf(TTL_MILLIS),
-                GatewayRedisKeys.packItemPrefix(),
-                GatewayRedisKeys.bonusItemPrefix());
+                orgMode, String.valueOf(TTL_MILLIS), GatewayRedisKeys.packItemPrefix(),
+                GatewayRedisKeys.bonusItemPrefix(), packMode);
         List<?> raw = redis.execute(script, keys, args).next().block();
         return Snapshot.parse(text(raw));
     }

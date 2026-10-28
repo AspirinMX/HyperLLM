@@ -14,6 +14,8 @@ import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.OrganizationRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -22,6 +24,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -62,6 +65,7 @@ public class EntitlementMirrorService {
     private final RedisScript<List> snapshotScript;
     private final RedisScript<List> loadScript;
     private final LedgerHealthGate healthGate;
+    private final Cache<String, Boolean> renewals;
 
     @SuppressWarnings("rawtypes")
     public EntitlementMirrorService(
@@ -86,6 +90,12 @@ public class EntitlementMirrorService {
         this.snapshotScript = snapshotScript;
         this.loadScript = loadScript;
         this.healthGate = healthGate;
+        long ttl = Math.max(1, properties.getCache().getSlidingTtlSeconds());
+        long interval = Math.max(0, Math.min(properties.getCache().getRenewThrottleSeconds(), ttl / 2));
+        this.renewals = Caffeine.newBuilder()
+                .maximumSize(properties.getCache().getMaxEntries())
+                .expireAfterWrite(Duration.ofSeconds(interval))
+                .build();
     }
 
     /**
@@ -111,19 +121,36 @@ public class EntitlementMirrorService {
                 GatewayRedisKeys.wallet(orgId),
                 GatewayRedisKeys.pack(orgId, modelCode),
                 GatewayRedisKeys.bonus(orgId));
+        String wallet = keys.get(0);
+        String packs = keys.get(1);
+        String orgRenew = renewalMode(wallet, renew, signal);
+        String packRenew = renewalMode(packs, renew, signal);
         List<String> args = List.of(
-                String.valueOf(System.currentTimeMillis()),
-                // Freezing is preferred over renewing while the ledger is behind, so a touched key
-                // cannot expire and be rebuilt from a stale snapshot.
-                renew ? (signal.degraded() ? "2" : "1") : "0",
-                String.valueOf(ttlMillis),
-                GatewayRedisKeys.packItemPrefix(),
-                GatewayRedisKeys.bonusItemPrefix());
+                String.valueOf(System.currentTimeMillis()), orgRenew, String.valueOf(ttlMillis),
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), packRenew);
         return redisTemplate.execute(snapshotScript, keys, args)
                 .next()
                 .map(values -> decode(text(values)))
                 // Reactor forbids a null from map; an empty Mono is what "not mirrored yet" means.
-                .filter(mirror -> !MISS_WALLET.equals(mirror.orgStatus()) && mirror.loaded());
+                .filter(mirror -> !MISS_WALLET.equals(mirror.orgStatus()) && mirror.loaded())
+                .doOnSuccess(mirror -> {
+                    if (mirror == null) {
+                        renewals.invalidate(wallet);
+                        renewals.invalidate(packs);
+                    }
+                })
+                .doOnError(ex -> {
+                    renewals.invalidate(wallet);
+                    renewals.invalidate(packs);
+                });
+    }
+
+    private String renewalMode(String scope, boolean renew, LedgerLagSignal signal) {
+        if (signal.degraded()) {
+            renewals.invalidate(scope);
+            return "2";
+        }
+        return renew && renewals.asMap().putIfAbsent(scope, Boolean.TRUE) == null ? "1" : "0";
     }
 
     /** Fills every missing key of the tenant; never overwrites an existing one. */
