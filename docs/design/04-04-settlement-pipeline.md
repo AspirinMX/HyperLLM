@@ -73,8 +73,10 @@
 | `gw:holds:exp` | ZSET | member = holdId，score = 租约到期 epoch ms | 无 |
 | `gw:hold:done:{holdId}` | STRING | 结算摘要 JSON | 12 × 租约 |
 | `gw:ledger:pos:{orgId}` | HASH | `produced`、`since` | **无 TTL** |
-| `gw:settle:evt:{eventId}` | STRING | outbox payload 副本 | 300s |
-| `gw:settle:pending` | ZSET | member = eventId，score = 结算时刻 epoch ms | 无 TTL |
+| `gw:settle:evt:{eventId}` | STRING | outbox 实扣事件副本 | 1 小时 |
+| `gw:settle:proof:{eventId}` | STRING | 实扣影响的 Redis 键与其镜像标识 | 1 小时 |
+| `gw:settle:pending` | ZSET | member = eventId，score 用于安排下次检查 | 无 TTL |
+| `gw:settle:owners` | HASH | eventId 对应组织及结算时刻，工单关闭时清理 | 无 TTL |
 | `gw:wallet:idem:{eventId}` | STRING | **发放类**幂等标记（消耗类复用 `gw:hold:done`） | 24 小时 |
 | `gw:health:ledger-lag` | STRING | `{level,lagRecords,drainSeconds,updatedAt}` | 60s |
 | `gw:health:ledger-lag:armed` | STRING | 常量标记，表示监视器成功运行过 | 无 TTL |
@@ -147,17 +149,15 @@ KEYS 约定（admit / settle / release / reclaim 一致）：
 
 ### 2.5 续期：滑动 TTL + 实例本地节流
 
-**任何触碰钱包与批次键族的位置都必须续期**，缺一处就会出现「键在请求中途消失」。
+快照读取维护滑动 TTL。预占与心跳单独保护有冻结的键，给回收作业预留时间。
 
 | 续期点 | 涉及键 |
 | :--- | :--- |
-| 准入 `prehold_admit.lua` | 钱包、各腿 item |
-| 心跳 `prehold_renew.lua` | **钱包、各腿 item**（现状缺钱包，见 D-3）、hold、并发计数 |
-| 结算 `prehold_settle.lua` | 钱包、各腿 item、hold |
-| 释放 / 回收 | 同上 |
-| 加载完成时 | 被创建的键 |
+| 快照读取 | 钱包、赠金索引及批次、当前模型的资源包索引及批次 |
+| 准入与心跳 | 钱包与冻结腿延长到至少两倍预占期限，心跳也续期并发计数 |
+| 加载完成时 | 新建键 |
 
-**节流规则**：网关在本地维护「每个键的最近一次续期时刻」，同一键 **60 秒内最多续一次**；命中节流时脚本收到 `renew = 0`，不执行 `PEXPIRE`。
+网关实例按租户和模型维护独立的续期窗口，默认 60 秒。命中节流时脚本只读余额，账本降级时仍对触碰的键执行 `PERSIST`。正常续期会保留预占保护留下的较长 TTL。
 
 理由：每请求 `PEXPIRE` 五个键在 AOF 上是纯写放大；而只要「有流量就永不过期」，续期频率对正确性没有影响。
 
@@ -236,12 +236,12 @@ KEYS 约定（admit / settle / release / reclaim 一致）：
 
 | 作业 | 周期 | 职责 |
 | :--- | :--- | :--- |
-| 僵尸预占回收 | 60s | 按 `gw:holds:exp` 全局扫描到期预占；`served = 1` 走兜底结算（5.4），否则全额释放 |
+| 僵尸预占回收 | 30s | 按 `gw:holds:exp` 全局扫描到期预占；`served = 1` 走兜底结算（5.4），否则全额释放 |
 | 批次过期 sweeper | 300s | 批次到期：置状态、减 `wallets.bonus_balance_micros`、写 `BONUS_EXPIRE` 账本行 |
 | 分区预建 | 每日 | `wallet_ledger` 与 `audit_logs` 预建未来 2 个月 |
 | outbox 巡检重投 | 30s | 见 4.3 |
 | outbox 水位删除 | 30s | 见 4.5 |
-| 对账工单推进 | 300s | 见 5.3 |
+| 对账工单推进 | 30s | 与 outbox 巡检同一作业，见 5.3 |
 
 **过期不写 Redis**：批次过期是「权威值随时间自动衰减」，不是一次余额变更，因此不适用「先改 Redis」的规则（04 的 P9 显式豁免）。分摊按 `score > now` 过滤，过期腿天然不可花；PostgreSQL 侧由 sweeper 修正即可。
 
@@ -275,21 +275,21 @@ KEYS 约定（admit / settle / release / reclaim 一致）：
 | 触发 | 每 20ms 或满 200 条 |
 | 单批上限 | 500 行 |
 | 连接池 | outbox 独立 2 连接，与冷回源隔离，总预算仍是 8 |
-| 重试 | 退避重试，**不得因次数上限丢弃**；超过 `retry-deadline`（默认 600 秒）才放弃，放弃时计入孤儿指标 |
+| 重试 | 自实扣时刻起计算 `retry-deadline`（默认 600 秒，上限 14 分钟），超过期限交由巡检处理 |
 
 ### 4.3 事件副本与巡检重投
 
 在结算 Lua 之内写一份副本（与扣减原子，因此不存在「扣了但副本没写」）：
 
 ```
-SET   gw:settle:evt:{eventId}  <outbox payload>  PX 300000
+SET   gw:settle:evt:{eventId}   <outbox payload>  PX 3600000
+SET   gw:settle:proof:{eventId} <key generations> PX 3600000
+HSET  gw:settle:owners         {eventId}         <orgId|occurredAt>
 ZADD  gw:settle:pending        <nowMs>           {eventId}
 ```
 
-- 消费者落账提交后 `ZREM` 并删除副本（失败仅记日志，不影响正确性）。
-- admin 每 30 秒：`ZRANGEBYSCORE gw:settle:pending -inf (now-60000) LIMIT 500`，逐条读副本 → `INSERT outbox_events ON CONFLICT DO NOTHING` → `ZREM`。
-- 插入返回 0 行（网关事后补写成功）同样 `ZREM`：行存在即已在投递链路上。
-- 副本已过期但仍未被确认 ⇒ 计入 `gateway_outbox_orphan_total` 并进入对账工单（5.3）。
+- 消费者提交账本后清理工单、副本和镜像标识。清理失败时，巡检通过账本按事件 ID 确认。
+- admin 每 30 秒最多推进 500 笔工单。结算超过 60 秒后按副本补写 outbox，保留工单直到折叠成功或认亏。
 
 这一层把「进程死在扣钱之后、入队之前」的窗口从「事件丢失」降级为「重投一次」。
 
@@ -297,7 +297,7 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 
 | 条件 | 行为 |
 | :--- | :--- |
-| 队列水位 > 50% 持续 30s | 该实例停止准入，返回 503 `OUTBOX_UNAVAILABLE` |
+| 队列已满，或水位 > 50% 持续 30 秒 | 该实例停止准入，返回 503 `OUTBOX_UNAVAILABLE` 与 `Retry-After` |
 | outbox 写失败率 > 1% 且 1 分钟内 ≥ 50 条 | 同上 |
 | 恢复正常 | 自动放开 |
 
@@ -338,8 +338,8 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 
 - DEGRADED 期间，网关对**触碰到的**键执行 `PERSIST`（摘掉 TTL），恢复后下一次触碰自动重新装上。该动作幂等且廉价，不需要全局扫描。
 - **监视器失联按 OK 处理**：`armed` 存在但数据键过期（admin 停机、滚动发布）时视为正常滑动过期，并打 P1 告警。**监控组件故障不得转化为客户故障。**
-- 重建之前额外度量一笔：`gateway_rebuild_stale_delta_micros`（Redis 实时值减 PG 快照值，按桶）。这是「这次积压让我们损失多少」的唯一来源。
-- 重建期间仍需把组织写入待对账集合，由 5.3 处理。
+- 加载 Lua 在写入前比较现存 Redis 余额与 PG 快照。`gateway_rebuild_stale_delta_micros` 按现金、赠金和偏差方向记录。已过期的 Redis 键单独计入 `gateway_rebuild_live_balance_missing_total`。
+- 降级拒绝重建计入 `gateway_rebuild_while_degraded_total`，日志记录组织标识。每笔未确认实扣由 5.3 的事件工单跟踪。
 
 **为什么闸门只挡「键缺失」**：热键租户手里的 Redis 就是权威本身，停它没有任何收益；冷租户必须从一份已知可能落后的副本取值，此时「不取值」才是唯一确定的选择。规则对所有人相同，命中面由流量形态决定，与账户身份无关。
 
@@ -347,22 +347,22 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 
 `gw:ledger:pos:{orgId}` 记录 `produced`（最后一次产出的事件 id）与 `since`；`folded` 在 `wallets.last_applied_event_id`。`produced > folded` = 该租户的 PG 可能缺账。
 
-**它不参与请求路径**，只被 admin 的工单推进作业使用。四级阶梯，**最后一级无条件终止**：
+位置用于观察，具体工单按事件 ID 推进。admin 通过账本主键和审计确认每笔事件，避免较新的事件掩盖较旧的未入账事件。
 
 | 级别 | 触发 | 判据 | 动作 |
 | :--- | :--- | :--- | :--- |
 | L1 重投 | 60s | `gw:settle:evt` 仍存在 | 按副本重投 outbox |
-| L2 修链路 | 5min | `id ≤ 水位` 或 outbox 行存在 | 不补账，只重放分区 / 重启消费者 |
-| L3 补账 | 15min | **行不存在且 `id > 水位`** | 以 Redis 为权威补 `ADJUST` 账本行，推进 `folded` |
-| L4 认亏 | 30min | 无前置条件 | 直接把 `folded := produced`，关闭工单 |
+| L2 修链路 | 5 分钟 | `id ≤ 水位` 或 outbox 行存在 | admin 将现存 outbox 行重新投递到同一 Kafka topic。行已清理时告警检查消费位点 |
+| L3 补账 | 15 分钟 | 行不存在、`id > 水位` 且受影响的 Redis 键仍保留原镜像标识 | 以原事件 ID、时间和实扣腿折叠一笔 `ADJUST` |
+| L4 认亏 | 30 分钟 | 工单未关闭 | 写审计、推进已处理位置并关闭。迟到的原消息由同一钱包事务识别并跳过 |
 
-三态判定是 L3 的唯一依据，全部走主键与水位，零额外索引：
+L3 先判定投递状态，再核对相关 Redis 键仍是扣款时的镜像。投递检查走主键和水位：
 
 | 条件 | 结论 | 处置 |
 | :--- | :--- | :--- |
 | `outbox_events` 中存在该 id | 已进入链路 | L2，**禁止补账** |
 | `id ≤ purge 水位` | 曾经存在过 | L2，**禁止补账** |
-| 两者都不成立且超过宽限期 | 从未落进 outbox | 允许 L3 |
+| 两者都不成立且超过宽限期 | 无已投递证据 | 仅在扣款镜像仍可验证时允许 L3 |
 
 配套硬约束：**网关对同一事件的重试必须有截止时间，截止之后禁止再插入**，且该截止时间显著小于 L3 的 15 分钟。否则会出现「判定为从未进入 → 补 ADJUST → 网关迟到插入 → 双重扣减」。
 
@@ -372,8 +372,8 @@ L4 只推进标记、不写账本，因此它不会造成错账，只会造成�
 
 预占额是「输出上限 × 1.15」的**上限**，按它扣费会多扣，因此只能用下界。
 
-- 准入时额外算出「仅 prompt」的兜底分摊，存进 hold（`fallback_cash` / `fallback_bonus` / `fallback_pack`）。
-- 网关向客户端吐出**第一个字节**时置 `served = 1`（异步，可与心跳合并）。
+- 准入时把「仅 prompt」的分摊和计价上下文存入 hold。兜底扣费受原预占腿限制。
+- 流式请求处理到首帧时，写入 `served = 1` 后继续发送。非流式请求在交付前完成正常结算。
 - 回收作业按状态处置：
 
 | hold 状态 | 处置 |
@@ -477,7 +477,7 @@ L4 只推进标记、不写账本，因此它不会造成错账，只会造成�
 
 - 容器测试：批量插入行数正确、UUIDv7 单调、无二级索引仍可按区间删除。
 - 容器测试：队列满时停准入并返回 503；恢复后自动放开。
-- 断言：结算后 outbox 写失败时响应仍为 200，且事件在 60 秒内被巡检重投。
+- 断言：结算后 outbox 写失败时响应仍为 200，事件达到 60 秒宽限期后进入下一次巡检。
 - 断言：水位推进后表行数收敛到未确认事件数量级。
 - 断言：三条路径产生的事件契约一致，消费者无需分支即可处理。
 

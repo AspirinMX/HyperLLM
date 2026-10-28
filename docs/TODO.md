@@ -167,15 +167,13 @@
 - [x] **废除三个聚合字段**：`general_bonus_micros`、`gw:pack:avail`、`gw:pack:held`。赠金总额由快照脚本按 `score > now` 现算，连带关闭「TTL 冻结时过期赠金仍可花」的漏洞（D-9 作废）。
 - [x] **快照读原语** `prehold_snapshot.lua`：一次往返返回钱包与逐条腿，网关准入、结算重分摊、console 与 admin 单租户查询共用。该脚本先 ZRANGE 再拼 item 键，**与 Redis Cluster 不兼容**，计费实例必须按租户分 cell。
 - [x] **加载协议**：只补缺失（存在即跳过）、键级互斥（缺失时禁止 delta 写入）、单 Lua 原子写入后统一 PEXPIRE。
-- [ ] **滑动 TTL 全续期点**：补 `prehold_renew.lua` 的钱包与批次键（D-3），修正心跳把 orgId 当 projectId 传入（D-10），并实现实例本地续期节流（每键 60 秒最多一次）。
+- [x] **滑动 TTL 全续期点**：补 `prehold_renew.lua` 的钱包与批次键（D-3），修正心跳把 orgId 当 projectId 传入（D-10），并实现实例本地续期节流（每键 60 秒最多一次）。
 - [x] **事件门禁**补 `packDeltaUnits != 0`，保证纯资源包抵扣也发结算事件（D-4）。
 - [x] **控制面读 Redis**：console 单租户钱包改读快照脚本；admin 新增单租户实时查询，改余额前先加载（D-11）；租户列表 `organizations LEFT JOIN wallets` 内联余额并标注「账本已确认」（D-12）。
-- [ ] **健康信号与全局重建闸门**：admin 写 `gw:health:ledger-lag` 与 `:armed`；网关本地缓存 5 秒，DEGRADED 时对触碰到的键 PERSIST，**键缺失则返回 503 `LEDGER_BACKLOG`**（`Retry-After` 取 `drainSeconds`）。闸门是全局判据，不引入逐租户状态；监视器失联按 OK 处理并打 P1。
-- [ ] **重建偏差度量**：`gateway_rebuild_stale_delta_micros`（按桶）与 `gateway_rebuild_while_degraded_total`（按组织）。
+- [x] **健康信号与全局重建闸门**：admin 写 `gw:health:ledger-lag` 与 `:armed`；网关本地缓存 5 秒，DEGRADED 时对触碰到的键 PERSIST，**键缺失则返回 503 `LEDGER_BACKLOG`**（`Retry-After` 取 `drainSeconds`）。闸门是全局判据，不引入逐租户状态；监视器失联按 OK 处理并打 P1。
+- [x] **重建偏差度量**：`gateway_rebuild_stale_delta_micros` 按现金、赠金和偏差方向统计。余额键已过期时计入缺失指标。降级拒绝重建记录总数，并在日志中保留组织标识。
 - [x] 删除 `gw:org:holds`，惰性回收改为按 `gw:holds:exp` 全局扫描。
 - [x] 配置项落地：`sliding-ttl.*`、`lag-monitor.*`。
-
-> **本阶段未完成**：续期本地节流（当前每请求都续）、`gateway_rebuild_stale_delta_micros` 度量、DEGRADED 时 503 的 `Retry-After` 响应头。
 
 **验收手段**
 - 容器测试：长流跨 TTL 后钱包键仍存在；空闲 300 秒后键消失且可从 checkpoint 重建。
@@ -198,9 +196,9 @@
 - [x] **`folded` 落 PostgreSQL**：同一事务内推进 `wallets.last_applied_event_id`；`produced` 留在 `gw:ledger:pos`。
 - [x] **定时作业**：僵尸预占周期回收（后台 sweep + 惰性回收）、批次过期 sweeper（只改 PG + 写 `BONUS_EXPIRE`）、`wallet_ledger` 与 `audit_logs` 分区预建（D-13、G8）。
 
-> **本阶段未完成**：`served` 兜底下界结算（标记已写、结算未接）、余额归零置 `EXHAUSTED`、对账工单四级阶梯。
+- [x] **已交付预占回收**：向客户端发送首帧前记录交付标记。回收按准入时冻结的仅 prompt 兜底腿扣费，并原子释放其余冻结。
 - [x] **投递水位回传**：消费者每批写 `outbox_watermark`（单行表，含 `updated_at`）。
-- [ ] **对账工单四级阶梯**：L1 重投 / L2 修链路 / L3 补 `ADJUST`（三态判定）/ L4 无条件认亏；工单不参与请求路径。
+- [x] **对账工单四级阶梯**：L1 重投 outbox，L2 修复投递，L3 在水位及实时扣款证据允许时补 `ADJUST`，L4 审计认亏。
 
 **验收手段**
 - 容器测试：跨月入账、重复事件只落一行、消费者恢复后余额一致。
@@ -216,8 +214,8 @@
 
 - [x] **单一金额 topic**：connector 的 `route.topic.replacement` 改为 `cdc.billing`，Kafka key = `orgId`，`OutboxAggregateType` 收敛为一个值；`llm.request.events` 仍直投。
 - [x] **消耗路径批量写入**：请求路径只入队；单写者每 20ms 或满 200 条批量插入，单批上限 500 行；独立连接池 2 个连接。退避重试，不得因次数上限丢弃，超过 `retry-deadline` 才放弃并计入孤儿指标。
-- [x] **事件副本与巡检重投**：结算 Lua 内 `SET gw:settle:evt PX 300000` + `ZADD gw:settle:pending`；消费者落账后 `ZREM`；admin 每 30 秒把超时未确认的重投回 outbox（主键幂等）。
-- [ ] **准入闸门**：队列水位 > 50% 持续 30 秒（当前队列满只记日志，未停准入），或失败率 > 1% 且 1 分钟内 ≥ 50 条 ⇒ 该实例停止准入返回 503；**钱一旦动了，响应里不再有错误码**。
+- [x] **事件副本与巡检重投**：结算 Lua 原子保存实扣事件与镜像标识，证据保留一小时。admin 每 30 秒推进工单，结算确认或认亏后清理。
+- [x] **准入闸门**：队列满、水位 > 50% 持续 30 秒，或最近一分钟写入至少尝试 50 行且失败率 > 1%，触发实例停止准入并返回 503 与 `Retry-After`。已结算的响应照常返回。
 - [x] **停用直投**：删除 `GatewayTelemetryService` 的结算事件直发路径。
 - [x] **水位删除作业**：每 30 秒 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`；不设保留期；水位停滞 24 小时按时间兜底并打 P1。
 - [x] **`V4_2` 迁移**：删 `idx_outbox_events_created`、`outbox_events` 设 `fillfactor = 100`、`wallet_ledger` 增 `shortfall_micros` 与 `settled_after_reclaim`、`wallets` 增 `last_applied_event_id`、新增 `outbox_watermark` 单行表；同步刷新 `-Pjooq`。
@@ -225,7 +223,7 @@
 **验收手段**
 - 容器测试：批量插入行数正确、UUIDv7 单调、无二级索引仍可按区间删除。
 - 容器测试：队列水位越线后停止准入并返回 503，恢复后自动放开。
-- 断言：结算后 outbox 写失败时响应仍为 200，且事件在 60 秒内被巡检重投。
+- 断言：结算后 outbox 写失败时响应仍为 200，事件达到 60 秒宽限期后进入下一次巡检。
 - 断言：水位推进后表行数收敛到未确认事件数量级，不随时间线性增长。
 - 断言：三条路径产生的事件契约一致，消费者无需分支即可处理。
 
