@@ -9,7 +9,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -25,6 +25,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @Slf4j
 @Component
 public class OutboxWriter implements SmartLifecycle {
+
+    private static final long MAX_EVENT_AGE_SECONDS = 14 * 60;
 
     private final OutboxQueue queue;
     private final OutboxEventRepository repository;
@@ -91,12 +93,20 @@ public class OutboxWriter implements SmartLifecycle {
         }
     }
 
-    private void flush(List<PendingMoneyEvent> batch) {
-        List<OutboxEvent> events = batch.stream()
-                .map(this::toRow)
-                .toList();
-        long deadline = System.currentTimeMillis() + settings.getRetryDeadlineSeconds() * 1000L;
-        while (true) {
+    private void flush(List<PendingMoneyEvent> batch) throws InterruptedException {
+        List<OutboxEvent> events = batch.stream().map(this::toRow).toList();
+        long maxAgeSeconds = Math.max(0, Math.min(settings.getRetryDeadlineSeconds(), MAX_EVENT_AGE_SECONDS));
+        while (running && !events.isEmpty()) {
+            Instant cutoff = Instant.now().minusSeconds(maxAgeSeconds);
+            var current = events.stream().filter(event -> !event.createdAt().toInstant().isBefore(cutoff)).toList();
+            int expired = events.size() - current.size();
+            if (expired > 0) {
+                abandon(expired);
+                events = current;
+                if (events.isEmpty()) {
+                    return;
+                }
+            }
             try {
                 int written = repository.insertIfAbsent(events);
                 admissionGate.recordWrite(events.size(), true);
@@ -105,17 +115,8 @@ public class OutboxWriter implements SmartLifecycle {
             } catch (RuntimeException ex) {
                 admissionGate.recordWrite(events.size(), false);
                 failures.incrementAndGet();
-                if (System.currentTimeMillis() >= deadline) {
-                    abandoned.addAndGet(events.size());
-                    queue.recordDropped(events.size());
-                    io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
-                    if (registry != null) {
-                        registry.counter("gateway_outbox_abandoned_total").increment(events.size());
-                    }
-                    log.error("abandoning {} outbox rows after the retry deadline", events.size(), ex);
-                    return;
-                }
-                sleep(settings.getRetryBackoffMs());
+                log.debug("Retrying {} settlement appends", events.size(), ex);
+                Thread.sleep(settings.getRetryBackoffMs());
             }
         }
     }
@@ -130,12 +131,14 @@ public class OutboxWriter implements SmartLifecycle {
                 event.occurredAt());
     }
 
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(Duration.ofMillis(millis).toMillis());
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
+    private void abandon(int count) {
+        abandoned.addAndGet(count);
+        queue.recordDropped(count);
+        io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
+        if (registry != null) {
+            registry.counter("gateway_outbox_abandoned_total").increment(count);
         }
+        log.error("Leaving {} outbox rows for reconciliation after the gateway deadline", count);
     }
 
     public long insertedCount() {

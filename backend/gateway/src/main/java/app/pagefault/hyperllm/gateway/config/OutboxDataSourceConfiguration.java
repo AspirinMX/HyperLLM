@@ -24,6 +24,8 @@ class OutboxDataSourceConfiguration {
         pool.setMaximumPoolSize(2);
         pool.setMinimumIdle(0);
         pool.setConnectionTimeout(2_000L);
+        pool.addDataSourceProperty("socketTimeout", "10");
+        pool.setConnectionInitSql("SET statement_timeout = '5s'");
         pool.setInitializationFailTimeout(-1L);
         return pool;
     }

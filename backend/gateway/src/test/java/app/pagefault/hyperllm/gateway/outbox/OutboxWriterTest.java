@@ -65,15 +65,16 @@ class OutboxWriterTest {
     void abandonsAndCountsRowsOnceTheDeadlinePasses() {
         properties.getOutbox().setFlushIntervalMs(10);
         properties.getOutbox().setRetryBackoffMs(1);
-        properties.getOutbox().setRetryDeadlineSeconds(0);
-        repository.failuresBeforeSuccess.set(Integer.MAX_VALUE);
+        properties.getOutbox().setRetryDeadlineSeconds(10);
         OutboxQueue queue = new OutboxQueue(properties);
         OutboxWriter writer = newWriter(queue);
         writer.start();
         try {
-            queue.offer(event("e1"));
-            queue.offer(event("e2"));
+            OffsetDateTime expired = OffsetDateTime.now().minusSeconds(11);
+            queue.offer(new PendingMoneyEvent(UUID.randomUUID(), "org-1", "CONSUME", "{}", expired));
+            queue.offer(new PendingMoneyEvent(UUID.randomUUID(), "org-1", "CONSUME", "{}", expired));
             awaitCondition(() -> writer.abandonedCount() == 2);
+            assertThat(repository.rows()).isZero();
             assertThat(writer.abandonedCount()).isEqualTo(2);
             assertThat(queue.droppedCount()).isEqualTo(2);
         } finally {
