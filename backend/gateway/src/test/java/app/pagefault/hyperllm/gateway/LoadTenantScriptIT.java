@@ -79,6 +79,19 @@ class LoadTenantScriptIT {
     }
 
     @Test
+    void reconstructsALegacyStatusOnlyWallet() {
+        UUID orgId = UUID.randomUUID();
+        String wallet = GatewayRedisKeys.wallet(orgId);
+        redis.opsForHash().put(wallet, "status", "ACTIVE").block();
+
+        load(orgId, "gpt", UUID.randomUUID(), UUID.randomUUID(), 1_000L, 50L, 7_000L,
+                System.currentTimeMillis() + 60_000L);
+
+        assertThat(redis.opsForHash().get(wallet, "cash_micros").block()).isEqualTo("1000");
+        assertThat(pttlOf(wallet)).isPositive();
+    }
+
+    @Test
     void neverOverwritesAWalletThatAlreadyExists() {
         UUID orgId = UUID.randomUUID();
         UUID packId = UUID.randomUUID();

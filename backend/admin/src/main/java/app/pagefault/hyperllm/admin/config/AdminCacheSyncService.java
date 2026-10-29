@@ -4,9 +4,11 @@ import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -16,6 +18,13 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 public class AdminCacheSyncService {
+
+    private static final RedisScript<Long> UPDATE_WALLET_STATUS = RedisScript.of("""
+            if redis.call('HEXISTS', KEYS[1], 'cash_micros') == 0 then
+                return 0
+            end
+            return redis.call('HSET', KEYS[1], 'status', ARGV[1])
+            """, Long.class);
 
     private final StringRedisTemplate redisTemplate;
     private final AfterCommitRunner afterCommitRunner;
@@ -52,10 +61,7 @@ public class AdminCacheSyncService {
         evictKeyHashesAfterCommit(orgKeyHashes);
         afterCommitRunner.runAfterCommit(() -> {
             try {
-                String walletKey = GatewayRedisKeys.wallet(orgId);
-                if (Boolean.TRUE.equals(redisTemplate.hasKey(walletKey))) {
-                    redisTemplate.opsForHash().put(walletKey, "status", status);
-                }
+                redisTemplate.execute(UPDATE_WALLET_STATUS, List.of(GatewayRedisKeys.wallet(orgId)), status);
             } catch (Exception ex) {
                 log.warn("Failed to sync Redis wallet status for org {}", orgId, ex);
             }

@@ -21,7 +21,7 @@
 -- or {'MISS_WALLET', '0', '0', ''} when the wallet has not been mirrored yet.
 local MAX_LEGS = 64
 
-if redis.call('EXISTS', KEYS[1]) == 0 then
+if redis.call('HEXISTS', KEYS[1], 'cash_micros') == 0 then
     return {'MISS_WALLET', '0', '0', ''}
 end
 

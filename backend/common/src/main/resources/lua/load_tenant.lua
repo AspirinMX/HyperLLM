@@ -53,8 +53,8 @@ local function putItem(key, flat)
     return true
 end
 
--- Marked on the wallet, always: a control-plane write can create the hash without filling the
--- batches, and "has a wallet" must therefore not be read as "is fully mirrored".
+-- Older control-plane writes could leave a status-only hash behind. Only a wallet with
+-- a cash field has an authoritative balance.
 local wallet = split(ARGV[2])
 local version = wallet[4] or '0'
 if KEYS[5] and redis.call('SCARD', KEYS[5]) > 0 then
@@ -70,7 +70,7 @@ if KEYS[4] then
     end
 end
 observe('cash', redis.call('HGET', KEYS[1], 'cash_micros'), wallet[1])
-if redis.call('EXISTS', KEYS[1]) == 0 then
+if redis.call('HEXISTS', KEYS[1], 'cash_micros') == 0 then
     redis.call('HSET', KEYS[1],
             'cash_micros', wallet[1] or '0',
             'held_cash_micros', wallet[2] or '0',

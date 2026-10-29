@@ -3,23 +3,14 @@ package app.pagefault.hyperllm.gateway.cache;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.cache.SandboxTokenPayload;
 import app.pagefault.hyperllm.common.crypto.HmacSha256;
-import app.pagefault.hyperllm.domain.billing.EntitlementSnapshot;
-import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
 import app.pagefault.hyperllm.domain.model.billing.OrgModelPricingOverride;
-import app.pagefault.hyperllm.domain.model.billing.ResourcePack;
-import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.routing.GatewayModelRoute;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
-import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.ApiKeyRepository;
 import app.pagefault.hyperllm.domain.repository.GatewayRouteRepository;
-import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
 import app.pagefault.hyperllm.domain.repository.OrgModelPricingOverrideRepository;
-import app.pagefault.hyperllm.domain.repository.ResourcePackRepository;
-import app.pagefault.hyperllm.domain.repository.OrganizationRepository;
 import app.pagefault.hyperllm.domain.repository.VirtualModelRepository;
-import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -35,7 +26,6 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -51,16 +41,11 @@ public class GatewayConfigCacheService {
     private final Cache<String, List<VirtualModel>> publicCatalogL1;
     private final Cache<String, Optional<OrgModelPricingOverride>> overrideL1;
 
-    /** Wallet balances read from the live Redis hash that admission also uses. */
-    public record WalletSnapshot(long cashMicros, long bonusMicros, String status) {
-    }
-
     /** Cache envelope so a "no override" answer can be cached explicitly instead of re-querying. */
     public record OverrideCacheEntry(OrgModelPricingOverride override) {
     }
     private final SingleFlight<String, Optional<GatewayKeyContext>> keySingleFlight = new SingleFlight<>();
     private final SingleFlight<String, Optional<GatewayModelRoute>> routeSingleFlight = new SingleFlight<>();
-    private final SingleFlight<UUID, Boolean> walletSingleFlight = new SingleFlight<>();
 
     private final ReactiveStringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
@@ -69,11 +54,7 @@ public class GatewayConfigCacheService {
     private final ApiKeyRepository apiKeyRepository;
     private final GatewayRouteRepository gatewayRouteRepository;
     private final VirtualModelRepository virtualModelRepository;
-    private final WalletRepository walletRepository;
-    private final OrganizationRepository organizationRepository;
     private final OrgModelPricingOverrideRepository overrideRepository;
-    private final ResourcePackRepository resourcePackRepository;
-    private final BonusGrantRepository bonusGrantRepository;
 
     public GatewayConfigCacheService(
             ReactiveStringRedisTemplate redisTemplate,
@@ -83,11 +64,7 @@ public class GatewayConfigCacheService {
             ApiKeyRepository apiKeyRepository,
             GatewayRouteRepository gatewayRouteRepository,
             VirtualModelRepository virtualModelRepository,
-            WalletRepository walletRepository,
-            OrganizationRepository organizationRepository,
-            OrgModelPricingOverrideRepository overrideRepository,
-            ResourcePackRepository resourcePackRepository,
-            BonusGrantRepository bonusGrantRepository
+            OrgModelPricingOverrideRepository overrideRepository
     ) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
@@ -96,11 +73,7 @@ public class GatewayConfigCacheService {
         this.apiKeyRepository = apiKeyRepository;
         this.gatewayRouteRepository = gatewayRouteRepository;
         this.virtualModelRepository = virtualModelRepository;
-        this.walletRepository = walletRepository;
-        this.organizationRepository = organizationRepository;
         this.overrideRepository = overrideRepository;
-        this.resourcePackRepository = resourcePackRepository;
-        this.bonusGrantRepository = bonusGrantRepository;
 
         this.keyL1 = Caffeine.newBuilder()
                 .maximumSize(properties.getCache().getMaxEntries())
@@ -161,58 +134,6 @@ public class GatewayConfigCacheService {
                 .doOnNext(models -> publicCatalogL1.put("ALL", models));
     }
 
-    public Mono<Boolean> warmWalletIfMissing(UUID orgId) {
-        return walletSingleFlight.execute(orgId, () ->
-                Mono.fromCallable(() -> {
-                    Optional<Wallet> walletOpt = walletRepository.findByOrgId(orgId);
-                    Optional<Organization> orgOpt = organizationRepository.findById(orgId);
-                    if (walletOpt.isEmpty() || orgOpt.isEmpty()) {
-                        return null;
-                    }
-                    Wallet w = walletOpt.get();
-                    return Map.of(
-                            "cash_micros", String.valueOf(w.cashBalanceMicros()),
-                            "general_bonus_micros", String.valueOf(w.bonusBalanceMicros()),
-                            "status", orgOpt.get().status().name()
-                    );
-                })
-                .subscribeOn(domainFallbackScheduler)
-                .flatMap(fields -> {
-                    if (fields == null) {
-                        return Mono.just(false);
-                    }
-                    String key = GatewayRedisKeys.wallet(orgId);
-                    return redisTemplate.hasKey(key)
-                            .flatMap(exists -> Boolean.TRUE.equals(exists)
-                                    ? Mono.just(true)
-                                    : redisTemplate.opsForHash().putAll(key, fields).thenReturn(true));
-                })
-                .defaultIfEmpty(false)
-        );
-    }
-
-    /**
-     * Reads the live wallet hash used by admission. Returns empty only when the organisation has no
-     * wallet at all, so callers can distinguish "broke" from "unknown".
-     */
-    public Mono<WalletSnapshot> readWalletSnapshot(UUID orgId) {
-        return readWalletHash(orgId).switchIfEmpty(
-                warmWalletIfMissing(orgId).flatMap(warmed -> Boolean.TRUE.equals(warmed)
-                        ? readWalletHash(orgId)
-                        : Mono.empty()));
-    }
-
-    private Mono<WalletSnapshot> readWalletHash(UUID orgId) {
-        return redisTemplate.opsForHash().entries(GatewayRedisKeys.wallet(orgId))
-                .collectMap(entry -> String.valueOf(entry.getKey()), entry -> String.valueOf(entry.getValue()))
-                .filter(map -> !map.isEmpty())
-                .map(map -> new WalletSnapshot(
-                        parseLong(map.get("cash_micros")),
-                        parseLong(map.get("general_bonus_micros")),
-                        map.getOrDefault("status", "")
-                ));
-    }
-
     /**
      * Resolves the effective model-level override for an organisation. The cache key uses the
      * virtual model id, not the model code, because the CDC event only carries the id.
@@ -248,74 +169,8 @@ public class GatewayConfigCacheService {
                 });
     }
 
-    /**
-     * Builds the entitlement snapshot for one settlement.
-     *
-     * <p>Batches are read from PostgreSQL rather than the Redis mirror: Phase 2.2 has no writer for
-     * the mirror yet, and the settlement path is already asynchronous, so a read here is off the
-     * response path. The wallet's bonus snapshot is authoritative for the live balance, so the part
-     * of it not covered by batch rows is appended as an unmirrored bucket. That keeps Phase 1 data
-     * (snapshot without batches) spendable while preventing double counting once batches exist.
-     */
-    public Mono<EntitlementSnapshot> resolveEntitlements(UUID orgId, String modelCode, WalletSnapshot wallet) {
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        return Mono.fromCallable(() -> {
-                    List<ResourcePack> packs = resourcePackRepository
-                            .listConsumableByOrgAndModel(orgId, modelCode, now);
-                    List<BonusGrant> grants = bonusGrantRepository
-                            .listConsumableByOrgAndModel(orgId, modelCode, now);
-
-                    List<EntitlementSnapshot.PackBucket> packBuckets = packs.stream()
-                            .map(pack -> new EntitlementSnapshot.PackBucket(
-                                    pack.id(), pack.unitType(), pack.remainingUnits()))
-                            .toList();
-                    List<EntitlementSnapshot.BonusBucket> grantBuckets = new java.util.ArrayList<>();
-                    long mirroredMicros = 0L;
-                    for (BonusGrant grant : grants) {
-                        grantBuckets.add(new EntitlementSnapshot.BonusBucket(grant.id(), grant.remainingMicros()));
-                        mirroredMicros += grant.remainingMicros();
-                    }
-                    long unmirroredBonus = Math.max(0L, wallet.bonusMicros() - mirroredMicros);
-                    if (unmirroredBonus > 0L) {
-                        grantBuckets.add(new EntitlementSnapshot.BonusBucket(null, unmirroredBonus));
-                    }
-                    return new EntitlementSnapshot(packBuckets, List.copyOf(grantBuckets), Math.max(0L, wallet.cashMicros()));
-                })
-                .subscribeOn(domainFallbackScheduler);
-    }
-
-    /**
-     * Returns the pack units available to one model, filling the Redis aggregate with a short TTL on
-     * miss. The TTL is what keeps the aggregate self-healing: a settlement that decrements it and a
-     * concurrent rebuild cannot drift for longer than the TTL.
-     */
-    public Mono<Long> ensurePackAvailability(UUID orgId, String modelCode) {
-        String key = GatewayRedisKeys.packAvailability(orgId, modelCode);
-        return redisTemplate.opsForValue().get(key)
-                .map(GatewayConfigCacheService::parseLong)
-                .switchIfEmpty(Mono.fromCallable(() -> resourcePackRepository.sumRemainingUnits(
-                                orgId, modelCode, OffsetDateTime.now(ZoneOffset.UTC)))
-                        .subscribeOn(domainFallbackScheduler)
-                        .flatMap(units -> redisTemplate.opsForValue()
-                                .set(key, String.valueOf(units), Duration.ofSeconds(
-                                        properties.getBilling().getPackAvailabilityTtlSeconds()))
-                                .onErrorReturn(false)
-                                .thenReturn(units)));
-    }
-
     public void evictAllOverridesL1() {
         overrideL1.invalidateAll();
-    }
-
-    private static long parseLong(String value) {
-        if (value == null || value.isBlank()) {
-            return 0L;
-        }
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException ex) {
-            return 0L;
-        }
     }
 
     public void evictKeyL1(String keyHash) {
