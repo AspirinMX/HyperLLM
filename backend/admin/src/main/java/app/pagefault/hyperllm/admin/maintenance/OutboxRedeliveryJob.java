@@ -131,7 +131,7 @@ public class OutboxRedeliveryJob {
 
         if (due(occurredAt, REPAIR_LINK, now)) {
             if (enteredDelivery) {
-                repairDelivery(eventId, owner.orgId());
+                repairDelivery(eventId, owner.orgId(), sameEvent(event, owner) ? payload : null);
             }
             defer(id, occurredAt.plus(ADJUST));
             return;
@@ -144,14 +144,13 @@ public class OutboxRedeliveryJob {
         defer(id, occurredAt.plus(REPAIR_LINK));
     }
 
-    private void repairDelivery(UUID eventId, UUID orgId) {
-        var payload = ledgerFolder.recordedPayload(eventId);
-        if (payload.isEmpty()) {
-            log.error("P1 settlement lies below purge watermark. Check billing consumer offsets for org={} event={}",
-                    orgId, eventId);
+    private void repairDelivery(UUID eventId, UUID orgId, String verifiedCopy) {
+        String payload = ledgerFolder.recordedPayload(eventId).orElse(verifiedCopy);
+        if (payload == null) {
+            log.error("P1 no replay evidence below the outbox watermark for org={} event={}", orgId, eventId);
             return;
         }
-        replay(eventId, orgId.toString(), payload.orElseThrow());
+        replay(eventId, orgId.toString(), payload);
     }
 
     private void replay(UUID eventId, String orgId, String payload) {

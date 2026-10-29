@@ -211,6 +211,23 @@ class SettlementPipelineIT {
     }
 
     @Test
+    void replaysTheRedisCopyWhenOnlyTheWatermarkRemains() throws Exception {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(6);
+        UUID orgId = seedWallet(at);
+        var event = recordPendingDebit(orgId, at);
+        outboxRepository.advanceWatermark(UuidV7.next());
+        assertThat(outboxRepository.exists(event.eventId())).isFalse();
+
+        reconciliation.advance(at.plusMinutes(6));
+
+        assertThat(awaitLedgerRows(orgId, 1)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> assertThat(row.ledgerType()).isEqualTo(LedgerType.CONSUME));
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(750_000L);
+    }
+
+    @Test
     void repairsAProvenDebitAndFencesLateDelivery() throws Exception {
         OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(17);
         UUID orgId = seedWallet(at);
