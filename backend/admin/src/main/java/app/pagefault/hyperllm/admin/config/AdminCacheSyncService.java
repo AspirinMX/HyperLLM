@@ -1,18 +1,16 @@
 package app.pagefault.hyperllm.admin.config;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
-import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
-import java.util.Map;
 import java.util.UUID;
 
 /**
- * Synchronizes admin configuration and wallet mutations into Redis L2 keys after transaction commits.
+ * Synchronizes admin configuration into Redis L2 keys after transaction commits.
  */
 @Slf4j
 @Service
@@ -64,33 +62,4 @@ public class AdminCacheSyncService {
         });
     }
 
-    public void incrementWalletBalanceAfterCommit(
-            UUID orgId,
-            long cashDeltaMicros,
-            long bonusDeltaMicros,
-            Wallet fallbackSnapshot,
-            String orgStatus
-    ) {
-        afterCommitRunner.runAfterCommit(() -> {
-            try {
-                String key = GatewayRedisKeys.wallet(orgId);
-                if (Boolean.TRUE.equals(redisTemplate.hasKey(key))) {
-                    if (cashDeltaMicros != 0L) {
-                        redisTemplate.opsForHash().increment(key, "cash_micros", cashDeltaMicros);
-                    }
-                    if (bonusDeltaMicros != 0L) {
-                        redisTemplate.opsForHash().increment(key, "general_bonus_micros", bonusDeltaMicros);
-                    }
-                } else if (fallbackSnapshot != null) {
-                    redisTemplate.opsForHash().putAll(key, Map.of(
-                            "cash_micros", String.valueOf(fallbackSnapshot.cashBalanceMicros()),
-                            "general_bonus_micros", String.valueOf(fallbackSnapshot.bonusBalanceMicros()),
-                            "status", orgStatus
-                    ));
-                }
-            } catch (Exception ex) {
-                log.warn("Failed to update Redis wallet cache after admin topup for org {}", orgId, ex);
-            }
-        });
-    }
 }

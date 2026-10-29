@@ -5,9 +5,9 @@
 -- same rule runs the other way, which is why a delta write is refused on a missing key; together
 -- they guarantee that a rebuild and a debit can never touch the same key.
 --
--- KEYS[1] wallet hash, [2] pack zset of the model, [3] bonus zset
+-- KEYS[1] wallet hash, [2] pack zset of the model, [3] bonus zset, [4] optional ledger position
 -- ARGV[1] ttl millis
--- ARGV[2] wallet "cash|heldCash|status"
+-- ARGV[2] wallet "cash|heldCash|status|version"
 -- ARGV[3] pack count, then one "id|remaining|held|unitType|expiresAt" per pack
 -- ARGV[n] bonus count, then one "id|remaining|held|expiresAt|modelScope" per grant
 -- ARGV[m] pack item prefix
@@ -56,12 +56,20 @@ end
 -- Marked on the wallet, always: a control-plane write can create the hash without filling the
 -- batches, and "has a wallet" must therefore not be read as "is fully mirrored".
 local wallet = split(ARGV[2])
+local version = wallet[4] or '0'
+if KEYS[4] then
+    local floor = redis.call('HGET', KEYS[4], 'credit_version') or '0'
+    if #version < #floor or (#version == #floor and version < floor) then
+        return {'STALE_CREDIT'}
+    end
+end
 observe('cash', redis.call('HGET', KEYS[1], 'cash_micros'), wallet[1])
 if redis.call('EXISTS', KEYS[1]) == 0 then
     redis.call('HSET', KEYS[1],
             'cash_micros', wallet[1] or '0',
             'held_cash_micros', wallet[2] or '0',
-            'status', wallet[3] or 'ACTIVE')
+            'status', wallet[3] or 'ACTIVE',
+            'loaded_wallet_version', version)
     redis.call('PEXPIRE', KEYS[1], ttl)
 end
 

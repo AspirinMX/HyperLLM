@@ -3,7 +3,9 @@ package app.pagefault.hyperllm.domain.repository.jooq;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import lombok.RequiredArgsConstructor;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.jooq.Query;
 import org.springframework.stereotype.Repository;
 
@@ -13,6 +15,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import static app.pagefault.hyperllm.domain.jooq.Tables.AUDIT_LOGS;
+import static app.pagefault.hyperllm.domain.jooq.Tables.WALLET_LEDGER;
 import static app.pagefault.hyperllm.domain.jooq.Tables.OUTBOX_EVENTS;
 import static app.pagefault.hyperllm.domain.jooq.Tables.OUTBOX_WATERMARK;
 
@@ -77,10 +81,20 @@ public class JooqOutboxEventRepository implements OutboxEventRepository {
     }
 
     @Override
+    public List<OutboxEvent> listUnconfirmedCredits(OffsetDateTime cutoff, int limit) {
+        return dsl.selectFrom(OUTBOX_EVENTS)
+                .where(isCredit().and(OUTBOX_EVENTS.CREATED_AT.lt(cutoff)).and(folded().not()))
+                .orderBy(OUTBOX_EVENTS.ID)
+                .limit(limit)
+                .fetch(row -> new OutboxEvent(row.getId(), row.getAggregatetype(), row.getAggregateid(),
+                        row.getType(), row.getPayload().data(), row.getCreatedAt()));
+    }
+
+    @Override
     public int deleteUpTo(UUID watermark, int limit) {
         List<UUID> doomed = dsl.select(OUTBOX_EVENTS.ID)
                 .from(OUTBOX_EVENTS)
-                .where(OUTBOX_EVENTS.ID.lessOrEqual(watermark))
+                .where(OUTBOX_EVENTS.ID.lessOrEqual(watermark).and(folded().or(writtenOff())))
                 .orderBy(OUTBOX_EVENTS.ID)
                 .limit(limit)
                 .fetch(OUTBOX_EVENTS.ID);
@@ -93,8 +107,23 @@ public class JooqOutboxEventRepository implements OutboxEventRepository {
     @Override
     public int deleteOlderThan(OffsetDateTime cutoff) {
         return dsl.deleteFrom(OUTBOX_EVENTS)
-                .where(OUTBOX_EVENTS.CREATED_AT.lt(cutoff))
+                .where(OUTBOX_EVENTS.CREATED_AT.lt(cutoff).and(isCredit().not().or(folded())))
                 .execute();
+    }
+
+    private static Condition isCredit() {
+        return OUTBOX_EVENTS.TYPE.in("RECHARGE", "BONUS_GRANT", "PACK_GRANT");
+    }
+
+    private static Condition folded() {
+        return DSL.exists(DSL.selectOne().from(WALLET_LEDGER)
+                .where(WALLET_LEDGER.ID.eq(OUTBOX_EVENTS.ID).and(WALLET_LEDGER.CREATED_AT.eq(OUTBOX_EVENTS.CREATED_AT))));
+    }
+
+    private static Condition writtenOff() {
+        return DSL.exists(DSL.selectOne().from(AUDIT_LOGS)
+                .where(AUDIT_LOGS.ID.eq(OUTBOX_EVENTS.ID).and(AUDIT_LOGS.CREATED_AT.eq(OUTBOX_EVENTS.CREATED_AT))
+                        .and(AUDIT_LOGS.ACTION.eq("billing.reconcile.write_off"))));
     }
 
     private Query insertStatement(OutboxEvent event) {

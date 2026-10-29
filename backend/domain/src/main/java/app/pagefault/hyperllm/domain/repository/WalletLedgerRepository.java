@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 
+import java.util.Optional;
 import java.util.UUID;
 
 public interface WalletLedgerRepository {
@@ -14,6 +15,8 @@ public interface WalletLedgerRepository {
      * @return true if inserted, false if ignored due to conflict.
      */
     boolean insertIdempotent(WalletLedgerEntry entry);
+
+    Optional<UUID> findFirstByRequestKey(UUID orgId, String idempotencyKey);
 
     PageResponse<WalletLedgerEntry> listByOrg(UUID orgId, PageQuery pageQuery);
 }

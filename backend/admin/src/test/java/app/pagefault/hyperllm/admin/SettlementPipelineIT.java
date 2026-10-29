@@ -6,6 +6,9 @@ import app.pagefault.hyperllm.admin.maintenance.OutboxRedeliveryJob;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
+import app.pagefault.hyperllm.domain.billing.WalletCreditOutbox;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
@@ -116,6 +119,8 @@ class SettlementPipelineIT {
     @Autowired private BonusGrantRepository grantRepository;
     @Autowired private BatchExpiryJob expiryJob;
     @Autowired private StringRedisTemplate redis;
+    @Autowired private WalletCreditOutbox creditOutbox;
+    @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
     void persistsSettlementEventThroughTheRealKafkaListenerExactlyOnce() throws Exception {
@@ -243,6 +248,33 @@ class SettlementPipelineIT {
         assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
         assertThat(ledgerFolder.fold(event)).isFalse();
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void retainsAnUnconfirmedBonusAuthorizationAndProjectsItOnceOnReplay() throws Exception {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(6);
+        UUID orgId = seedWallet(at);
+        String wallet = GatewayRedisKeys.wallet(orgId);
+        String bonus = GatewayRedisKeys.bonus(orgId);
+        redis.opsForHash().put(wallet, "cash_micros", "750000");
+        redis.opsForZSet().add(bonus, "__loaded_v2__", 0);
+        var event = new TransactionTemplate(transactionManager).execute(status -> creditOutbox.append(
+                orgId, "signup-bonus:" + orgId, 0L, 500L, BillingMoneyEvent.CreditSource.SIGNUP, null, at));
+        UUID eventId = event.eventId();
+        outboxRepository.deleteUpTo(UuidV7.next(), 100);
+        outboxRepository.deleteOlderThan(at.plusSeconds(1));
+        assertThat(outboxRepository.exists(eventId)).isTrue();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().bonusBalanceMicros()).isZero();
+
+        reconciliation.redeliver();
+        assertThat(awaitLedgerRows(orgId, 1)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().bonusBalanceMicros()).isEqualTo(500L);
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.bonusItem(eventId), "remaining_micros")).isEqualTo("500");
+        assertThat(redis.opsForHash().get(wallet, "cash_micros")).isEqualTo("750000");
+        assertThat(grantRepository.findById(eventId).orElseThrow().grantSource()).isEqualTo(GrantSource.SIGNUP);
+        outboxRepository.deleteUpTo(UuidV7.next(), 100);
+        assertThat(outboxRepository.exists(eventId)).isFalse();
     }
 
     private BillingMoneyEvent recordPendingDebit(UUID orgId, OffsetDateTime at) throws Exception {

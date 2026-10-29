@@ -3,6 +3,8 @@ package app.pagefault.hyperllm.console;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.crypto.ApiKeyGenerator;
 import app.pagefault.hyperllm.common.crypto.HmacSha256;
+import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
+import java.time.OffsetDateTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.Cookie;
@@ -74,6 +76,9 @@ class ConsoleFlowIntegrationTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
+    @Autowired
+    private OutboxEventRepository outbox;
+
     @Test
     void supportsFullRegisterRefreshReplayProtectionRbacKeysWalletAndPlaygroundFlow() throws Exception {
         String email = "alice-" + UUID.randomUUID().toString().substring(0, 8) + "@example.com";
@@ -105,13 +110,15 @@ class ConsoleFlowIntegrationTest {
         assertThat(rt1).isNotNull();
         assertThat(rt1.isHttpOnly()).isTrue();
 
-        // Wallet initialized with signup bonus and synced to Redis
+        // The signup transaction authorizes the bonus without applying it before delivery.
         mockMvc.perform(get("/api/v1/orgs/{orgId}/wallet", orgId)
                         .header("Authorization", "Bearer " + accessToken))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.bonusBalanceMicros").value(5_000_000));
-        assertThat(redisTemplate.opsForHash().get(GatewayRedisKeys.wallet(UUID.fromString(orgId)), "general_bonus_micros"))
-                .isEqualTo("5000000");
+                .andExpect(jsonPath("$.bonusBalanceMicros").value(0));
+        assertThat(redisTemplate.hasKey(GatewayRedisKeys.wallet(UUID.fromString(orgId)))).isFalse();
+        assertThat(outbox.listUnconfirmedCredits(OffsetDateTime.now().plusSeconds(1), 100))
+                .filteredOn(event -> event.aggregateId().equals(orgId)).singleElement()
+                .satisfies(event -> assertThat(event.type()).isEqualTo("BONUS_GRANT"));
 
         // Refresh token rotation
         MvcResult refreshRes = mockMvc.perform(post("/api/v1/auth/refresh").cookie(rt1))

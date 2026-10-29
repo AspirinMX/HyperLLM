@@ -186,9 +186,16 @@ public class EntitlementMirrorService {
                                 return blockedRebuild(orgId, signal);
                             }
                             List<String> keys = List.of(GatewayRedisKeys.wallet(orgId),
-                                    GatewayRedisKeys.pack(orgId, modelCode), GatewayRedisKeys.bonus(orgId));
-                            return redisTemplate.execute(loadScript, keys, args).next()
-                                    .doOnNext(raw -> recordRebuildDelta(text(raw))).thenReturn(true);
+                                    GatewayRedisKeys.pack(orgId, modelCode), GatewayRedisKeys.bonus(orgId),
+                                    GatewayRedisKeys.ledgerPosition(orgId));
+                            return redisTemplate.execute(loadScript, keys, args).next().flatMap(raw -> {
+                                List<String> result = text(raw);
+                                if ("STALE_CREDIT".equals(result.getFirst())) {
+                                    return Mono.error(new BillingAdmissionException(ErrorCode.LEDGER_BACKLOG, 1));
+                                }
+                                recordRebuildDelta(result);
+                                return Mono.just(true);
+                            });
                         })))).then();
     }
 
@@ -236,7 +243,7 @@ public class EntitlementMirrorService {
 
     private List<String> buildLoadArguments(UUID orgId, String modelCode) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        Wallet wallet = walletRepository.findByOrgId(orgId).orElse(null);
+        Wallet wallet = walletRepository.findByOrgId(orgId).orElseThrow();
         Organization organization = organizationRepository.findById(orgId).orElse(null);
         String orgStatus = organization == null ? "ACTIVE" : organization.status().name();
         List<ResourcePack> packs = packRepository.listConsumableByOrgAndModel(orgId, modelCode, now);
@@ -244,14 +251,14 @@ public class EntitlementMirrorService {
 
         List<String> args = new ArrayList<>();
         args.add(String.valueOf(properties.getCache().getSlidingTtlSeconds() * 1000L));
-        args.add((wallet == null ? "0" : String.valueOf(wallet.cashBalanceMicros())) + "|0|" + orgStatus);
+        args.add(wallet.cashBalanceMicros() + "|0|" + orgStatus + "|" + wallet.version());
         args.add(String.valueOf(packs.size()));
         for (ResourcePack pack : packs) {
             args.add(pack.id() + "|" + pack.remainingUnits() + "|0|" + pack.unitType() + "|"
                     + epochMillis(pack.expiresAt()));
         }
         long mirroredMicros = grants.stream().mapToLong(BonusGrant::remainingMicros).sum();
-        long unmirrored = wallet == null ? 0L : Math.max(0L, wallet.bonusBalanceMicros() - mirroredMicros);
+        long unmirrored = Math.max(0L, wallet.bonusBalanceMicros() - mirroredMicros);
 
         List<String> grantArgs = new ArrayList<>();
         for (BonusGrant grant : grants) {

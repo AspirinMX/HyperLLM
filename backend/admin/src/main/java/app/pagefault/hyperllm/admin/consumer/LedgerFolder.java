@@ -3,9 +3,11 @@ package app.pagefault.hyperllm.admin.consumer;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
+import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
 import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
+import app.pagefault.hyperllm.domain.model.enums.GrantSource;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
@@ -50,6 +52,7 @@ public class LedgerFolder {
     private final OutboxEventRepository outboxRepository;
     private final AuditLogRepository auditLogRepository;
     private final DSLContext dsl;
+    private final WalletCreditProjection credits;
 
     public enum RepairResult { ADJUSTED, ALREADY_RESOLVED, IN_DELIVERY }
 
@@ -58,14 +61,15 @@ public class LedgerFolder {
     /** @return true when this call folded the event, false when it had already been resolved */
     @Transactional
     public boolean fold(BillingMoneyEvent event) {
-        lockWallet(event.orgId());
-        return !writtenOff(event.eventId(), event.occurredAt()) && foldLocked(event, ledgerType(event.eventType()));
+        long version = lockWallet(event.orgId());
+        return !writtenOff(event.eventId(), event.occurredAt())
+                && foldLocked(event, ledgerType(event.eventType()), version);
     }
 
     /** Uses the original event identity and its exact applied deltas, including the batch legs. */
     @Transactional(timeout = 10)
     public RepairResult repair(BillingMoneyEvent event) {
-        lockWallet(event.orgId());
+        long version = lockWallet(event.orgId());
         UUID id = event.eventId();
         OffsetDateTime at = event.occurredAt();
         if (resolved(id, at)) {
@@ -74,7 +78,7 @@ public class LedgerFolder {
         if (enteredDelivery(id)) {
             return RepairResult.IN_DELIVERY;
         }
-        if (!foldLocked(event, LedgerType.ADJUST)) {
+        if (!foldLocked(event, LedgerType.ADJUST, version)) {
             return RepairResult.ALREADY_RESOLVED;
         }
         audit(event.orgId(), id, at, "billing.reconcile.adjust");
@@ -116,9 +120,9 @@ public class LedgerFolder {
                 .where(AUDIT_LOGS.ID.eq(id).and(AUDIT_LOGS.CREATED_AT.eq(at)).and(AUDIT_LOGS.ACTION.eq(WRITE_OFF))));
     }
 
-    private void lockWallet(UUID orgId) {
-        walletRepository.findByOrgIdForUpdate(orgId)
-                .orElseThrow(() -> new IllegalStateException("Wallet is missing for " + orgId));
+    private long lockWallet(UUID orgId) {
+        return walletRepository.findByOrgIdForUpdate(orgId)
+                .orElseThrow(() -> new IllegalStateException("Wallet is missing for " + orgId)).version();
     }
 
     private void audit(UUID orgId, UUID id, OffsetDateTime at, String action) {
@@ -126,7 +130,7 @@ public class LedgerFolder {
                 "BILLING_EVENT", id.toString(), null, null, null, at));
     }
 
-    private boolean foldLocked(BillingMoneyEvent event, LedgerType type) {
+    private boolean foldLocked(BillingMoneyEvent event, LedgerType type, long version) {
         OffsetDateTime at = event.occurredAt();
         boolean inserted = ledgerRepository.insertIdempotent(new WalletLedgerEntry(
                 event.eventId(),
@@ -151,6 +155,14 @@ public class LedgerFolder {
                 event.settledAfterReclaim()));
         if (!inserted) {
             return false;
+        }
+
+        if (event.creditSource() != null && event.eventType() == BillingMoneyEvent.EventType.BONUS_GRANT) {
+            long amount = event.bonusDeltaMicros();
+            GrantSource source = event.creditSource() == BillingMoneyEvent.CreditSource.SIGNUP
+                    ? GrantSource.SIGNUP : GrantSource.ADMIN_GRANT;
+            grantRepository.insert(new BonusGrant(event.eventId(), event.orgId(), source, null, null, null,
+                    amount, amount, null, EntitlementStatus.ACTIVE, 0L, at, at));
         }
 
         long expiredBonusConsumed = 0L;
@@ -194,6 +206,9 @@ public class LedgerFolder {
                 event.eventId(),
                 at)) {
             throw new IllegalStateException("Wallet disappeared during the fold for " + event.eventId());
+        }
+        if (event.creditSource() != null) {
+            credits.apply(event, Math.incrementExact(version));
         }
         return true;
     }

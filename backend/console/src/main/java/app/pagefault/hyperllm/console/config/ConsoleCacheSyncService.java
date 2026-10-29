@@ -2,7 +2,6 @@ package app.pagefault.hyperllm.console.config;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.cache.SandboxTokenPayload;
-import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,7 +12,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.Collection;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -82,21 +80,6 @@ public class ConsoleCacheSyncService {
                 redisTemplate.delete(keys);
             } catch (Exception ex) {
                 log.warn("Failed to evict {} Redis API key cache entries", keys.size(), ex);
-            }
-        });
-    }
-
-    public void syncWalletAfterCommit(Wallet wallet, String orgStatus) {
-        afterCommitRunner.runAfterCommit(() -> {
-            try {
-                String key = GatewayRedisKeys.wallet(wallet.orgId());
-                redisTemplate.opsForHash().putAll(key, Map.of(
-                        "cash_micros", String.valueOf(wallet.cashBalanceMicros()),
-                        "general_bonus_micros", String.valueOf(wallet.bonusBalanceMicros()),
-                        "status", orgStatus
-                ));
-            } catch (Exception ex) {
-                log.warn("Failed to sync Redis wallet cache for org {}", wallet.orgId(), ex);
             }
         });
     }

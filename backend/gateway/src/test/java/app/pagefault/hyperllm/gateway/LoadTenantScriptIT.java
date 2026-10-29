@@ -110,6 +110,22 @@ class LoadTenantScriptIT {
                 .isEqualTo(1.0d);
     }
 
+    @Test
+    void rejectsAColdSnapshotTakenBeforeTheLastAuthorizedCredit() {
+        UUID orgId = UUID.randomUUID();
+        var keys = List.of(GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.pack(orgId, "gpt"),
+                GatewayRedisKeys.bonus(orgId), GatewayRedisKeys.ledgerPosition(orgId));
+        redis.opsForHash().put(keys.getLast(), "credit_version", "9007199254740993").block();
+        var args = new ArrayList<>(List.of("300000", "17|0|ACTIVE|9007199254740992", "0", "0",
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix()));
+
+        assertThat(redis.execute(script, keys, args).blockLast()).containsExactly("STALE_CREDIT");
+        assertThat(redis.hasKey(keys.getFirst()).block()).isFalse();
+        args.set(1, "41|0|ACTIVE|9007199254740993");
+        redis.execute(script, keys, args).blockLast();
+        assertThat(redis.opsForHash().get(keys.getFirst(), "cash_micros").block()).isEqualTo("41");
+    }
+
     private List<String> load(UUID orgId, String modelCode, UUID packId, UUID grantId,
                       long cash, long packUnits, long grantMicros, long expiresAt) {
         List<String> keys = List.of(

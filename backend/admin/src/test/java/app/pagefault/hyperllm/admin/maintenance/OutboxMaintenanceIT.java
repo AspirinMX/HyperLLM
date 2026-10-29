@@ -146,6 +146,11 @@ class OutboxMaintenanceIT {
         }
 
         @Override
+        public List<OutboxEvent> listUnconfirmedCredits(OffsetDateTime cutoff, int limit) {
+            return List.of();
+        }
+
+        @Override
         public int deleteUpTo(UUID watermark, int limit) {
             deletedUpTo.add(watermark);
             int removed = Math.min(remainingRows, limit);

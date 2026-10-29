@@ -62,7 +62,11 @@ public class OutboxRedeliveryJob {
 
     @Scheduled(fixedDelayString = "${hyperllm.outbox.redelivery-delay:PT30S}")
     public void redeliver() {
-        advance(OffsetDateTime.now(ZoneOffset.UTC));
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        advance(now);
+        for (OutboxEvent credit : outboxEventRepository.listUnconfirmedCredits(now.minus(REPAIR_LINK), batchSize)) {
+            replay(credit.id(), credit.aggregateId(), credit.payload());
+        }
     }
 
     // Supplying the time directly lets tests exercise every age boundary without sleeps.
@@ -147,7 +151,11 @@ public class OutboxRedeliveryJob {
                     orgId, eventId);
             return;
         }
-        kafkaTemplate.send(KafkaTopics.CDC_BILLING, orgId.toString(), payload.orElseThrow())
+        replay(eventId, orgId.toString(), payload.orElseThrow());
+    }
+
+    private void replay(UUID eventId, String orgId, String payload) {
+        kafkaTemplate.send(KafkaTopics.CDC_BILLING, orgId, payload)
                 .orTimeout(5, TimeUnit.SECONDS).whenComplete((ignored, ex) -> {
                     if (ex != null) {
                         log.error("P1 billing partition replay failed for org={} event={}", orgId, eventId, ex);

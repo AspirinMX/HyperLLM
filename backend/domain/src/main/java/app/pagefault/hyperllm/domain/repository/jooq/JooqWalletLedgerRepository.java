@@ -11,6 +11,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.springframework.stereotype.Repository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 import static app.pagefault.hyperllm.domain.jooq.Tables.WALLET_LEDGER;
@@ -47,6 +48,13 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 .onConflictDoNothing()
                 .execute();
         return inserted == 1;
+    }
+
+    @Override
+    public Optional<UUID> findFirstByRequestKey(UUID orgId, String idempotencyKey) {
+        return dsl.select(WALLET_LEDGER.ID).from(WALLET_LEDGER)
+                .where(WALLET_LEDGER.ORG_ID.eq(orgId).and(WALLET_LEDGER.IDEMPOTENCY_KEY.eq(idempotencyKey)))
+                .orderBy(WALLET_LEDGER.CREATED_AT.asc()).limit(1).fetchOptional(WALLET_LEDGER.ID);
     }
 
     @Override

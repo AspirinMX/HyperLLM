@@ -87,6 +87,7 @@ class AdminFlowIntegrationTest {
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private StringRedisTemplate redisTemplate;
+    @Autowired private BillingSettlementConsumer billingConsumer;
     @Autowired private UserRepository userRepository;
     @Autowired private CustomerTierRepository tierRepository;
     @Autowired private OrganizationRepository organizationRepository;
@@ -251,18 +252,25 @@ class AdminFlowIntegrationTest {
         ));
         walletRepository.insert(new Wallet(orgId, 0L, 0L, 0L, 0L, 0L, 0L, null, 0L, now));
 
-        mockMvc.perform(post("/api/v1/admin/orgs/{orgId}/wallet/topup", orgId)
+        String walletKey = GatewayRedisKeys.wallet(orgId);
+        redisTemplate.opsForHash().putAll(walletKey, java.util.Map.of("cash_micros", "0", "status", "ACTIVE"));
+        MvcResult topup = mockMvc.perform(post("/api/v1/admin/orgs/{orgId}/wallet/topup", orgId)
                         .header("Authorization", "Bearer " + adminJwt)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"topupType":"CASH","amountMicros":1000000,"idempotencyKey":"topup-1","description":"Seed"}
                                 """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.applied").value(true))
-                .andExpect(jsonPath("$.cashBalanceMicros").value(1_000_000));
+                .andExpect(status().isAccepted()).andReturn();
+        UUID creditId = UUID.fromString(objectMapper.readTree(topup.getResponse().getContentAsString())
+                .path("eventId").asText());
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isZero();
+        assertThat(redisTemplate.opsForHash().get(walletKey, "cash_micros")).isEqualTo("0");
 
-        assertThat(redisTemplate.opsForHash().get(GatewayRedisKeys.wallet(orgId), "cash_micros"))
-                .isEqualTo("1000000");
+        String authorization = ledgerFolder.recordedPayload(creditId).orElseThrow();
+        billingConsumer.onMessage(authorization, null);
+        billingConsumer.onMessage(authorization, null);
+        assertThat(redisTemplate.opsForHash().get(walletKey, "cash_micros")).isEqualTo("1000000");
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
 
         // Give the mirror something the database cannot know: a reservation still in flight.
         redisTemplate.opsForHash().put(GatewayRedisKeys.wallet(orgId), "loaded", "1");

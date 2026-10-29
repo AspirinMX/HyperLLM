@@ -33,8 +33,21 @@ public record BillingMoneyEvent(
         String allocationDetailJson,
         UUID holdId,
         boolean settledAfterReclaim,
-        String description
+        String description,
+        CreditSource creditSource
 ) {
+
+    /** Set by the durable credit producer. Older payloads keep their original fold behavior. */
+    public enum CreditSource { ADMIN, SIGNUP }
+
+    public BillingMoneyEvent(UUID eventId, EventType eventType, OffsetDateTime occurredAt, UUID orgId,
+                             UUID projectId, UUID apiKeyId, String idempotencyKey, long cashDeltaMicros,
+                             long bonusDeltaMicros, long packDeltaUnits, long shortfallMicros, List<Leg> legs,
+                             String allocationDetailJson, UUID holdId, boolean settledAfterReclaim, String description) {
+        this(eventId, eventType, occurredAt, orgId, projectId, apiKeyId, idempotencyKey, cashDeltaMicros,
+                bonusDeltaMicros, packDeltaUnits, shortfallMicros, legs, allocationDetailJson, holdId,
+                settledAfterReclaim, description, null);
+    }
 
     /** What kind of change this is; maps to the ledger row type on the consumer side. */
     public enum EventType {

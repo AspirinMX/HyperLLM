@@ -9,13 +9,15 @@ import app.pagefault.hyperllm.admin.dto.AdminDtos.UpdateOrgStatusRequest;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.id.UuidV7;
+import app.pagefault.hyperllm.common.idempotency.DuplicatePolicy;
+import app.pagefault.hyperllm.common.idempotency.Idempotent;
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
+import app.pagefault.hyperllm.domain.billing.WalletCreditOutbox;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
 import app.pagefault.hyperllm.domain.model.billing.Wallet;
-import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
-import app.pagefault.hyperllm.domain.model.enums.LedgerType;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.ApiKeyRepository;
@@ -28,8 +30,12 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
 
@@ -37,10 +43,13 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class AdminTenantAndBillingService {
 
+    private static final String TOPUP_AUTHORIZED = "WALLET.TOPUP_AUTHORIZED";
+
     private final OrganizationRepository organizationRepository;
     private final ApiKeyRepository apiKeyRepository;
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
+    private final WalletCreditOutbox walletCreditOutbox;
     private final AuditLogRepository auditLogRepository;
     private final AdminCacheSyncService cacheSync;
     private final ObjectMapper objectMapper;
@@ -72,69 +81,42 @@ public class AdminTenantAndBillingService {
         return toOrgDto(organizationRepository.findById(orgId).orElseThrow());
     }
 
+    @Idempotent(namespace = "admin-topup", key = "#p0 + ':' + #p3.idempotencyKey().trim()",
+            onDuplicate = DuplicatePolicy.REPLAY)
     @Transactional
     public AdminWalletTopupResponse topupWallet(
-            UUID orgId,
-            UUID adminId,
-            String clientIp,
-            AdminWalletTopupRequest req
+            UUID orgId, UUID adminId, String clientIp, AdminWalletTopupRequest req
     ) {
-        Organization org = organizationRepository.findById(orgId)
+        Wallet wallet = walletRepository.findByOrgIdForUpdate(orgId)
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
-        Wallet current = walletRepository.findByOrgId(orgId)
-                .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND, "Wallet not found for org"));
-
-        boolean isCash = req.topupType() == TopupType.CASH;
-        long cashDelta = isCash ? req.amountMicros() : 0L;
-        long bonusDelta = isCash ? 0L : req.amountMicros();
-        long expectedCashAfter = current.cashBalanceMicros() + cashDelta;
-        long expectedBonusAfter = current.bonusBalanceMicros() + bonusDelta;
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-
-        boolean inserted = walletLedgerRepository.insertIdempotent(new WalletLedgerEntry(
-                UuidV7.next(),
-                orgId,
-                null,
-                null,
-                isCash ? LedgerType.RECHARGE : LedgerType.BONUS_GRANT,
-                "admin-topup:" + orgId + ":" + req.idempotencyKey().trim(),
-                cashDelta,
-                bonusDelta,
-                0L,
-                expectedCashAfter,
-                expectedBonusAfter,
-                null,
-                null,
-                null,
-                null,
-                req.description() == null ? "Admin Phase 1 test topup" : req.description().trim(),
-                now,
-                null
-        ));
-
-        if (inserted) {
-            walletRepository.applyDelta(
-                    orgId,
-                    cashDelta,
-                    bonusDelta,
-                    cashDelta,
-                    bonusDelta,
-                    0L,
-                    0L,
-                    now
-            );
-            Wallet updated = walletRepository.findByOrgId(orgId).orElseThrow();
-            cacheSync.incrementWalletBalanceAfterCommit(orgId, cashDelta, bonusDelta, updated, org.status().name());
-            recordAudit(adminId, orgId, "WALLET.ADMIN_TOPUP", clientIp,
-                    Map.of("type", req.topupType().name(), "amountMicros", req.amountMicros()), now);
-            return new AdminWalletTopupResponse(
-                    orgId, true, updated.cashBalanceMicros(), updated.bonusBalanceMicros(), updated.version()
-            );
+        String requestKey = req.idempotencyKey().trim();
+        String requestHash = hashRequestKey(requestKey);
+        // The durable guard survives Redis loss, API idempotency expiry and outbox purges.
+        var existing = auditLogRepository.findFirstResourceEventId(orgId, TOPUP_AUTHORIZED, requestHash)
+                .or(() -> walletLedgerRepository.findFirstByRequestKey(orgId, "admin-topup:" + orgId + ":" + requestKey));
+        if (existing.isPresent()) {
+            return new AdminWalletTopupResponse(orgId, existing.orElseThrow());
         }
 
-        return new AdminWalletTopupResponse(
-                orgId, false, current.cashBalanceMicros(), current.bonusBalanceMicros(), current.version()
-        );
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        boolean cash = req.topupType() == TopupType.CASH;
+        // Reject an amount that cannot be represented in the current checkpoint.
+        Math.addExact(cash ? wallet.cashBalanceMicros() : wallet.bonusBalanceMicros(), req.amountMicros());
+        var event = walletCreditOutbox.append(orgId, "admin-credit:" + orgId + ":" + requestHash,
+                cash ? req.amountMicros() : 0L, cash ? 0L : req.amountMicros(),
+                BillingMoneyEvent.CreditSource.ADMIN, req.description(), now);
+        auditLogRepository.insert(new AuditLogEntry(event.eventId(), ActorType.ADMIN, adminId, orgId,
+                TOPUP_AUTHORIZED, "BILLING_EVENT", requestHash, null, clientIp, null, event.occurredAt()));
+        return new AdminWalletTopupResponse(orgId, event.eventId());
+    }
+
+    private static String hashRequestKey(String requestKey) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(requestKey.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 unavailable", ex);
+        }
     }
 
     private void recordAudit(

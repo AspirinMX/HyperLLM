@@ -31,7 +31,9 @@ public interface OutboxEventRepository {
     /** Advances the watermark; it never moves backwards. */
     void advanceWatermark(UUID eventId);
 
-    /** Deletes up to {@code limit} rows whose id is at or below the watermark. */
+    List<OutboxEvent> listUnconfirmedCredits(OffsetDateTime cutoff, int limit);
+
+    /** Deletes confirmed rows at or below the watermark, up to {@code limit}. */
     int deleteUpTo(UUID watermark, int limit);
 
     int deleteOlderThan(OffsetDateTime cutoff);

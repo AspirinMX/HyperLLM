@@ -11,6 +11,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.springframework.stereotype.Repository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 import static app.pagefault.hyperllm.domain.jooq.Tables.AUDIT_LOGS;
@@ -36,6 +37,14 @@ public class JooqAuditLogRepository implements AuditLogRepository {
                 .set(AUDIT_LOGS.TRACE_ID, entry.traceId())
                 .set(AUDIT_LOGS.CREATED_AT, entry.createdAt())
                 .execute();
+    }
+
+    @Override
+    public Optional<UUID> findFirstResourceEventId(UUID orgId, String action, String resourceId) {
+        return dsl.select(AUDIT_LOGS.ID).from(AUDIT_LOGS)
+                .where(AUDIT_LOGS.ORG_ID.eq(orgId).and(AUDIT_LOGS.ACTION.eq(action))
+                        .and(AUDIT_LOGS.RESOURCE_ID.eq(resourceId)))
+                .orderBy(AUDIT_LOGS.CREATED_AT.asc()).limit(1).fetchOptional(AUDIT_LOGS.ID);
     }
 
     @Override

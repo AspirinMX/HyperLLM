@@ -298,10 +298,7 @@ public final class AdminDtos {
 
     public record AdminWalletTopupResponse(
             UUID orgId,
-            boolean applied,
-            long cashBalanceMicros,
-            long bonusBalanceMicros,
-            long walletVersion
+            UUID eventId
     ) {
     }
 }

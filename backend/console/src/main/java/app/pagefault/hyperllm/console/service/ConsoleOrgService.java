@@ -90,7 +90,6 @@ public class ConsoleOrgService {
 
         Wallet wallet = new Wallet(orgId, 0L, 0L, 0L, 0L, 0L, 0L, null, 0L, now);
         walletRepository.insert(wallet);
-        cacheSync.syncWalletAfterCommit(wallet, OrgStatus.ACTIVE.name());
         return toDto(org);
     }
 
