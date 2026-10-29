@@ -1,6 +1,6 @@
 -- Single terminal transition for a reservation. Expiry, explicit release and normal settlement
 -- contend on the same hold/done keys. The event records only deltas this invocation applied.
--- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, event owner hash, proof
+-- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, owner hash, proof, org waiting set
 -- ARGV: holdId, nowMs, occurredAt, mode, charges, detail prefix, done TTL ms, evidence TTL ms,
 --       pack prefix, bonus prefix, legacy grant id
 local holdId, now, at, mode = ARGV[1], tonumber(ARGV[2]), ARGV[3], ARGV[4]
@@ -193,6 +193,7 @@ if payload ~= '' then
     redis.call('SET', KEYS[5], payload, 'PX', ARGV[8])
     redis.call('HSET', KEYS[8], holdId, hold[1] .. '|' .. at)
     redis.call('ZADD', KEYS[6], now, holdId)
+    redis.call('SADD', KEYS[10], holdId)
     local produced = redis.call('HGET', KEYS[7], 'produced')
     if not produced or produced < holdId then
         redis.call('HSET', KEYS[7], 'produced', holdId, 'since', at)

@@ -187,10 +187,11 @@ public class EntitlementMirrorService {
                             }
                             List<String> keys = List.of(GatewayRedisKeys.wallet(orgId),
                                     GatewayRedisKeys.pack(orgId, modelCode), GatewayRedisKeys.bonus(orgId),
-                                    GatewayRedisKeys.ledgerPosition(orgId));
+                                    GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settleWaiting(orgId));
                             return redisTemplate.execute(loadScript, keys, args).next().flatMap(raw -> {
                                 List<String> result = text(raw);
-                                if ("STALE_CREDIT".equals(result.getFirst())) {
+                                if ("UNFOLDED_DEBIT".equals(result.getFirst())
+                                        || "STALE_CHECKPOINT".equals(result.getFirst())) {
                                     return Mono.error(new BillingAdmissionException(ErrorCode.LEDGER_BACKLOG, 1));
                                 }
                                 recordRebuildDelta(result);

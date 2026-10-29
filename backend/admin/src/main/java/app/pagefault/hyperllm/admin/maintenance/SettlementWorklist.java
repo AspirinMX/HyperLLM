@@ -22,6 +22,9 @@ public class SettlementWorklist {
     private static final RedisScript<Long> CHECK_PROOF =
             RedisScript.of(new ClassPathResource("lua/settlement_check_proof.lua"), Long.class);
 
+    private static final RedisScript<Long> FENCE_SNAPSHOT = RedisScript.of(new ClassPathResource(
+            "lua/settlement_fence_snapshot.lua"), Long.class);
+
     private final StringRedisTemplate redis;
 
     record Owner(UUID orgId, OffsetDateTime occurredAt) {
@@ -53,12 +56,19 @@ public class SettlementWorklist {
         update(id, Long.toString(at.toInstant().toEpochMilli()));
     }
 
+    /** Publishes the minimum checkpoint version before committing a tracked debit. */
+    public void fenceSnapshot(UUID orgId, UUID id, long version) {
+        redis.execute(FENCE_SNAPSHOT, List.of(GatewayRedisKeys.settleWaiting(orgId),
+                GatewayRedisKeys.ledgerPosition(orgId)), id.toString(), Long.toString(version));
+    }
+
     public void resolve(String id) {
         update(id, "");
     }
 
     private void update(String id, String next) {
         redis.execute(UPDATE, List.of(GatewayRedisKeys.settlePending(), GatewayRedisKeys.settlePendingOwners(),
-                GatewayRedisKeys.settleEvent(id), GatewayRedisKeys.settleProof(id)), id, next);
+                GatewayRedisKeys.settleEvent(id), GatewayRedisKeys.settleProof(id)), id, next,
+                GatewayRedisKeys.settleWaitingPrefix());
     }
 }

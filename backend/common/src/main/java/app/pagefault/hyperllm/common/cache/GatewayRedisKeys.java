@@ -110,6 +110,15 @@ public final class GatewayRedisKeys {
         return "gw:settle:pending";
     }
 
+    /** Unconfirmed debits that can make a cold checkpoint unsafe for this organization. */
+    public static String settleWaiting(UUID orgId) {
+        return settleWaitingPrefix() + orgId;
+    }
+
+    public static String settleWaitingPrefix() {
+        return "gw:settle:waiting:";
+    }
+
     /** Organisation and occurrence time of each unconfirmed settlement, even if its copy expires. */
     public static String settlePendingOwners() {
         return "gw:settle:owners";

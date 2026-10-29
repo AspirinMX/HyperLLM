@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.admin.consumer;
 
+import app.pagefault.hyperllm.admin.maintenance.SettlementWorklist;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
@@ -26,7 +27,6 @@ import java.util.UUID;
 
 import static app.pagefault.hyperllm.domain.jooq.Tables.AUDIT_LOGS;
 import static app.pagefault.hyperllm.domain.jooq.Tables.OUTBOX_EVENTS;
-import static app.pagefault.hyperllm.domain.jooq.Tables.WALLETS;
 import static app.pagefault.hyperllm.domain.jooq.Tables.WALLET_LEDGER;
 
 /**
@@ -53,6 +53,7 @@ public class LedgerFolder {
     private final AuditLogRepository auditLogRepository;
     private final DSLContext dsl;
     private final WalletCreditProjection credits;
+    private final SettlementWorklist worklist;
 
     public enum RepairResult { ADJUSTED, ALREADY_RESOLVED, IN_DELIVERY }
 
@@ -88,14 +89,14 @@ public class LedgerFolder {
     /** Audits the write-off and fences late delivery using the same wallet lock as the fold. */
     @Transactional
     public boolean writeOff(UUID orgId, UUID id, OffsetDateTime at) {
-        lockWallet(orgId);
+        long version = lockWallet(orgId);
         if (resolved(id, at)) {
             return false;
         }
-        dsl.update(WALLETS).set(WALLETS.LAST_APPLIED_EVENT_ID, id)
-                .where(WALLETS.ORG_ID.eq(orgId))
-                .and(WALLETS.LAST_APPLIED_EVENT_ID.isNull().or(WALLETS.LAST_APPLIED_EVENT_ID.lt(id)))
-                .execute();
+        if (!walletRepository.applyEventDelta(orgId, 0L, 0L, 0L, 0L, 0L, 0L, id, at)) {
+            throw new IllegalStateException("Cannot close settlement " + id);
+        }
+        worklist.fenceSnapshot(orgId, id, Math.incrementExact(version));
         audit(orgId, id, at, WRITE_OFF);
         return true;
     }
@@ -209,6 +210,8 @@ public class LedgerFolder {
         }
         if (event.creditSource() != null) {
             credits.apply(event, Math.incrementExact(version));
+        } else if (event.eventType() == BillingMoneyEvent.EventType.CONSUME) {
+            worklist.fenceSnapshot(event.orgId(), event.eventId(), Math.incrementExact(version));
         }
         return true;
     }

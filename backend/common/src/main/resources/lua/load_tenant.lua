@@ -5,7 +5,7 @@
 -- same rule runs the other way, which is why a delta write is refused on a missing key; together
 -- they guarantee that a rebuild and a debit can never touch the same key.
 --
--- KEYS[1] wallet hash, [2] pack zset of the model, [3] bonus zset, [4] optional ledger position
+-- KEYS[1] wallet hash, [2] pack zset, [3] bonus zset, [4] ledger position, [5] unresolved debits
 -- ARGV[1] ttl millis
 -- ARGV[2] wallet "cash|heldCash|status|version"
 -- ARGV[3] pack count, then one "id|remaining|held|unitType|expiresAt" per pack
@@ -57,10 +57,16 @@ end
 -- batches, and "has a wallet" must therefore not be read as "is fully mirrored".
 local wallet = split(ARGV[2])
 local version = wallet[4] or '0'
+if KEYS[5] and redis.call('SCARD', KEYS[5]) > 0 then
+    return {'UNFOLDED_DEBIT'}
+end
 if KEYS[4] then
-    local floor = redis.call('HGET', KEYS[4], 'credit_version') or '0'
-    if #version < #floor or (#version == #floor and version < floor) then
-        return {'STALE_CREDIT'}
+    local function behind(field)
+        local floor = redis.call('HGET', KEYS[4], field) or '0'
+        return #version < #floor or (#version == #floor and version < floor)
+    end
+    if behind('credit_version') or behind('debit_version') then
+        return {'STALE_CHECKPOINT'}
     end
 end
 observe('cash', redis.call('HGET', KEYS[1], 'cash_micros'), wallet[1])

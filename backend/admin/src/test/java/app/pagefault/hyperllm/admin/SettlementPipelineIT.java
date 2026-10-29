@@ -229,6 +229,8 @@ class SettlementPipelineIT {
         assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
         assertThat(ledgerFolder.fold(event)).isFalse();
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(750_000L);
+        assertThat(redis.hasKey(GatewayRedisKeys.settleWaiting(orgId))).isFalse();
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.ledgerPosition(orgId), "debit_version")).isEqualTo("1");
     }
 
     @Test
@@ -289,6 +291,7 @@ class SettlementPipelineIT {
         redis.opsForHash().putAll(wallet, Map.of("cash_micros", "750000", "ledger_generation", key));
         redis.opsForValue().set(GatewayRedisKeys.settleProof(key), objectMapper.writeValueAsString(Map.of(wallet, key)));
         redis.opsForZSet().add(GatewayRedisKeys.settlePending(), key, at.toInstant().toEpochMilli());
+        redis.opsForSet().add(GatewayRedisKeys.settleWaiting(orgId), key);
         return event;
     }
 

@@ -111,17 +111,25 @@ class LoadTenantScriptIT {
     }
 
     @Test
-    void rejectsAColdSnapshotTakenBeforeTheLastAuthorizedCredit() {
+    void rejectsColdCheckpointsThatCouldLoseACreditOrRestoreASpentDebit() {
         UUID orgId = UUID.randomUUID();
         var keys = List.of(GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.pack(orgId, "gpt"),
-                GatewayRedisKeys.bonus(orgId), GatewayRedisKeys.ledgerPosition(orgId));
-        redis.opsForHash().put(keys.getLast(), "credit_version", "9007199254740993").block();
+                GatewayRedisKeys.bonus(orgId), GatewayRedisKeys.ledgerPosition(orgId),
+                GatewayRedisKeys.settleWaiting(orgId));
+        redis.opsForHash().put(keys.get(3), "credit_version", "9007199254740993").block();
         var args = new ArrayList<>(List.of("300000", "17|0|ACTIVE|9007199254740992", "0", "0",
                 GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix()));
 
-        assertThat(redis.execute(script, keys, args).blockLast()).containsExactly("STALE_CREDIT");
+        assertThat(redis.execute(script, keys, args).blockLast()).containsExactly("STALE_CHECKPOINT");
         assertThat(redis.hasKey(keys.getFirst()).block()).isFalse();
         args.set(1, "41|0|ACTIVE|9007199254740993");
+        redis.opsForSet().add(keys.getLast(), "pending-debit").block();
+        assertThat(redis.execute(script, keys, args).blockLast()).containsExactly("UNFOLDED_DEBIT");
+        assertThat(redis.hasKey(keys.getFirst()).block()).isFalse();
+        redis.opsForSet().remove(keys.getLast(), "pending-debit").block();
+        redis.opsForHash().put(keys.get(3), "debit_version", "9007199254740994").block();
+        assertThat(redis.execute(script, keys, args).blockLast()).containsExactly("STALE_CHECKPOINT");
+        args.set(1, "41|0|ACTIVE|9007199254740994");
         redis.execute(script, keys, args).blockLast();
         assertThat(redis.opsForHash().get(keys.getFirst(), "cash_micros").block()).isEqualTo("41");
     }
