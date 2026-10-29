@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.domain.repository;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
+import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -25,6 +26,9 @@ public interface BonusGrantRepository {
     List<BonusGrant> listActiveByOrg(UUID orgId);
 
     boolean decrementMicros(UUID grantId, long micros, OffsetDateTime updatedAt);
+
+    /** Applies a settled debit to its own batch. EXPIRED means expiry already booked the remainder. */
+    Optional<EntitlementStatus> foldConsumption(UUID orgId, UUID grantId, long micros, OffsetDateTime at);
 
     boolean revoke(UUID grantId, long expectedVersion, OffsetDateTime updatedAt);
 

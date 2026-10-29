@@ -1,9 +1,11 @@
 package app.pagefault.hyperllm.admin.consumer;
 
+import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
 import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
+import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
@@ -115,7 +117,7 @@ public class LedgerFolder {
     }
 
     private void lockWallet(UUID orgId) {
-        dsl.select(WALLETS.ORG_ID).from(WALLETS).where(WALLETS.ORG_ID.eq(orgId)).forUpdate().fetchOptional()
+        walletRepository.findByOrgIdForUpdate(orgId)
                 .orElseThrow(() -> new IllegalStateException("Wallet is missing for " + orgId));
     }
 
@@ -151,27 +153,40 @@ public class LedgerFolder {
             return false;
         }
 
+        long expiredBonusConsumed = 0L;
         for (BillingMoneyEvent.Leg leg : event.legs()) {
             if (leg.virtual() || leg.batchId() == null) {
                 // No batch row exists behind this leg; only the wallet snapshot moves.
                 continue;
             }
+            if (leg.type() == BillingMoneyEvent.LegType.BONUS && leg.micros() > 0L) {
+                EntitlementStatus status = grantRepository.foldConsumption(event.orgId(), leg.batchId(), leg.micros(), at)
+                        .orElseThrow(() -> batchDeltaFailure(event, leg));
+                if (status == EntitlementStatus.EXPIRED) {
+                    expiredBonusConsumed = Math.addExact(expiredBonusConsumed, leg.micros());
+                }
+                continue;
+            }
             boolean applied = switch (leg.type()) {
                 case PACK -> leg.units() == 0 || packRepository.decrementUnits(leg.batchId(), leg.units(), at);
-                case BONUS -> leg.micros() == 0 || grantRepository.decrementMicros(leg.batchId(), leg.micros(), at);
+                case BONUS -> leg.micros() == 0;
                 case CASH -> true;
             };
             if (!applied) {
-                throw new IllegalStateException("Cannot apply batch delta from event " + event.eventId()
-                        + " to batch " + leg.batchId());
+                throw batchDeltaFailure(event, leg);
             }
         }
 
+        // Expiry already debited this part of the batch. Reverse that portion in the ledger in
+        // the same transaction, leaving the effective change to the spendable snapshot at zero.
+        if (expiredBonusConsumed > 0L) {
+            restoreExpiredBonus(event, expiredBonusConsumed);
+        }
         Totals totals = Totals.of(event);
         if (!walletRepository.applyEventDelta(
                 event.orgId(),
                 event.cashDeltaMicros(),
-                event.bonusDeltaMicros(),
+                Math.addExact(event.bonusDeltaMicros(), expiredBonusConsumed),
                 totals.recharged(),
                 totals.granted(),
                 totals.consumedCash(),
@@ -181,6 +196,21 @@ public class LedgerFolder {
             throw new IllegalStateException("Wallet disappeared during the fold for " + event.eventId());
         }
         return true;
+    }
+
+    private static IllegalStateException batchDeltaFailure(BillingMoneyEvent event, BillingMoneyEvent.Leg leg) {
+        return new IllegalStateException("Cannot apply batch delta from event " + event.eventId()
+                + " to batch " + leg.batchId());
+    }
+
+    private void restoreExpiredBonus(BillingMoneyEvent event, long micros) {
+        if (!ledgerRepository.insertIdempotent(new WalletLedgerEntry(
+                UuidV7.next(), event.orgId(), event.projectId(), event.apiKeyId(), LedgerType.ADJUST,
+                "reverse-expiry:" + event.eventId(), 0L, micros, 0L, null, null, null,
+                refRequestId(event), null, null, "Reverse expiry for settled bonus consumption",
+                event.occurredAt(), event.holdId()))) {
+            throw new IllegalStateException("Cannot reverse expiry for " + event.eventId());
+        }
     }
 
     private static LedgerType ledgerType(BillingMoneyEvent.EventType type) {

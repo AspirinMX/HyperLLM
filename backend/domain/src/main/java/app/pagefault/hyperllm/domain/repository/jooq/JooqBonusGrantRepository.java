@@ -89,6 +89,22 @@ public class JooqBonusGrantRepository implements BonusGrantRepository {
     }
 
     @Override
+    public Optional<EntitlementStatus> foldConsumption(UUID orgId, UUID grantId, long micros, OffsetDateTime at) {
+        return dsl.update(BONUS_GRANTS)
+                .set(BONUS_GRANTS.REMAINING_MICROS, BONUS_GRANTS.REMAINING_MICROS.minus(micros))
+                .set(BONUS_GRANTS.STATUS, DSL.when(BONUS_GRANTS.STATUS.eq(EntitlementStatus.ACTIVE.name())
+                        .and(BONUS_GRANTS.REMAINING_MICROS.eq(micros)), EntitlementStatus.EXHAUSTED.name())
+                        .otherwise(BONUS_GRANTS.STATUS))
+                .set(BONUS_GRANTS.VERSION, BONUS_GRANTS.VERSION.plus(1))
+                .set(BONUS_GRANTS.UPDATED_AT, DSL.greatest(BONUS_GRANTS.UPDATED_AT, DSL.val(at)))
+                .where(BONUS_GRANTS.ID.eq(grantId).and(BONUS_GRANTS.ORG_ID.eq(orgId)))
+                .and(BONUS_GRANTS.STATUS.in(EntitlementStatus.ACTIVE.name(), EntitlementStatus.EXPIRED.name()))
+                .and(BONUS_GRANTS.REMAINING_MICROS.ge(micros))
+                .returningResult(BONUS_GRANTS.STATUS)
+                .fetchOptional(record -> EntitlementStatus.valueOf(record.value1()));
+    }
+
+    @Override
     public List<BonusGrant> listExpiredActive(OffsetDateTime at, int limit) {
         return dsl.selectFrom(BONUS_GRANTS)
                 .where(BONUS_GRANTS.STATUS.eq(EntitlementStatus.ACTIVE.name()))

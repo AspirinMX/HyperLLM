@@ -12,6 +12,9 @@ public interface WalletRepository {
 
     Optional<Wallet> findByOrgId(UUID orgId);
 
+    /** Acquires the wallet lock for the remainder of the calling transaction. */
+    Optional<Wallet> findByOrgIdForUpdate(UUID orgId);
+
     /** Cash and bonus of many organisations in one query, for list screens. */
     record Balance(long cashMicros, long bonusMicros) {
     }

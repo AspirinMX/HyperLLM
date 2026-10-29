@@ -1,6 +1,7 @@
 package app.pagefault.hyperllm.admin;
 
 import app.pagefault.hyperllm.admin.consumer.LedgerFolder;
+import app.pagefault.hyperllm.admin.maintenance.BatchExpiryJob;
 import app.pagefault.hyperllm.admin.maintenance.OutboxRedeliveryJob;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
@@ -12,6 +13,10 @@ import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.domain.model.auth.User;
 import app.pagefault.hyperllm.domain.model.billing.Wallet;
+import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
+import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
+import app.pagefault.hyperllm.domain.model.enums.GrantSource;
+import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import app.pagefault.hyperllm.domain.model.enums.UserStatus;
 import app.pagefault.hyperllm.domain.model.tenant.CustomerTier;
@@ -108,6 +113,8 @@ class SettlementPipelineIT {
     @Autowired private AuditLogRepository auditRepository;
     @Autowired private OutboxRedeliveryJob reconciliation;
     @Autowired private LedgerFolder ledgerFolder;
+    @Autowired private BonusGrantRepository grantRepository;
+    @Autowired private BatchExpiryJob expiryJob;
     @Autowired private StringRedisTemplate redis;
 
     @Test
@@ -152,6 +159,33 @@ class SettlementPipelineIT {
                 .isEqualTo(1L);
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros())
                 .isEqualTo(750_000L);
+    }
+
+    @Test
+    void foldsALateBonusDebitAfterExpiryWithoutExpiringTheSpentAmountTwice() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(now);
+        UUID grantId = UuidV7.next();
+        grantRepository.insert(new BonusGrant(grantId, orgId, GrantSource.SIGNUP, null, null, null,
+                500L, 500L, now.minusSeconds(1), EntitlementStatus.ACTIVE, 0L, now.minusMinutes(1), now));
+        assertThat(ledgerFolder.fold(new BillingMoneyEvent(UuidV7.next(), BillingMoneyEvent.EventType.BONUS_GRANT,
+                now.minusMinutes(1), orgId, null, null, null, 0L, 500L, 0L, 0L, List.of(),
+                null, null, false, null))).isTrue();
+        var debit = new BillingMoneyEvent(UuidV7.next(), BillingMoneyEvent.EventType.CONSUME,
+                now.minusSeconds(2), orgId, null, null, null, 0L, -150L, 0L, 0L,
+                List.of(BillingMoneyEvent.Leg.bonus(grantId, 150L)), null, null, false, null);
+
+        expiryJob.sweep();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().bonusBalanceMicros()).isZero();
+        assertThat(ledgerFolder.fold(debit)).isTrue();
+        assertThat(ledgerFolder.fold(debit)).isFalse();
+
+        var wallet = walletRepository.findByOrgId(orgId).orElseThrow();
+        assertThat(wallet.bonusBalanceMicros()).isZero();
+        assertThat(wallet.totalConsumedBonusMicros()).isEqualTo(150L);
+        assertThat(grantRepository.findById(grantId).orElseThrow().remainingMicros()).isEqualTo(350L);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .extracting(row -> row.bonusDeltaMicros()).containsExactlyInAnyOrder(500L, -500L, -150L, 150L);
     }
 
     @Test

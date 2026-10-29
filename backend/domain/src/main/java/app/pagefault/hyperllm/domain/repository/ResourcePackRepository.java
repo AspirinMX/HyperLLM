@@ -22,7 +22,7 @@ public interface ResourcePackRepository {
     List<ResourcePack> listConsumableByOrgAndModel(UUID orgId, String modelCode, OffsetDateTime at);
 
     /**
-     * Conditional atomic decrement: succeeds only when the pack is ACTIVE and holds enough units.
+     * Folds an applied debit when there are enough units, including delivery after batch expiry.
      */
     boolean decrementUnits(UUID packId, long units, OffsetDateTime updatedAt);
 

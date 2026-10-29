@@ -44,6 +44,14 @@ public class JooqWalletRepository implements WalletRepository {
     }
 
     @Override
+    public Optional<Wallet> findByOrgIdForUpdate(UUID orgId) {
+        return dsl.selectFrom(WALLETS)
+                .where(WALLETS.ORG_ID.eq(orgId))
+                .forUpdate()
+                .fetchOptional(this::toDomain);
+    }
+
+    @Override
     public java.util.Map<UUID, Balance> findBalancesByOrgIds(java.util.Collection<UUID> orgIds) {
         if (orgIds == null || orgIds.isEmpty()) {
             return java.util.Map.of();
