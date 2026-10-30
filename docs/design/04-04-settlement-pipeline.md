@@ -44,12 +44,13 @@
 
 ### 1.4 同一个写入口，两种提交方式
 
-三条改余额的路径（网关消耗、console 充值、admin 调账与对账修正）共用同一原语：
+消耗和发放共用事件契约及 `cdc.billing`。两者都在调用 Lua 前生成 `eventId`，重试复用原 ID。
 
-1. 确定 `eventId`（`UuidV7`，**必须在调用 Lua 之前生成，重试时复用**）。
-2. 应用变更：消耗路径由 Lua 原子完成（查标记 → 应用 delta → 发 `seq` → 写标记 → 续期）；发放路径由消费者用同一个 Lua 原语应用。
-3. 写 `outbox_events`，主键即 `eventId`，`ON CONFLICT DO NOTHING`。
-4. Debezium → `cdc.billing` → 消费者折叠账本。
+- 消耗由 Lua 原子应用实扣 delta 并留存事件，随后异步写入 outbox。
+- 人工充值和注册赠金在原业务事务中追加 outbox 授权。消费者持钱包行锁写账本和批次，并在提交前用 Lua 应用 Redis delta。Redis 钱包或所需索引缺失时，下一次冷加载从已折叠的数据补齐。
+- Redis 保留钱包版本下界，冷加载脚本拒绝读于发放之前的旧快照。同一钱包的 Redis 发放标记随镜像保留，覆盖 Redis 投影已完成而 PostgreSQL 提交失败的重试窗口。
+- 人工充值接口返回 HTTP 202 和 `eventId`。请求使用 common 的 `@Idempotent`，数据库审计在同一事务保留授权身份，支持 Redis 失效和 outbox 清理后的重试。
+- 发放授权持钱包行锁，余额上限同时计入尚未入账的授权。镜像余额最多为 Redis Lua 可精确计算的 `2^53 − 1` micro-USD，累计发放额需在 `long` 范围内。
 
 两条不可协商的规则：
 
@@ -72,12 +73,13 @@
 | `gw:hold:{holdId}` | HASH | 三条腿金额、`legs` JSON、`served`、org / project / key / model / created_at | PEXPIRE 2 × 租约 |
 | `gw:holds:exp` | ZSET | member = holdId，score = 租约到期 epoch ms | 无 |
 | `gw:hold:done:{holdId}` | STRING | 结算摘要 JSON | 12 × 租约 |
-| `gw:ledger:pos:{orgId}` | HASH | `produced`、`since` | **无 TTL** |
+| `gw:ledger:pos:{orgId}` | HASH | `produced`、`since`、重建所需的 `credit_version`、`debit_version` | **无 TTL** |
 | `gw:settle:evt:{eventId}` | STRING | outbox 实扣事件副本 | 1 小时 |
 | `gw:settle:proof:{eventId}` | STRING | 实扣影响的 Redis 键与其镜像标识 | 1 小时 |
 | `gw:settle:pending` | ZSET | member = eventId，score 用于安排下次检查 | 无 TTL |
 | `gw:settle:owners` | HASH | eventId 对应组织及结算时刻，工单关闭时清理 | 无 TTL |
-| `gw:wallet:idem:{eventId}` | STRING | **发放类**幂等标记（消耗类复用 `gw:hold:done`） | 24 小时 |
+| `gw:settle:waiting:{orgId}` | SET | 未确认实扣事件 ID，清空后 Redis 自动删键 | 无 TTL |
+| 钱包中的 `credit:{eventId}` | HASH 字段 | 该钱包镜像已应用发放 | 随钱包 |
 | `gw:health:ledger-lag` | STRING | `{level,lagRecords,drainSeconds,updatedAt}` | 60s |
 | `gw:health:ledger-lag:armed` | STRING | 常量标记，表示监视器成功运行过 | 无 TTL |
 | `gw:cfg:key` / `gw:cfg:route` / `gw:cfg:override` | STRING | 配置 JSON | 1800s + CDC 驱逐 |
@@ -237,7 +239,7 @@ KEYS 约定（admit / settle / release / reclaim 一致）：
 | 作业 | 周期 | 职责 |
 | :--- | :--- | :--- |
 | 僵尸预占回收 | 30s | 按 `gw:holds:exp` 全局扫描到期预占；`served = 1` 走兜底结算（5.4），否则全额释放 |
-| 批次过期 sweeper | 300s | 批次到期：置状态、减 `wallets.bonus_balance_micros`、写 `BONUS_EXPIRE` 账本行 |
+| 批次过期 sweeper | 300s | 持钱包行锁对当前赠金余量记 `BONUS_EXPIRE`。若已过期批次随后收到实扣，同一钱包事务保留原始扣款并冲回重叠的过期金额。 |
 | 分区预建 | 每日 | `wallet_ledger` 与 `audit_logs` 预建未来 2 个月 |
 | outbox 巡检重投 | 30s | 见 4.3 |
 | outbox 水位删除 | 30s | 见 4.5 |
@@ -308,12 +310,12 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 
 ### 4.5 水位删除
 
-- 每 30 秒执行 `DELETE FROM outbox_events WHERE id <= 水位 LIMIT 5000`，循环直到无行可删。
+- 每 30 秒分批清理水位以内已确认的事件。每行按原事件 ID 和发生时间匹配账本或认亏审计。
 - **不设时间保留期**：Debezium 读的是 WAL，删行不影响投递；删除只解决存储。
 - 主键为 UUIDv7，id 区间等价于时间区间，走主键索引即可，不需要 `created_at` 索引。
-- 水位停滞超过 24 小时：仍按时间兜底删除，并打 P1 告警。**告警依据是水位停了，不是表大了。**
+- 水位停滞超过 24 小时按时间兜底清理并发出 P1。发放授权需等账本确认后才可清理，每轮巡检会重投超过五分钟的未确认发放。
 - 稳态表大小 ≈ 端到端延迟 × QPS，因此**表行数是积压的可视化指标**。
-- **切换条件**：若压测中 purge 跟不上，或表行数超过 100 万，改为按日 `RANGE` 分区 + 校验「分区内最大 id ≤ 水位」后 `DROP PARTITION`。该方案需要 publication 开启 `publish_via_partition_root` 并实测投递，不在首版范围内。
+- **切换条件**：若压测中 purge 跟不上，或表行数超过 100 万，改为按日 `RANGE` 分区 + 确认分区中每一笔事件已入账或已认亏后 `DROP PARTITION`。该方案需要 publication 开启 `publish_via_partition_root` 并实测投递，不在首版范围内。
 
 ---
 
@@ -325,12 +327,12 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 
 ### 5.2 积压：全局闸门
 
-**判据是全局的，不存在任何逐租户状态。**
+积压状态由全局信号统一发布。
 
 | 信号 | 键存在 | 行为 |
 | :--- | :--- | :--- |
 | OK | 存在 | 正常服务 |
-| OK | 缺失 | 加载后服务 |
+| OK | 缺失 | 无未确认实扣且快照版本满足下界时加载 |
 | DEGRADED | 存在 | **照常服务**（Redis 领先 PG 是常态） |
 | DEGRADED | 缺失 | 503 `LEDGER_BACKLOG`，`Retry-After` 取 `drainSeconds` |
 
@@ -339,7 +341,8 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 - DEGRADED 期间，网关对**触碰到的**键执行 `PERSIST`（摘掉 TTL），恢复后下一次触碰自动重新装上。该动作幂等且廉价，不需要全局扫描。
 - **监视器失联按 OK 处理**：`armed` 存在但数据键过期（admin 停机、滚动发布）时视为正常滑动过期，并打 P1 告警。**监控组件故障不得转化为客户故障。**
 - 加载 Lua 在写入前比较现存 Redis 余额与 PG 快照。`gateway_rebuild_stale_delta_micros` 按现金、赠金和偏差方向记录。已过期的 Redis 键单独计入 `gateway_rebuild_live_balance_missing_total`。
-- 降级拒绝重建计入 `gateway_rebuild_while_degraded_total`，日志记录组织标识。每笔未确认实扣由 5.3 的事件工单跟踪。
+- 降级拒绝重建计入 `gateway_rebuild_while_degraded_total`，日志记录组织标识。
+- 冷加载原子核对未确认实扣集合和钱包快照版本下界。实扣折叠或认亏前，工单保持在集合中。存在未确认实扣或快照版本过旧时返回 `503 LEDGER_BACKLOG`，存活镜像照常服务。
 
 **为什么闸门只挡「键缺失」**：热键租户手里的 Redis 就是权威本身，停它没有任何收益；冷租户必须从一份已知可能落后的副本取值，此时「不取值」才是唯一确定的选择。规则对所有人相同，命中面由流量形态决定，与账户身份无关。
 
@@ -352,7 +355,7 @@ ZADD  gw:settle:pending        <nowMs>           {eventId}
 | 级别 | 触发 | 判据 | 动作 |
 | :--- | :--- | :--- | :--- |
 | L1 重投 | 60s | `gw:settle:evt` 仍存在 | 按副本重投 outbox |
-| L2 修链路 | 5 分钟 | `id ≤ 水位` 或 outbox 行存在 | admin 将现存 outbox 行重新投递到同一 Kafka topic。行已清理时告警检查消费位点 |
+| L2 修链路 | 5 分钟 | `id ≤ 水位` 或 outbox 行存在 | admin 将 outbox 行或可核验的 Redis 副本重新投递到同一 Kafka topic。两份证据均缺失时发出 P1 |
 | L3 补账 | 15 分钟 | 行不存在、`id > 水位` 且受影响的 Redis 键仍保留原镜像标识 | 以原事件 ID、时间和实扣腿折叠一笔 `ADJUST` |
 | L4 认亏 | 30 分钟 | 工单未关闭 | 写审计、推进已处理位置并关闭。迟到的原消息由同一钱包事务识别并跳过 |
 
@@ -361,12 +364,12 @@ L3 先判定投递状态，再核对相关 Redis 键仍是扣款时的镜像。�
 | 条件 | 结论 | 处置 |
 | :--- | :--- | :--- |
 | `outbox_events` 中存在该 id | 已进入链路 | L2，**禁止补账** |
-| `id ≤ purge 水位` | 曾经存在过 | L2，**禁止补账** |
+| `id ≤ purge 水位` | 事件可能已经过传输链路 | L2，**禁止跳过消费者补账** |
 | 两者都不成立且超过宽限期 | 无已投递证据 | 仅在扣款镜像仍可验证时允许 L3 |
 
 配套硬约束：**网关对同一事件的重试必须有截止时间，截止之后禁止再插入**，且该截止时间显著小于 L3 的 15 分钟。否则会出现「判定为从未进入 → 补 ADJUST → 网关迟到插入 → 双重扣减」。
 
-L4 只推进标记、不写账本，因此它不会造成错账，只会造成一次免单——这正是可以给它「无条件」权限的原因。每一次 L3 / L4 必须同时写审计日志、打指标（`ledger_degraded_resolved_total{level}`）并告警（L3 为 P2，L4 为 P1）。
+L4 保留认亏审计并推进快照版本。账本放弃该笔收入，存活的 Redis 镜像保留已有扣款，后续冷加载使用账本快照。每一次 L3 / L4 必须同时写审计日志、打指标（`ledger_degraded_resolved_total{level}`）并告警（L3 为 P2，L4 为 P1）。
 
 ### 5.4 兜底结算（进程死在结算前）
 
@@ -487,6 +490,6 @@ L4 只推进标记、不写账本，因此它不会造成错账，只会造成�
 
 无。本节保留为空占位，后续新出现的分歧点记在这里。
 
-已定事项：监视器失联 fail-open + P1（5.2）、兜底结算落地（5.4）、发放幂等标记 24 小时（2.1）、按组织分 cell（2.3）、超额分摊先 hold 腿后补分摊（2.2）、删除 `deductExact` 第二写路径（2.2）。
+已定事项：监视器失联 fail-open + P1（5.2）、兜底结算落地（5.4）、发放幂等标记随钱包镜像保留（2.1）、按组织分 cell（2.3）、超额分摊先 hold 腿后补分摊（2.2）、删除 `deductExact` 第二写路径（2.2）。
 
 **交付方式**：2.4、2.5、2.6 **一次性实现、一次上线**，不存在「先换契约再换传输」的中间态，也不允许两条投递通道长期并存。代码按依赖顺序分多个提交，但只作为一个变更集部署。
