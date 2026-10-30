@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.admin.config.TotpService;
 import app.pagefault.hyperllm.admin.consumer.BillingSettlementConsumer;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
+import app.pagefault.hyperllm.common.idempotency.IdempotencyStore;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.auth.User;
 import app.pagefault.hyperllm.domain.model.billing.Wallet;
@@ -13,6 +14,7 @@ import app.pagefault.hyperllm.domain.model.tenant.CustomerTier;
 import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.CustomerTierRepository;
 import app.pagefault.hyperllm.domain.repository.OrganizationRepository;
+import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import app.pagefault.hyperllm.domain.repository.UserRepository;
 import app.pagefault.hyperllm.domain.repository.WalletLedgerRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
@@ -88,11 +90,13 @@ class AdminFlowIntegrationTest {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private StringRedisTemplate redisTemplate;
     @Autowired private BillingSettlementConsumer billingConsumer;
+    @Autowired private IdempotencyStore idempotencyStore;
     @Autowired private UserRepository userRepository;
     @Autowired private CustomerTierRepository tierRepository;
     @Autowired private OrganizationRepository organizationRepository;
     @Autowired private WalletRepository walletRepository;
     @Autowired private WalletLedgerRepository walletLedgerRepository;
+    @Autowired private OutboxEventRepository outboxRepository;
     @Autowired private app.pagefault.hyperllm.admin.consumer.LedgerFolder ledgerFolder;
 
     @Test
@@ -254,23 +258,35 @@ class AdminFlowIntegrationTest {
 
         String walletKey = GatewayRedisKeys.wallet(orgId);
         redisTemplate.opsForHash().putAll(walletKey, java.util.Map.of("cash_micros", "0", "status", "ACTIVE"));
-        MvcResult topup = mockMvc.perform(post("/api/v1/admin/orgs/{orgId}/wallet/topup", orgId)
-                        .header("Authorization", "Bearer " + adminJwt)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"topupType":"CASH","amountMicros":1000000,"idempotencyKey":"topup-1","description":"Seed"}
-                                """))
-                .andExpect(status().isAccepted()).andReturn();
+        var topupRequest = post("/api/v1/admin/orgs/{orgId}/wallet/topup", orgId)
+                .header("Authorization", "Bearer " + adminJwt)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"topupType":"CASH","amountMicros":1000000,"idempotencyKey":"topup-1","description":"Seed"}
+                        """);
+        MvcResult topup = mockMvc.perform(topupRequest).andExpect(status().isAccepted()).andReturn();
         UUID creditId = UUID.fromString(objectMapper.readTree(topup.getResponse().getContentAsString())
                 .path("eventId").asText());
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isZero();
         assertThat(redisTemplate.opsForHash().get(walletKey, "cash_micros")).isEqualTo("0");
+
+        mockMvc.perform(topupRequest).andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(creditId.toString()));
 
         String authorization = ledgerFolder.recordedPayload(creditId).orElseThrow();
         billingConsumer.onMessage(authorization, null);
         billingConsumer.onMessage(authorization, null);
         assertThat(redisTemplate.opsForHash().get(walletKey, "cash_micros")).isEqualTo("1000000");
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+
+        outboxRepository.deleteUpTo(creditId, 100);
+        assertThat(outboxRepository.exists(creditId)).isFalse();
+        String replayKey = "admin-topup:" + orgId + ":topup-1";
+        assertThat(idempotencyStore.result(replayKey)).hasValueSatisfying(body -> assertThat(body).contains(creditId.toString()));
+        idempotencyStore.release(replayKey);
+        mockMvc.perform(topupRequest).andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(creditId.toString()));
+        assertThat(outboxRepository.listUnconfirmedCredits(OffsetDateTime.now().plusSeconds(1), 100)).isEmpty();
 
         // Give the mirror something the database cannot know: a reservation still in flight.
         redisTemplate.opsForHash().put(GatewayRedisKeys.wallet(orgId), "loaded", "1");

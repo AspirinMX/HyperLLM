@@ -42,7 +42,7 @@ public final class RedisIdempotencyStore implements IdempotencyStore {
 
     @Override
     public AcquireStatus tryAcquire(String key, Duration inFlightTtl) {
-        Long outcome = redis.execute(CLAIM, List.of(redisKey(key)), List.of(String.valueOf(inFlightTtl.toMillis())));
+        Long outcome = redis.execute(CLAIM, List.of(redisKey(key)), Long.toString(inFlightTtl.toMillis()));
         if (outcome == null) {
             return AcquireStatus.IN_FLIGHT;
         }
