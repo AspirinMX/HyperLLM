@@ -151,6 +151,12 @@ class OutboxMaintenanceIT {
         }
 
         @Override
+        public boolean unconfirmedCreditsFit(UUID orgId,
+                app.pagefault.hyperllm.common.messaging.BillingMoneyEvent.EventType type, long capacityMicros) {
+            return true;
+        }
+
+        @Override
         public int deleteUpTo(UUID watermark, int limit) {
             deletedUpTo.add(watermark);
             int removed = Math.min(remainingRows, limit);

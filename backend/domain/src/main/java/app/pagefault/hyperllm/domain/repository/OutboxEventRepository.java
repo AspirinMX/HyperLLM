@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.domain.repository;
 
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent.EventType;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
 
 import java.time.OffsetDateTime;
@@ -32,6 +33,9 @@ public interface OutboxEventRepository {
     void advanceWatermark(UUID eventId);
 
     List<OutboxEvent> listUnconfirmedCredits(OffsetDateTime cutoff, int limit);
+
+    /** Whether authorized credits of this kind that have yet to fold fit within the remaining capacity. */
+    boolean unconfirmedCreditsFit(UUID orgId, EventType type, long capacityMicros);
 
     /** Deletes confirmed rows at or below the watermark, up to {@code limit}. */
     int deleteUpTo(UUID watermark, int limit);

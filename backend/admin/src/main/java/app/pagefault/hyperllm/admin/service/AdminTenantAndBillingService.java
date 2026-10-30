@@ -16,7 +16,6 @@ import app.pagefault.hyperllm.domain.billing.WalletCreditOutbox;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
-import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import app.pagefault.hyperllm.domain.model.tenant.Organization;
@@ -87,7 +86,7 @@ public class AdminTenantAndBillingService {
     public AdminWalletTopupResponse topupWallet(
             UUID orgId, UUID adminId, String clientIp, AdminWalletTopupRequest req
     ) {
-        Wallet wallet = walletRepository.findByOrgIdForUpdate(orgId)
+        walletRepository.findByOrgIdForUpdate(orgId)
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
         String requestKey = req.idempotencyKey().trim();
         String requestHash = hashRequestKey(requestKey);
@@ -100,8 +99,6 @@ public class AdminTenantAndBillingService {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         boolean cash = req.topupType() == TopupType.CASH;
-        // Reject an amount that cannot be represented in the current checkpoint.
-        Math.addExact(cash ? wallet.cashBalanceMicros() : wallet.bonusBalanceMicros(), req.amountMicros());
         var event = walletCreditOutbox.append(orgId, "admin-credit:" + orgId + ":" + requestHash,
                 cash ? req.amountMicros() : 0L, cash ? 0L : req.amountMicros(),
                 BillingMoneyEvent.CreditSource.ADMIN, req.description(), now);

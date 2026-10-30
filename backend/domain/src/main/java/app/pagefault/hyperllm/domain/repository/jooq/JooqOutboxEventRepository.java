@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.domain.repository.jooq;
 
+import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent.EventType;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import lombok.RequiredArgsConstructor;
@@ -9,6 +10,7 @@ import org.jooq.impl.DSL;
 import org.jooq.Query;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -88,6 +90,23 @@ public class JooqOutboxEventRepository implements OutboxEventRepository {
                 .limit(limit)
                 .fetch(row -> new OutboxEvent(row.getId(), row.getAggregatetype(), row.getAggregateid(),
                         row.getType(), row.getPayload().data(), row.getCreatedAt()));
+    }
+
+    @Override
+    public boolean unconfirmedCreditsFit(UUID orgId, EventType type, long capacityMicros) {
+        String amountField = switch (type) {
+            case RECHARGE -> "cashDeltaMicros";
+            case BONUS_GRANT -> "bonusDeltaMicros";
+            default -> throw new IllegalArgumentException("Unsupported wallet credit type " + type);
+        };
+        // PostgreSQL aggregates as numeric so a large set of authorizations cannot overflow a long.
+        var micros = DSL.field("cast(({0} ->> {1}) as numeric)", BigDecimal.class,
+                OUTBOX_EVENTS.PAYLOAD, DSL.val(amountField));
+        var fits = DSL.coalesce(DSL.sum(micros), BigDecimal.ZERO).le(BigDecimal.valueOf(capacityMicros));
+        return Boolean.TRUE.equals(dsl.select(fits).from(OUTBOX_EVENTS)
+                .where(OUTBOX_EVENTS.AGGREGATEID.eq(orgId.toString()).and(OUTBOX_EVENTS.TYPE.eq(type.name()))
+                        .and(folded().not()))
+                .fetchOne(fits));
     }
 
     @Override

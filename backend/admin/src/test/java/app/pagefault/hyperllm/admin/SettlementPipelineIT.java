@@ -4,6 +4,8 @@ import app.pagefault.hyperllm.admin.consumer.LedgerFolder;
 import app.pagefault.hyperllm.admin.maintenance.BatchExpiryJob;
 import app.pagefault.hyperllm.admin.maintenance.OutboxRedeliveryJob;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.error.ErrorCode;
+import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
 import app.pagefault.hyperllm.domain.billing.WalletCreditOutbox;
@@ -50,6 +52,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Closes the Phase 1 cross-service gap: the gateway publishes settlement events and the admin
@@ -267,6 +270,52 @@ class SettlementPipelineIT {
         assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
         assertThat(ledgerFolder.fold(event)).isFalse();
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void countsOutstandingCreditsAgainstWalletCapacityBeforeAuthorization() {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(at);
+        long max = (1L << 53) - 1L;
+        var tx = new TransactionTemplate(transactionManager);
+        var event = tx.execute(status -> creditOutbox.append(orgId, "capacity:" + orgId,
+                max - 1_000_000L, 0L, BillingMoneyEvent.CreditSource.ADMIN, null, at));
+
+        assertThatThrownBy(() -> tx.execute(status -> creditOutbox.append(orgId, "overflow:" + orgId,
+                1L, 0L, BillingMoneyEvent.CreditSource.ADMIN, null, at)))
+                .isInstanceOfSatisfying(HyperLlmException.class,
+                        ex -> assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.BILLING_INVALID_AMOUNT));
+        assertThat(ledgerFolder.fold(event)).isTrue();
+        assertThat(redis.hasKey(GatewayRedisKeys.wallet(orgId))).isFalse();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(max);
+    }
+
+    @Test
+    void retriesACreditAfterSqlRollbackWithoutAddingItsDeltaTwice() {
+        OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(at);
+        String wallet = GatewayRedisKeys.wallet(orgId);
+        // Redis includes a recently settled debit absent from this checkpoint.
+        redis.opsForHash().put(wallet, "cash_micros", "750000");
+        var tx = new TransactionTemplate(transactionManager);
+        var event = tx.execute(status -> creditOutbox.append(orgId, "credit-rollback:" + orgId,
+                500L, 0L, BillingMoneyEvent.CreditSource.ADMIN, null, at));
+
+        tx.executeWithoutResult(status -> {
+            assertThat(ledgerFolder.fold(event)).isTrue();
+            assertThat(redis.opsForHash().get(wallet, "cash_micros")).isEqualTo("750500");
+            status.setRollbackOnly();
+        });
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).total()).isZero();
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.ledgerPosition(orgId), "credit_version")).isEqualTo("1");
+
+        assertThat(ledgerFolder.fold(event)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        assertThat(redis.opsForHash().get(wallet, "cash_micros")).isEqualTo("750500");
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_500L);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items()).singleElement()
+                .satisfies(row -> assertThat(row.cashDeltaMicros()).isEqualTo(500L));
     }
 
     @Test
