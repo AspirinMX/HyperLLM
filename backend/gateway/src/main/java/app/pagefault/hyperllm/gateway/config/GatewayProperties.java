@@ -70,8 +70,6 @@ public class GatewayProperties {
         private long retryDeadlineSeconds = 600;
         /** Backoff between insert attempts. */
         private long retryBackoffMs = 200;
-        /** Topic suffix every money event is routed to. */
-        private String aggregateType = "billing";
     }
 
     @Data

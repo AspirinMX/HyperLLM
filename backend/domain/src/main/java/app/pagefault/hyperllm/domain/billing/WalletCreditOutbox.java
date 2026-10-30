@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.domain.billing;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
+import app.pagefault.hyperllm.domain.model.enums.OutboxAggregateType;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -36,7 +37,7 @@ public class WalletCreditOutbox {
         var event = new BillingMoneyEvent(id, type, occurredAt, orgId, null, null, key, cash, bonus,
                 0L, 0L, List.of(), null, null, false, description, source);
         try {
-            if (!outbox.insertIfAbsent(new OutboxEvent(id, "billing", orgId.toString(), type.name(),
+            if (!outbox.insertIfAbsent(new OutboxEvent(id, OutboxAggregateType.BILLING.topicSuffix(), orgId.toString(), type.name(),
                     mapper.writeValueAsString(event), occurredAt))) {
                 throw new IllegalStateException("Credit event already exists " + id);
             }

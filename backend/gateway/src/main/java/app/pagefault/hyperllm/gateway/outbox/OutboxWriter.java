@@ -1,6 +1,7 @@
 package app.pagefault.hyperllm.gateway.outbox;
 
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
+import app.pagefault.hyperllm.domain.model.enums.OutboxAggregateType;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import lombok.extern.slf4j.Slf4j;
@@ -124,7 +125,7 @@ public class OutboxWriter implements SmartLifecycle {
     private OutboxEvent toRow(PendingMoneyEvent event) {
         return new OutboxEvent(
                 event.eventId(),
-                settings.getAggregateType(),
+                OutboxAggregateType.BILLING.topicSuffix(),
                 event.orgId(),
                 event.eventType(),
                 event.payload(),

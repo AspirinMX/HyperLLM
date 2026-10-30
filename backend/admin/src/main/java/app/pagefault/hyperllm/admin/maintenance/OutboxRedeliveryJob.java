@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.admin.consumer.LedgerFolder;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.domain.model.billing.OutboxEvent;
+import app.pagefault.hyperllm.domain.model.enums.OutboxAggregateType;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -139,7 +140,8 @@ public class OutboxRedeliveryJob {
 
         if (!enteredDelivery && sameEvent(event, owner)) {
             outboxEventRepository.insertIfAbsent(new OutboxEvent(
-                    eventId, "billing", owner.orgId().toString(), "CONSUME", payload, occurredAt));
+                    eventId, OutboxAggregateType.BILLING.topicSuffix(), owner.orgId().toString(),
+                    "CONSUME", payload, occurredAt));
         }
         defer(id, occurredAt.plus(REPAIR_LINK));
     }
