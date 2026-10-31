@@ -387,8 +387,8 @@ sequenceDiagram
    - 推入 Kafka Topic：`cdc.gateway.config`（开启 Log Compaction 或分区广播）。
    - 消费动作：`backend/admin` 异步任务消费者（或独立 Worker 进程）同步刷新 Redis L2 Hash；所有 `backend/gateway` 实例通过独立 Consumer Group（每 Pod 一个 Group ID）实时消费事件，**亚秒级剔除/更新本地 Caffeine L1 缓存**（API Key 吊销、限流调低、渠道摘除即时生效）。
 2. **账务与状态变更 Outbox 表（Outbox Event Router）**：`outbox_events`。
-   - 利用 Debezium Outbox Event Router SMT，将表内事件路由至 `cdc.wallet.topup` 等业务 Topic。
-   - **关键保障**：`backend/console` 收到 Stripe/支付宝 Webhook 验签成功后（或 `backend/admin` 执行人工调账/退款时），在**同一个 Postgres 本地事务**中完成 `payment_orders` 更新 + `wallets` 加款 + `wallet_ledger` 记账 + 插入 `outbox_events`。Debezium 捕获 WAL 推送 Kafka，异步消费任务带 `idempotency_key` 在 Redis 执行幂等 `INCRBY`，彻底消除「DB 充值成功但 Redis 加钱失败」的数据分裂。
+   - Debezium Outbox Event Router 将金额事件路由至 `cdc.billing`，分区键为 `orgId`。
+   - `console` 验证 Stripe、支付宝、微信支付的收款后，在同一个 PostgreSQL 事务内更新订单并追加发放授权。Debezium 推送授权事件，消费者按事件身份折叠 `wallet_ledger` 和钱包快照，并应用 Redis delta。详见[支付与履约](./design/04-05-payment.md)。
 
 #### 2.4.3 Redis 键空间（KeySpace）规划
 - `gw:cfg:key:{key_hash}` -> Hash（Key 元数据、所属 Org/Project、限流配置、风控策略与有效折扣）
@@ -405,9 +405,9 @@ sequenceDiagram
 
 #### 2.4.4 ClickHouse 宽表、物化视图与短期调试明细（OLAP）
 数据面请求结束后异步发送宽表 JSON 至 Kafka Topic `llm.request.events`（按 `org_id` 分区保证局部顺序，批量压缩 `zstd`/`lz4`）。
-ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（或由独立批写 Consumer 以每 1~3 秒 / 5000 条批量 `INSERT`，背压与容错控制更可控）。核心包含三张表（完整 DDL 见 [01-database-design.md](./design/01-database-design.md#6-clickhouse-24-olap-与调试表设计)）：
+Phase 2 使用独立报表消费组批写请求事实，并在去重后重算受影响的小时。摄入和发布契约见 [用量与毛利设计](./design/04-07-analytics.md)。
 1. **`llm_request_events`**：主请求事实宽表（`MergeTree`，按月分区，365 天 TTL，记录消费现金/赠金/资源包拆解、采购成本 `upstream_cost_micros`、重试次数、粘性命中与风控动作，默认严格 ZDR）。
-2. **`mv_usage_hourly`**：基于 `AggregatingMergeTree` 与 `SimpleAggregateFunction` / `AggregateFunction` 预聚合的小时级物化视图，支撑毫秒级 P95 TTFT 与毛利大盘查询。
+2. `mv_usage_hourly` 保存版本化小时汇总与分位数状态，支撑用量查询与经营报表。
 3. **`llm_debug_payloads`**：面向开启 Opt-in 调试的 Project 独立存储 AES-256-GCM 加密的请求/响应样本，利用原生 `TTL expires_at DELETE` 实现 1~7 天到期物理清除，与主业务和 Postgres WAL 完全隔离。
 
 ---
@@ -415,12 +415,9 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 ### 2.5 资金一致性与异步对账机制
 
 在分布式预付费系统中，Redis 承担高频实时扣减，Postgres 承担持久账本。一致性闭环由三道防线保证：
-1. **入账防丢（Outbox + CDC）**：充值、退款、赠金、人工调账全部经 Postgres 事务写入 `outbox_events`，由 Debezium CDC 保证 At-least-once 送达，Redis 端基于 `event_id` 幂等加额。
-2. **消费防重（Idempotent Batch Settlement）**：`backend/gateway` 结算时生成全局唯一 `request_id`，异步核销消费者（由 `backend/admin` 异步任务域或独立 Worker 进程承载）批量插入 Postgres `wallet_ledger` 时利用 `ON CONFLICT (idempotency_key) DO NOTHING` 保证 Kafka 重平衡或重放不重复扣款。
-3. **周期性准实时对账（Reconciliation Job）**：
-   - 定时任务（如每 5 分钟）对近期活跃 Org 核对：
-     $$\text{Redis}(\text{cash} + \text{bonus} + \text{held}) \stackrel{?}{=} \text{Postgres}(\text{wallets.balance}) - \text{UnflushedKafkaLag}$$
-   - 若存在超出阈值的静默偏差（如极端节点崩溃导致 Redis 已扣但 Kafka 事件未发出），结合 ClickHouse 日志与 Ledger 差额触发告警并自动/人工核对修复。
+1. 发放在 PostgreSQL 业务事务中授权。消耗由 Redis 先结算，保留逐笔事件及镜像证据。两类事件都经 outbox 传输。参见[账务与投影链路](./design/04-04-settlement-pipeline.md)。
+2. 消费者按原事件身份幂等折叠账本、钱包与批次。资金 delta 与 Redis 的原子应用共用事件身份。
+3. 周期对账逐笔核对在途差额并复用 L1–L4 工单。缺少证据的差额登记并交由运营调查。参见[告警与对账](./design/04-08-alerts-reconcile.md)。
 
 ---
 
@@ -469,7 +466,7 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 | :--- | :--- | :--- |
 | **Phase 0: 仓库与工程骨架初始化（已完成）** | 确立 Monorepo 边界与前后端技术基线 | 1. 完成 `HyperLLM` 仓库、`LICENSE`（Apache-2.0）及 `README.md` / `README_zh-CN.md` 占位<br>2. 完成 `backend/` Java 21 + Maven Wrapper 6 模块空壳（`common`、`domain`、`protocol`、`gateway`、`console`、`admin`）<br>3. 初始化双独立前端 `frontend/console` 与 `frontend/admin`（Next.js 16.4.6 + React 19.3.0 + Tailwind CSS 4.3.3）<br>4. 建立 `infra/` 目录框架（`debezium/`、`kafka/`、`observability/`、`k8s/`）与 `docker-compose.yaml` 占位 |
 | **Phase 1: MVP 基础代理与核心骨架落地** | 跑通端到端调用与基础记账链路（后端先行） | 1. 补全 `backend/pom.xml`（Spring Boot 3.5.x + `starter-parent`、jOOQ/Flyway/WebFlux/MVC/虚拟线程/Testcontainers）及各模块依赖；补全 `infra/docker-compose.yaml` 与 `.env.example`<br>2. 在 `backend/domain` 落地 Postgres 核心表 `V1`–`V3` Flyway 迁移脚本并打通 `-Pjooq` 代码生成<br>3. 在 `backend/protocol` 与 `backend/gateway`（WebFlux）实现 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 同构透传、Debezium Config CDC 联动失效、简化版 Redis 扣费与 Kafka 异步写 `wallet_ledger`（详情见 [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md)）<br>4. 在 `backend/console` 与 `backend/admin` 实现双域 JWT 登录、Org/Project/Key/Channel/Model/Pricing CRUD 与测试充值接口（暂不实现前端页面，通过 OpenAPI/curl/集成测试验证闭环） |
-| **Phase 2: 商业化计费与数据管道闭环** | 实现并发防超支、可靠入账与用量分析 | 1. 完成设计评审与 Phase 1 回归基线，交付 Flyway V4、jOOQ 和领域仓储（2.0–2.1）<br>2. 实现三顺位抵扣与协议价、网关 `Pre-hold / Settle`、幂等结算入账（2.2–2.4）<br>3. 接通账务 Outbox、支付、兑换码和资源包购买（2.5–2.6）<br>4. 完善四层限流与项目预算，交付 ClickHouse 用量摄入及用量与毛利查询（2.7–2.8）<br>5. 完成余额与预算告警、账务对账和端到端 HTTP 验收（2.9）。详见 [Phase 2 分步清单](./TODO.md#20-设计与-phase-1-验收基线) |
+| **Phase 2: 商业化计费与数据管道闭环** | 实现并发防超支、可靠入账与用量分析 | 2.0–2.3 交付设计基线、领域仓储、定价及预占。2.4–2.6 交付 Redis 权威层、账本折叠与 Outbox。2.7–2.10 交付支付与权益、限流与预算、用量与毛利报表、告警和对账。见 [Phase 2 设计索引](./design/04-00-overview.md) |
 | **Phase 3: 智能路由、全协议与企业级治理** | 提升平台毛利、高可用性与大客户能力 | 1. `backend/protocol` 补全双向协议转译引擎（OpenAI / Anthropic / Gemini / Embeddings / Images / Audio / Rerank）<br>2. `backend/gateway` 实现 TTFT 感知路由、熔断器、首字节前重试与 Prompt Cache Sticky Session<br>3. 企业 SSO（OIDC/SAML）、项目级 Opt-in 调试日志、Guardrails SPI<br>4. `backend/admin` 完善运营后台核心 API（渠道监控、定价版本、毛利分析、调账二次审批、自动对账中心） |
 | **Phase 4: 压测调优与生产交付** | 验证高并发 SLA 与可运维性 | 1. K6/Gatling 模拟万级并发 SSE 长连接与防穿仓混沌压测（Gateway 额外耗时 P99 < 15ms）<br>2. 完善 `infra/k8s/` Helm Charts、HPA 弹性扩缩容策略与 `infra/observability/` Grafana 告警面板；按吞吐需要评估从 `admin` 独立拆出 `backend/worker` 模块 |
 | **Frontend Track（暂缓）** | 待后端与 OpenAPI 契约稳定后启动双端 UI | 1. 敲定 `frontend/console`（`3000`）与 `frontend/admin`（`3001`）UI 组件库、鉴权状态层与 `openapi-fetch` SDK 生成<br>2. 交付开发者门户/Playground/用量账务页面与独立运营后台管理界面 |
@@ -482,5 +479,5 @@ ClickHouse 采用 `Kafka Engine` + `Materialized View` 自动摄入至主表（�
 2. **第一阶段（第二部分）：工程依赖与基础设施编排（已完成）**：已在 [02-dependencies-and-infra.md](./design/02-dependencies-and-infra.md) 明确 Spring Boot 3.5.x 父子 POM 依赖矩阵、`gateway` 复用 `domain` 冷回源规范、`-Pjooq` 生成流程、`docker-compose.yaml` 分层编排与全栈端口表。
 3. **第一阶段（第三部分）：后端运行契约（已完成）**：已在 [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) 明确双域认证/JWT/加解密规范、`console`/`admin` Core REST API 清单，以及 `gateway` 同构透传、Debezium Config CDC 联动 L1 失效与简化 Redis + Kafka `wallet_ledger` 记账链路（注：本地验证 CDC 热失效时需同时启动 Compose `--profile pipeline`）。
 4. **当前工程落地入口（[TODO.md](./TODO.md)）**：前端开发（`frontend/console` 与 `frontend/admin`）当前暂缓，接下来按 [TODO.md](./TODO.md) 中 **Phase 1（1.1–1.6）** 顺序优先推进根目录基建、父子 POM、Flyway `V1`–`V3` + `-Pjooq`、后端各服务编码与集成测试验证。
-5. **Phase 2 详细设计（待开展）** 待确认预占与结算边界、历史余额和 Redis Key 迁移、支付渠道范围及 ClickHouse 摄入方式。评审完成后进入 V4 与后续开发。见 [Phase 2 第 2.0 步](./TODO.md#20-设计与-phase-1-验收基线)。
+5. [Phase 2 详细设计](./design/04-00-overview.md) 已完成评审。预占、结算和 outbox 已实现，后续实现进度按 [交付清单](./TODO.md) 跟踪。
 6. **Phase 3 与前端设计（后续）** 细化 Phase 3 `Canonical IR` 双向协议转译状态机。后端 OpenAPI 契约稳定后再细化前端选型与页面交互契约。
