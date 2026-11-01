@@ -5,11 +5,13 @@ import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
 import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
+import app.pagefault.hyperllm.domain.model.billing.ResourcePack;
 import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
 import app.pagefault.hyperllm.domain.model.enums.GrantSource;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
+import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
@@ -147,7 +149,7 @@ public class LedgerFolder {
                 null,
                 event.allocationDetailJson(),
                 refRequestId(event),
-                null,
+                event.orderId(),
                 null,
                 event.description(),
                 at,
@@ -158,12 +160,13 @@ public class LedgerFolder {
             return false;
         }
 
-        if (event.creditSource() != null && event.eventType() == BillingMoneyEvent.EventType.BONUS_GRANT) {
+        if (event.grant() != null) {
+            applyGrant(event, at);
+        } else if (event.creditSource() != null && event.eventType() == BillingMoneyEvent.EventType.BONUS_GRANT) {
+            // Payload written before grants carried their terms: the batch is the event itself.
             long amount = event.bonusDeltaMicros();
-            GrantSource source = event.creditSource() == BillingMoneyEvent.CreditSource.SIGNUP
-                    ? GrantSource.SIGNUP : GrantSource.ADMIN_GRANT;
-            grantRepository.insert(new BonusGrant(event.eventId(), event.orgId(), source, null, null, null,
-                    amount, amount, null, EntitlementStatus.ACTIVE, 0L, at, at));
+            grantRepository.insert(new BonusGrant(event.eventId(), event.orgId(), grantSource(event.creditSource()),
+                    null, null, null, amount, amount, null, EntitlementStatus.ACTIVE, 0L, at, at));
         }
 
         long expiredBonusConsumed = 0L;
@@ -216,6 +219,56 @@ public class LedgerFolder {
         return true;
     }
 
+    /**
+     * Creates the batch the credit authorized. The batch id is the event id, so a redelivery hits
+     * the primary key instead of creating a second batch, and the ledger row that carries the same
+     * id is the proof that both were committed together.
+     */
+    private void applyGrant(BillingMoneyEvent event, OffsetDateTime at) {
+        BillingMoneyEvent.Grant grant = event.grant();
+        UUID batchId = grant.batchId() == null ? event.eventId() : grant.batchId();
+        if (batchId.equals(event.eventId()) == false) {
+            throw new IllegalStateException("Grant batch " + batchId + " is not event " + event.eventId());
+        }
+        switch (grant.type()) {
+            case BONUS -> {
+                if (grant.micros() != event.bonusDeltaMicros()) {
+                    throw new IllegalStateException("Grant value disagrees with event " + event.eventId());
+                }
+                grantRepository.insert(new BonusGrant(batchId, event.orgId(), grantSource(event.creditSource()),
+                        grant.voucherId(), grant.redemptionCodeId(), grant.applicableModels(),
+                        grant.micros(), grant.micros(), grant.expiresAt(),
+                        EntitlementStatus.ACTIVE, 0L, at, at));
+            }
+            case PACK -> {
+                if (grant.units() != event.packDeltaUnits()) {
+                    throw new IllegalStateException("Grant units disagree with event " + event.eventId());
+                }
+                if (grant.expiresAt() == null || grant.applicableModels() == null
+                        || grant.applicableModels().isEmpty() || grant.unitType() == null) {
+                    throw new IllegalStateException("Pack grant is missing its terms " + event.eventId());
+                }
+                packRepository.insert(new ResourcePack(batchId, event.orgId(),
+                        grant.name() == null || grant.name().isBlank() ? "Resource pack" : grant.name(),
+                        PackUnitType.valueOf(grant.unitType()), grant.applicableModels(),
+                        grant.units(), grant.units(), event.orderId(), null, grant.expiresAt(),
+                        EntitlementStatus.ACTIVE, 0L, at, at));
+            }
+        }
+    }
+
+    private static GrantSource grantSource(BillingMoneyEvent.CreditSource source) {
+        if (source == null) {
+            throw new IllegalStateException("A grant needs a credit source");
+        }
+        return switch (source) {
+            case SIGNUP -> GrantSource.SIGNUP;
+            case VOUCHER -> GrantSource.VOUCHER;
+            case ADMIN -> GrantSource.ADMIN_GRANT;
+            case PAYMENT -> throw new IllegalStateException("A payment credit is cash, not a bonus batch");
+        };
+    }
+
     private static IllegalStateException batchDeltaFailure(BillingMoneyEvent event, BillingMoneyEvent.Leg leg) {
         return new IllegalStateException("Cannot apply batch delta from event " + event.eventId()
                 + " to batch " + leg.batchId());
@@ -236,7 +289,8 @@ public class LedgerFolder {
             case CONSUME -> LedgerType.CONSUME;
             case RECHARGE -> LedgerType.RECHARGE;
             case BONUS_GRANT -> LedgerType.BONUS_GRANT;
-            case PACK_GRANT, ADJUST -> LedgerType.ADJUST;
+            case PACK_GRANT -> LedgerType.PACK_GRANT;
+            case ADJUST -> LedgerType.ADJUST;
             case BONUS_EXPIRE -> LedgerType.BONUS_EXPIRE;
         };
     }

@@ -23,20 +23,42 @@ public interface PaymentOrderRepository {
 
     Optional<PaymentOrder> findById(UUID id);
 
+    /** Locks the order row so a confirmation and a close cannot both move it. */
+    Optional<PaymentOrder> findByIdForUpdate(UUID id);
+
     Optional<PaymentOrder> findByIdempotencyKey(String idempotencyKey);
 
     Optional<PaymentOrder> findByOrderNo(String orderNo);
 
     PageResponse<PaymentOrder> listByOrg(UUID orgId, PageQuery pageQuery);
 
+    /** PENDING orders past their local deadline, oldest first, for the close/query job. */
     List<PaymentOrder> listExpiredPending(OffsetDateTime now, int limit);
 
-    boolean updateStatus(
-            UUID id,
-            OrderStatus status,
-            OffsetDateTime paidAt,
-            String externalTxId,
-            long expectedVersion,
-            OffsetDateTime updatedAt
-    );
+    /** Cash reserved by orders that are still PENDING; feeds the wallet capacity check. */
+    long sumPendingTopupCredits(UUID orgId);
+
+    boolean updateChannelReference(UUID id, String channelRef, String channelPayload,
+                                   long expectedVersion, OffsetDateTime updatedAt);
+
+    /**
+     * Moves PENDING to PAID and records the grant this payment authorized.
+     *
+     * @return false when the order was not PENDING at the expected version
+     */
+    boolean markPaid(UUID id, String externalTxId, OffsetDateTime paidAt, UUID fulfillmentEventId,
+                     long expectedVersion, OffsetDateTime updatedAt);
+
+    boolean markClosed(UUID id, OffsetDateTime closedAt, long expectedVersion, OffsetDateTime updatedAt);
+
+    boolean markFailed(UUID id, OffsetDateTime closedAt, String failureCode, String failureDetail,
+                       long expectedVersion, OffsetDateTime updatedAt);
+
+    boolean markRefunded(UUID id, long refundedAmountMinor, OffsetDateTime refundedAt,
+                         long expectedVersion, OffsetDateTime updatedAt);
+
+    boolean markFulfilled(UUID id, OffsetDateTime fulfilledAt, long expectedVersion, OffsetDateTime updatedAt);
+
+    boolean updateStatus(UUID id, OrderStatus status, OffsetDateTime paidAt, String externalTxId,
+                         long expectedVersion, OffsetDateTime updatedAt);
 }

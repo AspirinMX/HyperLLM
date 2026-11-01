@@ -8,6 +8,8 @@ import app.pagefault.hyperllm.domain.jooq.Indexes;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies.PaymentAnomaliesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus.ResourcePackSkusPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks.ResourcePacksPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger.WalletLedgerPath;
@@ -167,6 +169,64 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
      */
     public final TableField<PaymentOrdersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.payment_orders.pack_sku_id</code>.
+     */
+    public final TableField<PaymentOrdersRecord, UUID> PACK_SKU_ID = createField(DSL.name("pack_sku_id"), SQLDataType.UUID, this, "");
+
+    /**
+     * The column <code>public.payment_orders.request_fingerprint</code>.
+     * SHA-256 of the normalized create request; a replay with different terms
+     * is a conflict.
+     */
+    public final TableField<PaymentOrdersRecord, String> REQUEST_FINGERPRINT = createField(DSL.name("request_fingerprint"), SQLDataType.VARCHAR(64), this, "SHA-256 of the normalized create request; a replay with different terms is a conflict.");
+
+    /**
+     * The column <code>public.payment_orders.channel_ref</code>.
+     */
+    public final TableField<PaymentOrdersRecord, String> CHANNEL_REF = createField(DSL.name("channel_ref"), SQLDataType.VARCHAR(160), this, "");
+
+    /**
+     * The column <code>public.payment_orders.channel_payload</code>.
+     */
+    public final TableField<PaymentOrdersRecord, JSONB> CHANNEL_PAYLOAD = createField(DSL.name("channel_payload"), SQLDataType.JSONB, this, "");
+
+    /**
+     * The column <code>public.payment_orders.fulfillment_event_id</code>. The
+     * RECHARGE or PACK_GRANT event authorized in the confirmation transaction.
+     */
+    public final TableField<PaymentOrdersRecord, UUID> FULFILLMENT_EVENT_ID = createField(DSL.name("fulfillment_event_id"), SQLDataType.UUID, this, "The RECHARGE or PACK_GRANT event authorized in the confirmation transaction.");
+
+    /**
+     * The column <code>public.payment_orders.fulfilled_at</code>.
+     */
+    public final TableField<PaymentOrdersRecord, OffsetDateTime> FULFILLED_AT = createField(DSL.name("fulfilled_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>public.payment_orders.closed_at</code>.
+     */
+    public final TableField<PaymentOrdersRecord, OffsetDateTime> CLOSED_AT = createField(DSL.name("closed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>public.payment_orders.failure_code</code>.
+     */
+    public final TableField<PaymentOrdersRecord, String> FAILURE_CODE = createField(DSL.name("failure_code"), SQLDataType.VARCHAR(64), this, "");
+
+    /**
+     * The column <code>public.payment_orders.failure_detail</code>.
+     */
+    public final TableField<PaymentOrdersRecord, String> FAILURE_DETAIL = createField(DSL.name("failure_detail"), SQLDataType.VARCHAR(500), this, "");
+
+    /**
+     * The column <code>public.payment_orders.refunded_at</code>.
+     */
+    public final TableField<PaymentOrdersRecord, OffsetDateTime> REFUNDED_AT = createField(DSL.name("refunded_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>public.payment_orders.refunded_amount_minor</code>.
+     */
+    public final TableField<PaymentOrdersRecord, Long> REFUNDED_AMOUNT_MINOR = createField(DSL.name("refunded_amount_minor"), SQLDataType.BIGINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.BIGINT)), this, "");
+
     private PaymentOrders(Name alias, Table<PaymentOrdersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -236,7 +296,7 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_PAYMENT_ORDERS_ORG_CREATED, Indexes.IDX_PAYMENT_ORDERS_PENDING_EXPIRY, Indexes.UK_PAYMENT_ORDERS_EXTERNAL_TX);
+        return Arrays.asList(Indexes.IDX_PAYMENT_ORDERS_ORG_CREATED, Indexes.IDX_PAYMENT_ORDERS_PENDING_CHANNEL, Indexes.IDX_PAYMENT_ORDERS_PENDING_EXPIRY, Indexes.UK_PAYMENT_ORDERS_EXTERNAL_TX);
     }
 
     @Override
@@ -251,7 +311,7 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
 
     @Override
     public List<ForeignKey<PaymentOrdersRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_CREATED_BY_USER_ID_FKEY, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_ORG_ID_FKEY);
+        return Arrays.asList(Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_CREATED_BY_USER_ID_FKEY, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_ORG_ID_FKEY, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_PACK_SKU_ID_FKEY);
     }
 
     private transient UsersPath _users;
@@ -279,6 +339,19 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
         return _organizations;
     }
 
+    private transient ResourcePackSkusPath _resourcePackSkus;
+
+    /**
+     * Get the implicit join path to the <code>public.resource_pack_skus</code>
+     * table.
+     */
+    public ResourcePackSkusPath resourcePackSkus() {
+        if (_resourcePackSkus == null)
+            _resourcePackSkus = new ResourcePackSkusPath(this, Keys.PAYMENT_ORDERS__PAYMENT_ORDERS_PACK_SKU_ID_FKEY, null);
+
+        return _resourcePackSkus;
+    }
+
     private transient WalletLedgerPath _walletLedger;
 
     /**
@@ -290,6 +363,19 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
             _walletLedger = new WalletLedgerPath(this, null, Keys.WALLET_LEDGER__FK_WALLET_LEDGER_REF_ORDER.getInverseKey());
 
         return _walletLedger;
+    }
+
+    private transient PaymentAnomaliesPath _paymentAnomalies;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.payment_anomalies</code> table
+     */
+    public PaymentAnomaliesPath paymentAnomalies() {
+        if (_paymentAnomalies == null)
+            _paymentAnomalies = new PaymentAnomaliesPath(this, null, Keys.PAYMENT_ANOMALIES__PAYMENT_ANOMALIES_ORDER_ID_FKEY.getInverseKey());
+
+        return _paymentAnomalies;
     }
 
     private transient ResourcePacksPath _resourcePacks;
@@ -308,7 +394,11 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
     @Override
     public List<Check<PaymentOrdersRecord>> getChecks() {
         return Arrays.asList(
+            Internal.createCheck(this, DSL.name("chk_payment_orders_closed"), "(((closed_at IS NULL) OR ((status)::text = ANY ((ARRAY['CLOSED'::character varying, 'FAILED'::character varying])::text[]))))", true),
+            Internal.createCheck(this, DSL.name("chk_payment_orders_fulfilled"), "(((fulfilled_at IS NULL) OR ((status)::text = 'PAID'::text)))", true),
+            Internal.createCheck(this, DSL.name("chk_payment_orders_pack_sku"), "((((order_type)::text = 'RESOURCE_PACK_PURCHASE'::text) = (pack_sku_id IS NOT NULL)))", true),
             Internal.createCheck(this, DSL.name("chk_payment_orders_paid_at"), "((((status)::text <> 'PAID'::text) OR (paid_at IS NOT NULL)))", true),
+            Internal.createCheck(this, DSL.name("chk_payment_orders_refund"), "(((refunded_at IS NULL) OR ((status)::text = 'REFUNDED'::text)))", true),
             Internal.createCheck(this, DSL.name("payment_orders_credit_micros_check"), "((credit_micros >= 0))", true),
             Internal.createCheck(this, DSL.name("payment_orders_fx_rate_check"), "((fx_rate > (0)::numeric))", true),
             Internal.createCheck(this, DSL.name("payment_orders_invoiceable_amount_minor_check"), "((invoiceable_amount_minor >= 0))", true),
@@ -316,6 +406,7 @@ public class PaymentOrders extends TableImpl<PaymentOrdersRecord> {
             Internal.createCheck(this, DSL.name("payment_orders_pay_amount_minor_check"), "((pay_amount_minor > 0))", true),
             Internal.createCheck(this, DSL.name("payment_orders_pay_currency_check"), "(((pay_currency)::text = ANY ((ARRAY['USD'::character varying, 'CNY'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("payment_orders_payment_channel_check"), "(((payment_channel)::text = ANY ((ARRAY['STRIPE'::character varying, 'ALIPAY'::character varying, 'WECHAT_PAY'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("payment_orders_refunded_amount_minor_check"), "((refunded_amount_minor >= 0))", true),
             Internal.createCheck(this, DSL.name("payment_orders_status_check"), "(((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PAID'::character varying, 'FAILED'::character varying, 'CLOSED'::character varying, 'REFUNDED'::character varying])::text[])))", true)
         );
     }

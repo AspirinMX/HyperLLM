@@ -15,6 +15,9 @@ public interface VoucherRepository {
 
     Optional<Voucher> findById(UUID id);
 
+    /** Locks the template so two redemptions cannot both pass the per-organisation limit. */
+    Optional<Voucher> findByIdForUpdate(UUID id);
+
     boolean update(Voucher next, long expectedVersion);
 
     boolean updateStatus(UUID id, VoucherStatus status, long expectedVersion, OffsetDateTime updatedAt);

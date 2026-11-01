@@ -22,7 +22,9 @@ public class BonusGrantsRecord extends UpdatableRecordImpl<BonusGrantsRecord> {
     private static final long serialVersionUID = 1L;
 
     /**
-     * Setter for <code>public.bonus_grants.id</code>.
+     * Setter for <code>public.bonus_grants.id</code>. Identity of the
+     * BONUS_GRANT event that created the batch; a redelivery inserts the same
+     * id.
      */
     public BonusGrantsRecord setId(UUID value) {
         set(0, value);
@@ -30,7 +32,9 @@ public class BonusGrantsRecord extends UpdatableRecordImpl<BonusGrantsRecord> {
     }
 
     /**
-     * Getter for <code>public.bonus_grants.id</code>.
+     * Getter for <code>public.bonus_grants.id</code>. Identity of the
+     * BONUS_GRANT event that created the batch; a redelivery inserts the same
+     * id.
      */
     public UUID getId() {
         return (UUID) get(0);

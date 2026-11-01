@@ -16,6 +16,7 @@ public record ResourcePack(
         long totalUnits,
         long remainingUnits,
         UUID purchaseOrderId,
+        UUID sourceSkuId,
         OffsetDateTime expiresAt,
         EntitlementStatus status,
         long version,

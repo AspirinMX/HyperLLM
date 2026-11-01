@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminUsers.AdminUsersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants.BonusGrantsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes.RedemptionCodesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.VoucherCodeBatches.VoucherCodeBatchesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.VouchersRecord;
 
 import java.time.OffsetDateTime;
@@ -245,6 +246,19 @@ public class Vouchers extends TableImpl<VouchersRecord> {
             _redemptionCodes = new RedemptionCodesPath(this, null, Keys.REDEMPTION_CODES__REDEMPTION_CODES_VOUCHER_ID_FKEY.getInverseKey());
 
         return _redemptionCodes;
+    }
+
+    private transient VoucherCodeBatchesPath _voucherCodeBatches;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.voucher_code_batches</code> table
+     */
+    public VoucherCodeBatchesPath voucherCodeBatches() {
+        if (_voucherCodeBatches == null)
+            _voucherCodeBatches = new VoucherCodeBatchesPath(this, null, Keys.VOUCHER_CODE_BATCHES__VOUCHER_CODE_BATCHES_VOUCHER_ID_FKEY.getInverseKey());
+
+        return _voucherCodeBatches;
     }
 
     @Override

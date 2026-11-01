@@ -38,6 +38,7 @@ public class JooqResourcePackRepository implements ResourcePackRepository {
                 .set(RESOURCE_PACKS.TOTAL_UNITS, pack.totalUnits())
                 .set(RESOURCE_PACKS.REMAINING_UNITS, pack.remainingUnits())
                 .set(RESOURCE_PACKS.PURCHASE_ORDER_ID, pack.purchaseOrderId())
+                .set(RESOURCE_PACKS.SOURCE_SKU_ID, pack.sourceSkuId())
                 .set(RESOURCE_PACKS.EXPIRES_AT, pack.expiresAt())
                 .set(RESOURCE_PACKS.STATUS, pack.status().name())
                 .set(RESOURCE_PACKS.VERSION, pack.version())
@@ -151,6 +152,7 @@ public class JooqResourcePackRepository implements ResourcePackRepository {
                 r.getTotalUnits(),
                 r.getRemainingUnits(),
                 r.getPurchaseOrderId(),
+                r.getSourceSkuId(),
                 r.getExpiresAt(),
                 PgJooqSupport.toEnum(EntitlementStatus.class, r.getStatus()),
                 r.getVersion(),

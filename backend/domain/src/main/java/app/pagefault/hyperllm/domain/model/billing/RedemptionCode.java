@@ -8,6 +8,7 @@ import java.util.UUID;
 public record RedemptionCode(
         UUID id,
         UUID voucherId,
+        UUID batchId,
         String codeHash,
         String codeHint,
         UUID redeemedOrgId,
@@ -15,6 +16,7 @@ public record RedemptionCode(
         OffsetDateTime redeemedAt,
         OffsetDateTime expiresAt,
         RedemptionStatus status,
+        UUID grantEventId,
         OffsetDateTime createdAt
 ) {
 }

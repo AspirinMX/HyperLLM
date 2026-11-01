@@ -58,6 +58,15 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
     }
 
     @Override
+    public Optional<WalletLedgerEntry> findFirstByRefOrderId(UUID orderId) {
+        return dsl.selectFrom(WALLET_LEDGER)
+                .where(WALLET_LEDGER.REF_ORDER_ID.eq(orderId))
+                .orderBy(WALLET_LEDGER.CREATED_AT.asc())
+                .limit(1)
+                .fetchOptional(this::toDomain);
+    }
+
+    @Override
     public PageResponse<WalletLedgerEntry> listByOrg(UUID orgId, PageQuery pageQuery) {
         Condition cond = WALLET_LEDGER.ORG_ID.eq(orgId);
         return PgJooqSupport.fetchPage(

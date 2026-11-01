@@ -20,6 +20,8 @@ import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations;
 import app.pagefault.hyperllm.domain.jooq.tables.OutboxEvents;
 import app.pagefault.hyperllm.domain.jooq.tables.OutboxWatermark;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentNotifications;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
@@ -27,10 +29,12 @@ import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
 import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes;
 import app.pagefault.hyperllm.domain.jooq.tables.RefreshTokens;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus;
 import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks;
 import app.pagefault.hyperllm.domain.jooq.tables.UserIdentities;
 import app.pagefault.hyperllm.domain.jooq.tables.Users;
 import app.pagefault.hyperllm.domain.jooq.tables.VirtualModels;
+import app.pagefault.hyperllm.domain.jooq.tables.VoucherCodeBatches;
 import app.pagefault.hyperllm.domain.jooq.tables.Vouchers;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger;
 import app.pagefault.hyperllm.domain.jooq.tables.Wallets;
@@ -137,6 +141,16 @@ public class Public extends SchemaImpl {
     public final OutboxWatermark OUTBOX_WATERMARK = OutboxWatermark.OUTBOX_WATERMARK;
 
     /**
+     * The table <code>public.payment_anomalies</code>.
+     */
+    public final PaymentAnomalies PAYMENT_ANOMALIES = PaymentAnomalies.PAYMENT_ANOMALIES;
+
+    /**
+     * The table <code>public.payment_notifications</code>.
+     */
+    public final PaymentNotifications PAYMENT_NOTIFICATIONS = PaymentNotifications.PAYMENT_NOTIFICATIONS;
+
+    /**
      * The table <code>public.payment_orders</code>.
      */
     public final PaymentOrders PAYMENT_ORDERS = PaymentOrders.PAYMENT_ORDERS;
@@ -172,6 +186,11 @@ public class Public extends SchemaImpl {
     public final RefreshTokens REFRESH_TOKENS = RefreshTokens.REFRESH_TOKENS;
 
     /**
+     * The table <code>public.resource_pack_skus</code>.
+     */
+    public final ResourcePackSkus RESOURCE_PACK_SKUS = ResourcePackSkus.RESOURCE_PACK_SKUS;
+
+    /**
      * The table <code>public.resource_packs</code>.
      */
     public final ResourcePacks RESOURCE_PACKS = ResourcePacks.RESOURCE_PACKS;
@@ -190,6 +209,11 @@ public class Public extends SchemaImpl {
      * The table <code>public.virtual_models</code>.
      */
     public final VirtualModels VIRTUAL_MODELS = VirtualModels.VIRTUAL_MODELS;
+
+    /**
+     * The table <code>public.voucher_code_batches</code>.
+     */
+    public final VoucherCodeBatches VOUCHER_CODE_BATCHES = VoucherCodeBatches.VOUCHER_CODE_BATCHES;
 
     /**
      * The table <code>public.vouchers</code>.
@@ -238,6 +262,8 @@ public class Public extends SchemaImpl {
             Organizations.ORGANIZATIONS,
             OutboxEvents.OUTBOX_EVENTS,
             OutboxWatermark.OUTBOX_WATERMARK,
+            PaymentAnomalies.PAYMENT_ANOMALIES,
+            PaymentNotifications.PAYMENT_NOTIFICATIONS,
             PaymentOrders.PAYMENT_ORDERS,
             PricingRules.PRICING_RULES,
             ProjectMembers.PROJECT_MEMBERS,
@@ -245,10 +271,12 @@ public class Public extends SchemaImpl {
             Providers.PROVIDERS,
             RedemptionCodes.REDEMPTION_CODES,
             RefreshTokens.REFRESH_TOKENS,
+            ResourcePackSkus.RESOURCE_PACK_SKUS,
             ResourcePacks.RESOURCE_PACKS,
             UserIdentities.USER_IDENTITIES,
             Users.USERS,
             VirtualModels.VIRTUAL_MODELS,
+            VoucherCodeBatches.VOUCHER_CODE_BATCHES,
             Vouchers.VOUCHERS,
             WalletLedger.WALLET_LEDGER,
             Wallets.WALLETS

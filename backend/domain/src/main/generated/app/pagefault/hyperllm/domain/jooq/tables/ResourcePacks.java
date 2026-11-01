@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus.ResourcePackSkusPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.ResourcePacksRecord;
 
 import java.time.OffsetDateTime;
@@ -64,9 +65,11 @@ public class ResourcePacks extends TableImpl<ResourcePacksRecord> {
     }
 
     /**
-     * The column <code>public.resource_packs.id</code>.
+     * The column <code>public.resource_packs.id</code>. Identity of the
+     * PACK_GRANT event that created the batch; the purchase order is the
+     * accounting reference.
      */
-    public final TableField<ResourcePacksRecord, UUID> ID = createField(DSL.name("id"), SQLDataType.UUID.nullable(false), this, "");
+    public final TableField<ResourcePacksRecord, UUID> ID = createField(DSL.name("id"), SQLDataType.UUID.nullable(false), this, "Identity of the PACK_GRANT event that created the batch; the purchase order is the accounting reference.");
 
     /**
      * The column <code>public.resource_packs.org_id</code>.
@@ -127,6 +130,11 @@ public class ResourcePacks extends TableImpl<ResourcePacksRecord> {
      * The column <code>public.resource_packs.updated_at</code>.
      */
     public final TableField<ResourcePacksRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
+
+    /**
+     * The column <code>public.resource_packs.source_sku_id</code>.
+     */
+    public final TableField<ResourcePacksRecord, UUID> SOURCE_SKU_ID = createField(DSL.name("source_sku_id"), SQLDataType.UUID, this, "");
 
     private ResourcePacks(Name alias, Table<ResourcePacksRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -207,7 +215,7 @@ public class ResourcePacks extends TableImpl<ResourcePacksRecord> {
 
     @Override
     public List<ForeignKey<ResourcePacksRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.RESOURCE_PACKS__RESOURCE_PACKS_ORG_ID_FKEY, Keys.RESOURCE_PACKS__RESOURCE_PACKS_PURCHASE_ORDER_ID_FKEY);
+        return Arrays.asList(Keys.RESOURCE_PACKS__RESOURCE_PACKS_ORG_ID_FKEY, Keys.RESOURCE_PACKS__RESOURCE_PACKS_PURCHASE_ORDER_ID_FKEY, Keys.RESOURCE_PACKS__RESOURCE_PACKS_SOURCE_SKU_ID_FKEY);
     }
 
     private transient OrganizationsPath _organizations;
@@ -234,6 +242,19 @@ public class ResourcePacks extends TableImpl<ResourcePacksRecord> {
             _paymentOrders = new PaymentOrdersPath(this, Keys.RESOURCE_PACKS__RESOURCE_PACKS_PURCHASE_ORDER_ID_FKEY, null);
 
         return _paymentOrders;
+    }
+
+    private transient ResourcePackSkusPath _resourcePackSkus;
+
+    /**
+     * Get the implicit join path to the <code>public.resource_pack_skus</code>
+     * table.
+     */
+    public ResourcePackSkusPath resourcePackSkus() {
+        if (_resourcePackSkus == null)
+            _resourcePackSkus = new ResourcePackSkusPath(this, Keys.RESOURCE_PACKS__RESOURCE_PACKS_SOURCE_SKU_ID_FKEY, null);
+
+        return _resourcePackSkus;
     }
 
     @Override

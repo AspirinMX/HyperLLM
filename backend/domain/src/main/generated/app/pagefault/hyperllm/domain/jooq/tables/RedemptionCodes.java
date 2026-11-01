@@ -10,6 +10,7 @@ import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants.BonusGrantsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
+import app.pagefault.hyperllm.domain.jooq.tables.VoucherCodeBatches.VoucherCodeBatchesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Vouchers.VouchersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.RedemptionCodesRecord;
 
@@ -115,6 +116,17 @@ public class RedemptionCodes extends TableImpl<RedemptionCodesRecord> {
      */
     public final TableField<RedemptionCodesRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.redemption_codes.batch_id</code>.
+     */
+    public final TableField<RedemptionCodesRecord, UUID> BATCH_ID = createField(DSL.name("batch_id"), SQLDataType.UUID, this, "");
+
+    /**
+     * The column <code>public.redemption_codes.grant_event_id</code>. The
+     * BONUS_GRANT event authorized when the code was redeemed.
+     */
+    public final TableField<RedemptionCodesRecord, UUID> GRANT_EVENT_ID = createField(DSL.name("grant_event_id"), SQLDataType.UUID, this, "The BONUS_GRANT event authorized when the code was redeemed.");
+
     private RedemptionCodes(Name alias, Table<RedemptionCodesRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -184,7 +196,7 @@ public class RedemptionCodes extends TableImpl<RedemptionCodesRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_REDEMPTION_CODES_VOUCHER_STATUS);
+        return Arrays.asList(Indexes.IDX_REDEMPTION_CODES_BATCH, Indexes.IDX_REDEMPTION_CODES_VOUCHER_STATUS);
     }
 
     @Override
@@ -199,7 +211,20 @@ public class RedemptionCodes extends TableImpl<RedemptionCodesRecord> {
 
     @Override
     public List<ForeignKey<RedemptionCodesRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_BY_USER_ID_FKEY, Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_ORG_ID_FKEY, Keys.REDEMPTION_CODES__REDEMPTION_CODES_VOUCHER_ID_FKEY);
+        return Arrays.asList(Keys.REDEMPTION_CODES__REDEMPTION_CODES_BATCH_ID_FKEY, Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_BY_USER_ID_FKEY, Keys.REDEMPTION_CODES__REDEMPTION_CODES_REDEEMED_ORG_ID_FKEY, Keys.REDEMPTION_CODES__REDEMPTION_CODES_VOUCHER_ID_FKEY);
+    }
+
+    private transient VoucherCodeBatchesPath _voucherCodeBatches;
+
+    /**
+     * Get the implicit join path to the
+     * <code>public.voucher_code_batches</code> table.
+     */
+    public VoucherCodeBatchesPath voucherCodeBatches() {
+        if (_voucherCodeBatches == null)
+            _voucherCodeBatches = new VoucherCodeBatchesPath(this, Keys.REDEMPTION_CODES__REDEMPTION_CODES_BATCH_ID_FKEY, null);
+
+        return _voucherCodeBatches;
     }
 
     private transient UsersPath _users;

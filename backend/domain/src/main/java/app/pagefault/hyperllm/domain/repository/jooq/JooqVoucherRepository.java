@@ -51,6 +51,14 @@ public class JooqVoucherRepository implements VoucherRepository {
     }
 
     @Override
+    public Optional<Voucher> findByIdForUpdate(UUID id) {
+        return dsl.selectFrom(VOUCHERS)
+                .where(VOUCHERS.ID.eq(id))
+                .forUpdate()
+                .fetchOptional(this::toDomain);
+    }
+
+    @Override
     public boolean update(Voucher next, long expectedVersion) {
         int updated = dsl.update(VOUCHERS)
                 .set(VOUCHERS.NAME, next.name())

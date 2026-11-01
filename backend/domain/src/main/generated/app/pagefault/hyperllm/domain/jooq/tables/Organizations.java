@@ -15,6 +15,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.NotificationEndpoints.Notificat
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations.OrgInvitationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers.OrgMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides.OrgModelPricingOverridesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies.PaymentAnomaliesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
@@ -338,6 +339,19 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
             _orgModelPricingOverrides = new OrgModelPricingOverridesPath(this, null, Keys.ORG_MODEL_PRICING_OVERRIDES__ORG_MODEL_PRICING_OVERRIDES_ORG_ID_FKEY.getInverseKey());
 
         return _orgModelPricingOverrides;
+    }
+
+    private transient PaymentAnomaliesPath _paymentAnomalies;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.payment_anomalies</code> table
+     */
+    public PaymentAnomaliesPath paymentAnomalies() {
+        if (_paymentAnomalies == null)
+            _paymentAnomalies = new PaymentAnomaliesPath(this, null, Keys.PAYMENT_ANOMALIES__PAYMENT_ANOMALIES_ORG_ID_FKEY.getInverseKey());
+
+        return _paymentAnomalies;
     }
 
     private transient PaymentOrdersPath _paymentOrders;

@@ -307,7 +307,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
     public List<Check<WalletLedgerRecord>> getChecks() {
         return Arrays.asList(
             Internal.createCheck(this, DSL.name("chk_wallet_ledger_shortfall_non_negative"), "((shortfall_micros >= 0))", true),
-            Internal.createCheck(this, DSL.name("wallet_ledger_ledger_type_check"), "(((ledger_type)::text = ANY ((ARRAY['RECHARGE'::character varying, 'CONSUME'::character varying, 'BONUS_GRANT'::character varying, 'BONUS_EXPIRE'::character varying, 'REFUND'::character varying, 'ADJUST'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("wallet_ledger_ledger_type_check"), "(((ledger_type)::text = ANY ((ARRAY['RECHARGE'::character varying, 'CONSUME'::character varying, 'BONUS_GRANT'::character varying, 'PACK_GRANT'::character varying, 'BONUS_EXPIRE'::character varying, 'REFUND'::character varying, 'ADJUST'::character varying])::text[])))", true)
         );
     }
 

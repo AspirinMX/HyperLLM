@@ -20,6 +20,8 @@ import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations;
 import app.pagefault.hyperllm.domain.jooq.tables.OutboxEvents;
 import app.pagefault.hyperllm.domain.jooq.tables.OutboxWatermark;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentNotifications;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
@@ -27,10 +29,12 @@ import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
 import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes;
 import app.pagefault.hyperllm.domain.jooq.tables.RefreshTokens;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus;
 import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks;
 import app.pagefault.hyperllm.domain.jooq.tables.UserIdentities;
 import app.pagefault.hyperllm.domain.jooq.tables.Users;
 import app.pagefault.hyperllm.domain.jooq.tables.VirtualModels;
+import app.pagefault.hyperllm.domain.jooq.tables.VoucherCodeBatches;
 import app.pagefault.hyperllm.domain.jooq.tables.Vouchers;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger;
 import app.pagefault.hyperllm.domain.jooq.tables.Wallets;
@@ -123,6 +127,16 @@ public class Tables {
     public static final OutboxWatermark OUTBOX_WATERMARK = OutboxWatermark.OUTBOX_WATERMARK;
 
     /**
+     * The table <code>public.payment_anomalies</code>.
+     */
+    public static final PaymentAnomalies PAYMENT_ANOMALIES = PaymentAnomalies.PAYMENT_ANOMALIES;
+
+    /**
+     * The table <code>public.payment_notifications</code>.
+     */
+    public static final PaymentNotifications PAYMENT_NOTIFICATIONS = PaymentNotifications.PAYMENT_NOTIFICATIONS;
+
+    /**
      * The table <code>public.payment_orders</code>.
      */
     public static final PaymentOrders PAYMENT_ORDERS = PaymentOrders.PAYMENT_ORDERS;
@@ -158,6 +172,11 @@ public class Tables {
     public static final RefreshTokens REFRESH_TOKENS = RefreshTokens.REFRESH_TOKENS;
 
     /**
+     * The table <code>public.resource_pack_skus</code>.
+     */
+    public static final ResourcePackSkus RESOURCE_PACK_SKUS = ResourcePackSkus.RESOURCE_PACK_SKUS;
+
+    /**
      * The table <code>public.resource_packs</code>.
      */
     public static final ResourcePacks RESOURCE_PACKS = ResourcePacks.RESOURCE_PACKS;
@@ -176,6 +195,11 @@ public class Tables {
      * The table <code>public.virtual_models</code>.
      */
     public static final VirtualModels VIRTUAL_MODELS = VirtualModels.VIRTUAL_MODELS;
+
+    /**
+     * The table <code>public.voucher_code_batches</code>.
+     */
+    public static final VoucherCodeBatches VOUCHER_CODE_BATCHES = VoucherCodeBatches.VOUCHER_CODE_BATCHES;
 
     /**
      * The table <code>public.vouchers</code>.

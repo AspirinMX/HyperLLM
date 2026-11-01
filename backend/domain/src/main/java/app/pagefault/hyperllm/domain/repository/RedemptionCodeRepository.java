@@ -20,7 +20,7 @@ public interface RedemptionCodeRepository {
     /**
      * Conditional atomic redemption: succeeds only for an UNUSED, unexpired code.
      */
-    boolean markRedeemed(UUID codeId, UUID orgId, UUID userId, OffsetDateTime redeemedAt);
+    boolean markRedeemed(UUID codeId, UUID orgId, UUID userId, UUID grantEventId, OffsetDateTime redeemedAt);
 
     long countRedeemedByVoucher(UUID voucherId);
 

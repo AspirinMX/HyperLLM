@@ -18,5 +18,8 @@ public interface WalletLedgerRepository {
 
     Optional<UUID> findFirstByRequestKey(UUID orgId, String idempotencyKey);
 
+    /** The folded grant of one payment order, used to report APPLIED without trusting the order row. */
+    Optional<WalletLedgerEntry> findFirstByRefOrderId(UUID orderId);
+
     PageResponse<WalletLedgerEntry> listByOrg(UUID orgId, PageQuery pageQuery);
 }

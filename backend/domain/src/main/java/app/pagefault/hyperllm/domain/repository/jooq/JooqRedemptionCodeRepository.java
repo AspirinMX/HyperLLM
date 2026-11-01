@@ -29,6 +29,7 @@ public class JooqRedemptionCodeRepository implements RedemptionCodeRepository {
         dsl.insertInto(REDEMPTION_CODES)
                 .set(REDEMPTION_CODES.ID, code.id())
                 .set(REDEMPTION_CODES.VOUCHER_ID, code.voucherId())
+                .set(REDEMPTION_CODES.BATCH_ID, code.batchId())
                 .set(REDEMPTION_CODES.CODE_HASH, code.codeHash())
                 .set(REDEMPTION_CODES.CODE_HINT, code.codeHint())
                 .set(REDEMPTION_CODES.REDEEMED_ORG_ID, code.redeemedOrgId())
@@ -49,6 +50,7 @@ public class JooqRedemptionCodeRepository implements RedemptionCodeRepository {
                 .map(code -> dsl.insertInto(REDEMPTION_CODES)
                         .set(REDEMPTION_CODES.ID, code.id())
                         .set(REDEMPTION_CODES.VOUCHER_ID, code.voucherId())
+                        .set(REDEMPTION_CODES.BATCH_ID, code.batchId())
                         .set(REDEMPTION_CODES.CODE_HASH, code.codeHash())
                         .set(REDEMPTION_CODES.CODE_HINT, code.codeHint())
                         .set(REDEMPTION_CODES.EXPIRES_AT, code.expiresAt())
@@ -66,11 +68,13 @@ public class JooqRedemptionCodeRepository implements RedemptionCodeRepository {
     }
 
     @Override
-    public boolean markRedeemed(UUID codeId, UUID orgId, UUID userId, OffsetDateTime redeemedAt) {
+    public boolean markRedeemed(UUID codeId, UUID orgId, UUID userId, UUID grantEventId,
+                                OffsetDateTime redeemedAt) {
         int updated = dsl.update(REDEMPTION_CODES)
                 .set(REDEMPTION_CODES.STATUS, RedemptionStatus.REDEEMED.name())
                 .set(REDEMPTION_CODES.REDEEMED_ORG_ID, orgId)
                 .set(REDEMPTION_CODES.REDEEMED_BY_USER_ID, userId)
+                .set(REDEMPTION_CODES.GRANT_EVENT_ID, grantEventId)
                 .set(REDEMPTION_CODES.REDEEMED_AT, redeemedAt)
                 .where(REDEMPTION_CODES.ID.eq(codeId))
                 .and(REDEMPTION_CODES.STATUS.eq(RedemptionStatus.UNUSED.name()))
@@ -110,6 +114,7 @@ public class JooqRedemptionCodeRepository implements RedemptionCodeRepository {
         return new RedemptionCode(
                 r.getId(),
                 r.getVoucherId(),
+                r.getBatchId(),
                 r.getCodeHash(),
                 r.getCodeHint(),
                 r.getRedeemedOrgId(),
@@ -117,6 +122,7 @@ public class JooqRedemptionCodeRepository implements RedemptionCodeRepository {
                 r.getRedeemedAt(),
                 r.getExpiresAt(),
                 PgJooqSupport.toEnum(RedemptionStatus.class, r.getStatus()),
+                r.getGrantEventId(),
                 r.getCreatedAt()
         );
     }

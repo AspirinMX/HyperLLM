@@ -323,6 +323,177 @@ public class PaymentOrdersRecord extends UpdatableRecordImpl<PaymentOrdersRecord
         return (OffsetDateTime) get(19);
     }
 
+    /**
+     * Setter for <code>public.payment_orders.pack_sku_id</code>.
+     */
+    public PaymentOrdersRecord setPackSkuId(UUID value) {
+        set(20, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.pack_sku_id</code>.
+     */
+    public UUID getPackSkuId() {
+        return (UUID) get(20);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.request_fingerprint</code>.
+     * SHA-256 of the normalized create request; a replay with different terms
+     * is a conflict.
+     */
+    public PaymentOrdersRecord setRequestFingerprint(String value) {
+        set(21, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.request_fingerprint</code>.
+     * SHA-256 of the normalized create request; a replay with different terms
+     * is a conflict.
+     */
+    public String getRequestFingerprint() {
+        return (String) get(21);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.channel_ref</code>.
+     */
+    public PaymentOrdersRecord setChannelRef(String value) {
+        set(22, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.channel_ref</code>.
+     */
+    public String getChannelRef() {
+        return (String) get(22);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.channel_payload</code>.
+     */
+    public PaymentOrdersRecord setChannelPayload(JSONB value) {
+        set(23, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.channel_payload</code>.
+     */
+    public JSONB getChannelPayload() {
+        return (JSONB) get(23);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.fulfillment_event_id</code>. The
+     * RECHARGE or PACK_GRANT event authorized in the confirmation transaction.
+     */
+    public PaymentOrdersRecord setFulfillmentEventId(UUID value) {
+        set(24, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.fulfillment_event_id</code>. The
+     * RECHARGE or PACK_GRANT event authorized in the confirmation transaction.
+     */
+    public UUID getFulfillmentEventId() {
+        return (UUID) get(24);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.fulfilled_at</code>.
+     */
+    public PaymentOrdersRecord setFulfilledAt(OffsetDateTime value) {
+        set(25, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.fulfilled_at</code>.
+     */
+    public OffsetDateTime getFulfilledAt() {
+        return (OffsetDateTime) get(25);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.closed_at</code>.
+     */
+    public PaymentOrdersRecord setClosedAt(OffsetDateTime value) {
+        set(26, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.closed_at</code>.
+     */
+    public OffsetDateTime getClosedAt() {
+        return (OffsetDateTime) get(26);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.failure_code</code>.
+     */
+    public PaymentOrdersRecord setFailureCode(String value) {
+        set(27, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.failure_code</code>.
+     */
+    public String getFailureCode() {
+        return (String) get(27);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.failure_detail</code>.
+     */
+    public PaymentOrdersRecord setFailureDetail(String value) {
+        set(28, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.failure_detail</code>.
+     */
+    public String getFailureDetail() {
+        return (String) get(28);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.refunded_at</code>.
+     */
+    public PaymentOrdersRecord setRefundedAt(OffsetDateTime value) {
+        set(29, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.refunded_at</code>.
+     */
+    public OffsetDateTime getRefundedAt() {
+        return (OffsetDateTime) get(29);
+    }
+
+    /**
+     * Setter for <code>public.payment_orders.refunded_amount_minor</code>.
+     */
+    public PaymentOrdersRecord setRefundedAmountMinor(Long value) {
+        set(30, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.payment_orders.refunded_amount_minor</code>.
+     */
+    public Long getRefundedAmountMinor() {
+        return (Long) get(30);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -346,7 +517,7 @@ public class PaymentOrdersRecord extends UpdatableRecordImpl<PaymentOrdersRecord
     /**
      * Create a detached, initialised PaymentOrdersRecord
      */
-    public PaymentOrdersRecord(UUID id, String orderNo, UUID orgId, UUID createdByUserId, String orderType, String paymentChannel, String payCurrency, Long payAmountMinor, BigDecimal fxRate, Long creditMicros, Long invoiceableAmountMinor, JSONB packSpecJson, String externalTxId, String idempotencyKey, String status, OffsetDateTime paidAt, OffsetDateTime expiresAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public PaymentOrdersRecord(UUID id, String orderNo, UUID orgId, UUID createdByUserId, String orderType, String paymentChannel, String payCurrency, Long payAmountMinor, BigDecimal fxRate, Long creditMicros, Long invoiceableAmountMinor, JSONB packSpecJson, String externalTxId, String idempotencyKey, String status, OffsetDateTime paidAt, OffsetDateTime expiresAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt, UUID packSkuId, String requestFingerprint, String channelRef, JSONB channelPayload, UUID fulfillmentEventId, OffsetDateTime fulfilledAt, OffsetDateTime closedAt, String failureCode, String failureDetail, OffsetDateTime refundedAt, Long refundedAmountMinor) {
         super(PaymentOrders.PAYMENT_ORDERS);
 
         setId(id);
@@ -369,6 +540,17 @@ public class PaymentOrdersRecord extends UpdatableRecordImpl<PaymentOrdersRecord
         setVersion(version);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setPackSkuId(packSkuId);
+        setRequestFingerprint(requestFingerprint);
+        setChannelRef(channelRef);
+        setChannelPayload(channelPayload);
+        setFulfillmentEventId(fulfillmentEventId);
+        setFulfilledAt(fulfilledAt);
+        setClosedAt(closedAt);
+        setFailureCode(failureCode);
+        setFailureDetail(failureDetail);
+        setRefundedAt(refundedAt);
+        setRefundedAmountMinor(refundedAmountMinor);
         resetChangedOnNotNull();
     }
 }

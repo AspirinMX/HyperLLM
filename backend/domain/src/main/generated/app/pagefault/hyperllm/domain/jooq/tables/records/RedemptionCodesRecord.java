@@ -171,6 +171,38 @@ public class RedemptionCodesRecord extends UpdatableRecordImpl<RedemptionCodesRe
         return (OffsetDateTime) get(9);
     }
 
+    /**
+     * Setter for <code>public.redemption_codes.batch_id</code>.
+     */
+    public RedemptionCodesRecord setBatchId(UUID value) {
+        set(10, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.redemption_codes.batch_id</code>.
+     */
+    public UUID getBatchId() {
+        return (UUID) get(10);
+    }
+
+    /**
+     * Setter for <code>public.redemption_codes.grant_event_id</code>. The
+     * BONUS_GRANT event authorized when the code was redeemed.
+     */
+    public RedemptionCodesRecord setGrantEventId(UUID value) {
+        set(11, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.redemption_codes.grant_event_id</code>. The
+     * BONUS_GRANT event authorized when the code was redeemed.
+     */
+    public UUID getGrantEventId() {
+        return (UUID) get(11);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -194,7 +226,7 @@ public class RedemptionCodesRecord extends UpdatableRecordImpl<RedemptionCodesRe
     /**
      * Create a detached, initialised RedemptionCodesRecord
      */
-    public RedemptionCodesRecord(UUID id, UUID voucherId, String codeHash, String codeHint, UUID redeemedOrgId, UUID redeemedByUserId, OffsetDateTime redeemedAt, OffsetDateTime expiresAt, String status, OffsetDateTime createdAt) {
+    public RedemptionCodesRecord(UUID id, UUID voucherId, String codeHash, String codeHint, UUID redeemedOrgId, UUID redeemedByUserId, OffsetDateTime redeemedAt, OffsetDateTime expiresAt, String status, OffsetDateTime createdAt, UUID batchId, UUID grantEventId) {
         super(RedemptionCodes.REDEMPTION_CODES);
 
         setId(id);
@@ -207,6 +239,8 @@ public class RedemptionCodesRecord extends UpdatableRecordImpl<RedemptionCodesRe
         setExpiresAt(expiresAt);
         setStatus(status);
         setCreatedAt(createdAt);
+        setBatchId(batchId);
+        setGrantEventId(grantEventId);
         resetChangedOnNotNull();
     }
 }

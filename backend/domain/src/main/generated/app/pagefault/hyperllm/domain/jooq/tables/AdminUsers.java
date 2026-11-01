@@ -8,7 +8,10 @@ import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions.AdminSessionsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgModelPricingOverrides.OrgModelPricingOverridesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies.PaymentAnomaliesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules.PricingRulesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus.ResourcePackSkusPath;
+import app.pagefault.hyperllm.domain.jooq.tables.VoucherCodeBatches.VoucherCodeBatchesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Vouchers.VouchersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.AdminUsersRecord;
 
@@ -238,6 +241,19 @@ public class AdminUsers extends TableImpl<AdminUsersRecord> {
         return _orgModelPricingOverrides;
     }
 
+    private transient PaymentAnomaliesPath _paymentAnomalies;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.payment_anomalies</code> table
+     */
+    public PaymentAnomaliesPath paymentAnomalies() {
+        if (_paymentAnomalies == null)
+            _paymentAnomalies = new PaymentAnomaliesPath(this, null, Keys.PAYMENT_ANOMALIES__PAYMENT_ANOMALIES_RESOLVED_BY_ADMIN_ID_FKEY.getInverseKey());
+
+        return _paymentAnomalies;
+    }
+
     private transient PricingRulesPath _pricingRules;
 
     /**
@@ -249,6 +265,32 @@ public class AdminUsers extends TableImpl<AdminUsersRecord> {
             _pricingRules = new PricingRulesPath(this, null, Keys.PRICING_RULES__PRICING_RULES_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
 
         return _pricingRules;
+    }
+
+    private transient ResourcePackSkusPath _resourcePackSkus;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.resource_pack_skus</code> table
+     */
+    public ResourcePackSkusPath resourcePackSkus() {
+        if (_resourcePackSkus == null)
+            _resourcePackSkus = new ResourcePackSkusPath(this, null, Keys.RESOURCE_PACK_SKUS__RESOURCE_PACK_SKUS_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
+
+        return _resourcePackSkus;
+    }
+
+    private transient VoucherCodeBatchesPath _voucherCodeBatches;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.voucher_code_batches</code> table
+     */
+    public VoucherCodeBatchesPath voucherCodeBatches() {
+        if (_voucherCodeBatches == null)
+            _voucherCodeBatches = new VoucherCodeBatchesPath(this, null, Keys.VOUCHER_CODE_BATCHES__VOUCHER_CODE_BATCHES_CREATED_BY_ADMIN_ID_FKEY.getInverseKey());
+
+        return _voucherCodeBatches;
     }
 
     private transient VouchersPath _vouchers;

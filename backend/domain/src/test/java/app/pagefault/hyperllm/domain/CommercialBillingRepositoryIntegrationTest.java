@@ -157,13 +157,14 @@ class CommercialBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
         String codeHash = "hash-" + UuidV7.next();
         UUID codeId = UuidV7.next();
         redemptionCodeRepository.insert(new RedemptionCode(
-                codeId, voucherId, codeHash, "HL26-****-9X2A", null, null, null,
-                now.plusDays(1), RedemptionStatus.UNUSED, now
+                codeId, voucherId, null, codeHash, "HL26-****-9X2A", null, null, null,
+                now.plusDays(1), RedemptionStatus.UNUSED, null, now
         ));
 
         assertThat(redemptionCodeRepository.findByCodeHash(codeHash)).isPresent();
-        assertThat(redemptionCodeRepository.markRedeemed(codeId, orgId, null, now)).isTrue();
-        assertThat(redemptionCodeRepository.markRedeemed(codeId, orgId, null, now))
+        UUID grantEventId = UuidV7.next();
+        assertThat(redemptionCodeRepository.markRedeemed(codeId, orgId, null, grantEventId, now)).isTrue();
+        assertThat(redemptionCodeRepository.markRedeemed(codeId, orgId, null, grantEventId, now))
                 .as("second redemption must fail")
                 .isFalse();
         assertThat(redemptionCodeRepository.countRedeemedByVoucher(voucherId)).isEqualTo(1L);
@@ -233,7 +234,9 @@ class CommercialBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
         return new PaymentOrder(
                 UuidV7.next(), "order-" + UuidV7.next(), orgId, userId, OrderType.WALLET_TOPUP,
                 PaymentChannel.STRIPE, "USD", 10_000L, BigDecimal.ONE, 10_000L, 10_000L, null, null,
-                idempotencyKey, OrderStatus.valueOf(status), "PAID".equals(status) ? now : null,
+                null, null, null, null,
+                idempotencyKey, OrderStatus.valueOf(status), null, null,
+                "PAID".equals(status) ? now : null, null, null, null, null, 0L,
                 expiresAt, 0L, now, now
         );
     }
@@ -241,7 +244,7 @@ class CommercialBillingRepositoryIntegrationTest extends AbstractPostgresIntegra
     private ResourcePack pack(UUID orgId, String modelCode, long units, OffsetDateTime expiresAt, EntitlementStatus status) {
         return new ResourcePack(
                 UuidV7.next(), orgId, "pack-" + units, PackUnitType.TOKENS, List.of(modelCode),
-                units, units, null, expiresAt, status, 0L, now, now
+                units, units, null, null, expiresAt, status, 0L, now, now
         );
     }
 

@@ -22,7 +22,9 @@ public class ResourcePacksRecord extends UpdatableRecordImpl<ResourcePacksRecord
     private static final long serialVersionUID = 1L;
 
     /**
-     * Setter for <code>public.resource_packs.id</code>.
+     * Setter for <code>public.resource_packs.id</code>. Identity of the
+     * PACK_GRANT event that created the batch; the purchase order is the
+     * accounting reference.
      */
     public ResourcePacksRecord setId(UUID value) {
         set(0, value);
@@ -30,7 +32,9 @@ public class ResourcePacksRecord extends UpdatableRecordImpl<ResourcePacksRecord
     }
 
     /**
-     * Getter for <code>public.resource_packs.id</code>.
+     * Getter for <code>public.resource_packs.id</code>. Identity of the
+     * PACK_GRANT event that created the batch; the purchase order is the
+     * accounting reference.
      */
     public UUID getId() {
         return (UUID) get(0);
@@ -216,6 +220,21 @@ public class ResourcePacksRecord extends UpdatableRecordImpl<ResourcePacksRecord
         return (OffsetDateTime) get(12);
     }
 
+    /**
+     * Setter for <code>public.resource_packs.source_sku_id</code>.
+     */
+    public ResourcePacksRecord setSourceSkuId(UUID value) {
+        set(13, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.resource_packs.source_sku_id</code>.
+     */
+    public UUID getSourceSkuId() {
+        return (UUID) get(13);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -239,7 +258,7 @@ public class ResourcePacksRecord extends UpdatableRecordImpl<ResourcePacksRecord
     /**
      * Create a detached, initialised ResourcePacksRecord
      */
-    public ResourcePacksRecord(UUID id, UUID orgId, String packName, String unitType, String[] applicableModels, Long totalUnits, Long remainingUnits, UUID purchaseOrderId, OffsetDateTime expiresAt, String status, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public ResourcePacksRecord(UUID id, UUID orgId, String packName, String unitType, String[] applicableModels, Long totalUnits, Long remainingUnits, UUID purchaseOrderId, OffsetDateTime expiresAt, String status, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt, UUID sourceSkuId) {
         super(ResourcePacks.RESOURCE_PACKS);
 
         setId(id);
@@ -255,6 +274,7 @@ public class ResourcePacksRecord extends UpdatableRecordImpl<ResourcePacksRecord
         setVersion(version);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setSourceSkuId(sourceSkuId);
         resetChangedOnNotNull();
     }
 }

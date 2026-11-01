@@ -55,6 +55,27 @@ class BillingMoneyEventTest {
     }
 
     @Test
+    void keepsGrantTermsAcrossTheWire() {
+        UUID eventId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        BillingMoneyEvent event = new BillingMoneyEvent(
+                eventId, BillingMoneyEvent.EventType.PACK_GRANT, OffsetDateTime.now(ZoneOffset.UTC),
+                UUID.randomUUID(), null, null, "pack:1", 0L, 0L, 1_000L, 0L, List.of(), null, null,
+                false, "pack", BillingMoneyEvent.CreditSource.PAYMENT,
+                BillingMoneyEvent.Grant.pack(eventId, "Starter", "TOKENS", 1_000L,
+                        List.of("gpt-4o"), OffsetDateTime.now(ZoneOffset.UTC).plusDays(30)),
+                orderId);
+
+        BillingMoneyEvent decoded = read(write(event));
+
+        assertThat(decoded).isEqualTo(event);
+        assertThat(decoded.grant().type()).isEqualTo(BillingMoneyEvent.GrantType.PACK);
+        assertThat(decoded.grant().batchId()).isEqualTo(eventId);
+        assertThat(decoded.grant().applicableModels()).containsExactly("gpt-4o");
+        assertThat(decoded.orderId()).isEqualTo(orderId);
+    }
+
+    @Test
     void treatsAMissingLegListAsEmptyRatherThanNull() {
         BillingMoneyEvent event = new BillingMoneyEvent(
                 UUID.randomUUID(), BillingMoneyEvent.EventType.ADJUST, OffsetDateTime.now(ZoneOffset.UTC),

@@ -65,9 +65,11 @@ public class BonusGrants extends TableImpl<BonusGrantsRecord> {
     }
 
     /**
-     * The column <code>public.bonus_grants.id</code>.
+     * The column <code>public.bonus_grants.id</code>. Identity of the
+     * BONUS_GRANT event that created the batch; a redelivery inserts the same
+     * id.
      */
-    public final TableField<BonusGrantsRecord, UUID> ID = createField(DSL.name("id"), SQLDataType.UUID.nullable(false), this, "");
+    public final TableField<BonusGrantsRecord, UUID> ID = createField(DSL.name("id"), SQLDataType.UUID.nullable(false), this, "Identity of the BONUS_GRANT event that created the batch; a redelivery inserts the same id.");
 
     /**
      * The column <code>public.bonus_grants.org_id</code>.

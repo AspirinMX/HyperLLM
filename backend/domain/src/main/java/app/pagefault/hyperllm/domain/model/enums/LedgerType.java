@@ -4,6 +4,7 @@ public enum LedgerType {
     RECHARGE,
     CONSUME,
     BONUS_GRANT,
+    PACK_GRANT,
     BONUS_EXPIRE,
     REFUND,
     ADJUST
