@@ -124,7 +124,9 @@ public class JooqPaymentOrderRepository implements PaymentOrderRepository {
                 .set(PAYMENT_ORDERS.UPDATED_AT, updatedAt)
                 .where(PAYMENT_ORDERS.ID.eq(id))
                 .and(PAYMENT_ORDERS.VERSION.eq(expectedVersion))
-                .and(PAYMENT_ORDERS.STATUS.eq(OrderStatus.PENDING.name()))
+                // A verified payment that arrives after the local close still wins: the channel's
+                // final state, not the local deadline, decides whether money moved.
+                .and(PAYMENT_ORDERS.STATUS.notIn(OrderStatus.PAID.name(), OrderStatus.REFUNDED.name()))
                 .execute() == 1;
     }
 

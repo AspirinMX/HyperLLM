@@ -53,3 +53,33 @@ hyperllm:
     signup-bonus-micros: ${HYPERLLM_SIGNUP_BONUS_MICROS:5000000}
   auth:
     otp-debug-echo-enabled: ${HYPERLLM_OTP_DEBUG_ECHO:false}
+  payment:
+    public-base-url: ${HYPERLLM_PUBLIC_BASE_URL:http://localhost:8081}
+    order-ttl-minutes: ${HYPERLLM_PAYMENT_ORDER_TTL_MINUTES:30}
+    notification-tolerance-seconds: ${HYPERLLM_PAYMENT_NOTIFICATION_TOLERANCE_SECONDS:300}
+    voucher-code-pepper: ${HYPERLLM_VOUCHER_CODE_PEPPER:}
+    fx-rates:
+      USD: 1
+      CNY: ${HYPERLLM_FX_CNY_PER_USD:0.14}
+    stripe:
+      enabled: ${HYPERLLM_STRIPE_ENABLED:false}
+      secret-key: ${HYPERLLM_STRIPE_SECRET_KEY:}
+      webhook-secret: ${HYPERLLM_STRIPE_WEBHOOK_SECRET:}
+      success-url: ${HYPERLLM_STRIPE_SUCCESS_URL:/payment/return}
+      cancel-url: ${HYPERLLM_STRIPE_CANCEL_URL:/payment/cancel}
+    alipay:
+      enabled: ${HYPERLLM_ALIPAY_ENABLED:false}
+      app-id: ${HYPERLLM_ALIPAY_APP_ID:}
+      merchant-private-key: ${HYPERLLM_ALIPAY_MERCHANT_PRIVATE_KEY:}
+      alipay-public-key: ${HYPERLLM_ALIPAY_PUBLIC_KEY:}
+      notify-url: ${HYPERLLM_ALIPAY_NOTIFY_URL:http://localhost:8081/api/v1/payment-notifications/alipay}
+      return-url: ${HYPERLLM_ALIPAY_RETURN_URL:/payment/return}
+    wechat:
+      enabled: ${HYPERLLM_WECHAT_PAY_ENABLED:false}
+      merchant-id: ${HYPERLLM_WECHAT_MERCHANT_ID:}
+      app-id: ${HYPERLLM_WECHAT_APP_ID:}
+      merchant-serial-number: ${HYPERLLM_WECHAT_MERCHANT_SERIAL:}
+      merchant-private-key: ${HYPERLLM_WECHAT_MERCHANT_PRIVATE_KEY:}
+      api-v3-key: ${HYPERLLM_WECHAT_API_V3_KEY:}
+      platform-public-key: ${HYPERLLM_WECHAT_PLATFORM_PUBLIC_KEY:}
+      notify-url: ${HYPERLLM_WECHAT_NOTIFY_URL:http://localhost:8081/api/v1/payment-notifications/wechat-pay}

@@ -48,7 +48,22 @@ public enum ErrorCode {
     LEDGER_BACKLOG(503, "The billing ledger is behind; retry shortly"),
     OUTBOX_UNAVAILABLE(503, "The billing outbox is unavailable; retry shortly"),
     IDEMPOTENT_IN_FLIGHT(409, "An identical request is still in flight"),
-    IDEMPOTENT_REPLAYED(409, "Duplicate request rejected by idempotency key");
+    IDEMPOTENT_REPLAYED(409, "Duplicate request rejected by idempotency key"),
+
+    PAYMENT_ORDER_NOT_FOUND(404, "Payment order not found"),
+    PAYMENT_ORDER_CONFLICT(409, "The idempotency key was used with different terms"),
+    PAYMENT_CHANNEL_DISABLED(400, "The payment channel is not enabled"),
+    PAYMENT_CHANNEL_UNAVAILABLE(502, "The payment channel did not answer"),
+    PAYMENT_VERIFICATION_FAILED(400, "The payment notification could not be verified"),
+    PAYMENT_AMOUNT_MISMATCH(409, "The paid amount or currency does not match the order"),
+    PAYMENT_STATE_CONFLICT(409, "The payment is in a conflicting state"),
+    PAYMENT_ANOMALY_NOT_FOUND(404, "Payment anomaly not found"),
+    PACK_SKU_NOT_FOUND(404, "Resource pack SKU not found"),
+    PACK_SKU_CODE_EXISTS(409, "Resource pack SKU code already exists"),
+    PACK_SKU_NOT_PURCHASABLE(409, "Resource pack SKU is not on sale"),
+    VOUCHER_CODE_INVALID(400, "The redemption code is not valid"),
+    VOUCHER_LIMIT_REACHED(409, "The voucher redemption limit has been reached"),
+    VOUCHER_NOT_FOUND(404, "Voucher not found");
 
     private final int httpStatus;
     private final String defaultMessage;

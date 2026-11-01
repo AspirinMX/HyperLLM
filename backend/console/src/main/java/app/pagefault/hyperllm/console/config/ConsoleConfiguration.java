@@ -8,11 +8,13 @@ import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 @Configuration
-@EnableConfigurationProperties(ConsoleProperties.class)
+@EnableScheduling
+@EnableConfigurationProperties({ConsoleProperties.class, app.pagefault.hyperllm.console.payment.PaymentProperties.class})
 public class ConsoleConfiguration {
 
     @Bean
