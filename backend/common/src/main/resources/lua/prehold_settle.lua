@@ -1,8 +1,9 @@
 -- Single terminal transition for a reservation. Expiry, explicit release and normal settlement
 -- contend on the same hold/done keys. The event records only deltas this invocation applied.
--- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, owner hash, proof, org waiting set
+-- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, owner hash,
+--       proof, org waiting set, rate correction marker
 -- ARGV: holdId, nowMs, occurredAt, mode, charges, detail prefix, done TTL ms, evidence TTL ms,
---       pack prefix, bonus prefix, legacy grant id
+--       pack prefix, bonus prefix, legacy grant id, actual tokens, marker TTL ms
 local holdId, now, at, mode = ARGV[1], tonumber(ARGV[2]), ARGV[3], ARGV[4]
 local function digits(value)
     return string.format('%.0f', value)
@@ -33,7 +34,8 @@ if redis.call('EXISTS', KEYS[3]) == 1 then
     return {'ALREADY_SETTLED'}
 end
 local hold = redis.call('HMGET', KEYS[2], 'org_id', 'project_id', 'api_key_id', 'model_code',
-        'request_id', 'served', 'legs', 'fallback_legs', 'fallback_detail', 'concurrency_keys')
+        'request_id', 'served', 'legs', 'fallback_legs', 'fallback_detail', 'concurrency_keys',
+        'rate_tokens', 'rate_second', 'rate_estimate')
 if not hold[1] then
     redis.call('ZREM', KEYS[4], holdId)
     return {'MISSING_HOLD'}
@@ -197,6 +199,25 @@ if payload ~= '' then
     local produced = redis.call('HGET', KEYS[7], 'produced')
     if not produced or produced < holdId then
         redis.call('HSET', KEYS[7], 'produced', holdId, 'since', at)
+    end
+end
+-- The token reservation is corrected once per hold, from the estimate taken at admission to the
+-- actual usage of this request. A bucket that already left the window is left alone.
+local tokenKeys, bucket = hold[11] or '', hold[12] or ''
+local actualTokens = tonumber(ARGV[12]) or -1
+if tokenKeys ~= '' and bucket ~= '' and actualTokens >= 0 then
+    if redis.call('SET', KEYS[11], '1', 'NX', 'PX', tonumber(ARGV[13])) then
+        local estimate = tonumber(hold[13] or '0') or 0
+        for key in string.gmatch(tokenKeys, '([^|]+)') do
+            local current = tonumber(redis.call('HGET', key, bucket) or '0') or 0
+            local delta = actualTokens - estimate
+            if delta < 0 and current + delta < 0 then
+                delta = -current
+            end
+            if delta ~= 0 then
+                redis.call('HINCRBY', key, bucket, delta)
+            end
+        end
     end
 end
 return {valid and (payload ~= '' and 'SETTLED' or 'RELEASED') or 'MISS_ENTITLEMENTS',

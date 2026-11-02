@@ -39,6 +39,9 @@ public class PreHoldService {
             List<AllocationLeg> legs,
             Integer keyRpmLimit,
             Integer projectRpmLimit,
+            Integer keyTpmLimit,
+            Integer projectTpmLimit,
+            long estimatedTokens,
             Integer keyMaxConcurrency,
             Integer projectMaxConcurrency,
             int orgMaxConcurrency,
@@ -92,13 +95,16 @@ public class PreHoldService {
         OffsetDateTime at = OffsetDateTime.now(ZoneOffset.UTC);
         long now = at.toInstant().toEpochMilli();
         long ttlMillis = Duration.ofSeconds(command.ttlSeconds()).toMillis();
-        long epochMinute = at.toEpochSecond() / 60L;
         UUID effectiveKeyId = command.apiKeyId() != null ? command.apiKeyId() : command.projectId();
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(command.orgId()), GatewayRedisKeys.holdDone(command.holdId()),
                 GatewayRedisKeys.hold(command.holdId()), GatewayRedisKeys.holdsExpiry(),
-                GatewayRedisKeys.rpmCounter("key", effectiveKeyId, epochMinute),
-                GatewayRedisKeys.rpmCounter("proj", command.projectId(), epochMinute),
+                GatewayRedisKeys.rateWindow("key", effectiveKeyId),
+                GatewayRedisKeys.rateCounts("key", effectiveKeyId),
+                GatewayRedisKeys.rateTokens("key", effectiveKeyId),
+                GatewayRedisKeys.rateWindow("proj", command.projectId()),
+                GatewayRedisKeys.rateCounts("proj", command.projectId()),
+                GatewayRedisKeys.rateTokens("proj", command.projectId()),
                 GatewayRedisKeys.concurrencyCounter("key", effectiveKeyId),
                 GatewayRedisKeys.concurrencyCounter("proj", command.projectId()),
                 GatewayRedisKeys.concurrencyCounter("org", command.orgId()));
@@ -109,33 +115,45 @@ public class PreHoldService {
                 GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(),
                 limit(command.keyRpmLimit()), limit(command.projectRpmLimit()), limit(command.keyMaxConcurrency()),
                 limit(command.projectMaxConcurrency()), limit(command.orgMaxConcurrency()),
-                command.requestId(), encodeLegs(command.fallbackLegs()), command.fallbackDetail());
+                command.requestId(), encodeLegs(command.fallbackLegs()), command.fallbackDetail(),
+                limit(command.keyTpmLimit()), limit(command.projectTpmLimit()),
+                Long.toString(Math.max(0L, command.estimatedTokens())), "60");
         return redisTemplate.execute(admitScript, keys, args).next().defaultIfEmpty("REJECTED");
     }
 
     public Mono<SettleOutcome> settle(
             Lease lease, List<AllocationLeg> charges, String detailPrefix, OffsetDateTime occurredAt
     ) {
-        return transition(lease.holdId(), lease.orgId(), Transition.SETTLE, charges, detailPrefix, occurredAt);
+        return settle(lease, charges, detailPrefix, occurredAt, 0L);
+    }
+
+    public Mono<SettleOutcome> settle(
+            Lease lease, List<AllocationLeg> charges, String detailPrefix, OffsetDateTime occurredAt,
+            long actualTokens
+    ) {
+        return transition(lease.holdId(), lease.orgId(), Transition.SETTLE, charges, detailPrefix,
+                occurredAt, actualTokens);
     }
 
     public Mono<Void> release(Lease lease) {
-        return transition(lease.holdId(), lease.orgId(), Transition.RELEASE, List.of(), "", utcNow()).then();
+        return transition(lease.holdId(), lease.orgId(), Transition.RELEASE, List.of(), "", utcNow(), 0L).then();
     }
 
     private Mono<SettleOutcome> transition(
             String holdId, UUID orgId, Transition mode, List<AllocationLeg> charges, String detailPrefix,
-            OffsetDateTime occurredAt
+            OffsetDateTime occurredAt, long actualTokens
     ) {
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.hold(holdId), GatewayRedisKeys.holdDone(holdId),
                 GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.settleEvent(holdId), GatewayRedisKeys.settlePending(),
                 GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settlePendingOwners(),
-                GatewayRedisKeys.settleProof(holdId), GatewayRedisKeys.settleWaiting(orgId));
+                GatewayRedisKeys.settleProof(holdId), GatewayRedisKeys.settleWaiting(orgId),
+                GatewayRedisKeys.rateAdjustment(holdId));
         List<String> args = List.of(
                 holdId, Long.toString(occurredAt.toInstant().toEpochMilli()), occurredAt.toString(), mode.name(),
                 encodeLegs(charges), detailPrefix, Long.toString(doneTtlMillis), Long.toString(EVIDENCE_TTL_MS),
-                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), LegacyBonusBatch.idFor(orgId).toString());
+                GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), LegacyBonusBatch.idFor(orgId).toString(),
+                Long.toString(Math.max(0L, actualTokens)), Long.toString(EVIDENCE_TTL_MS));
         return redisTemplate.execute(settleScript, keys, args).next().map(raw -> {
             String status = String.valueOf(raw.getFirst());
             if (raw.size() == 1) {
@@ -178,7 +196,7 @@ public class PreHoldService {
                 .flatMap(holdId -> redisTemplate.opsForHash().get(GatewayRedisKeys.hold(holdId), "org_id")
                         .map(value -> UUID.fromString(String.valueOf(value)))
                         .defaultIfEmpty(NO_ORG)
-                        .flatMap(orgId -> transition(holdId, orgId, Transition.RECLAIM, List.of(), "", utcNow()))
+                        .flatMap(orgId -> transition(holdId, orgId, Transition.RECLAIM, List.of(), "", utcNow(), 0L))
                         .map(outcome -> switch (outcome.status()) {
                             case "SETTLED", "RELEASED", "MISS_ENTITLEMENTS" -> 1;
                             default -> 0;

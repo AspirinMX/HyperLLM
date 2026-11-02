@@ -139,8 +139,24 @@ public final class GatewayRedisKeys {
         return "gw:wallet:idem:" + eventId;
     }
 
-    public static String rpmCounter(String scope, UUID id, long epochMinute) {
-        return "gw:rl:rpm:" + scope + ":" + id + ":" + epochMinute;
+    /** Bucket index of a rolling rate window; members are epoch seconds. */
+    public static String rateWindow(String scope, UUID id) {
+        return "gw:rl:win:" + scope + ":" + id;
+    }
+
+    /** Admitted requests per window bucket. */
+    public static String rateCounts(String scope, UUID id) {
+        return "gw:rl:cnt:" + scope + ":" + id;
+    }
+
+    /** Reserved tokens per window bucket; corrected once when the request ends. */
+    public static String rateTokens(String scope, UUID id) {
+        return "gw:rl:tok:" + scope + ":" + id;
+    }
+
+    /** One correction per hold, so a repeated terminal transition cannot move the window twice. */
+    public static String rateAdjustment(String holdId) {
+        return "gw:rl:adj:" + holdId;
     }
 
     public static String concurrencyCounter(String scope, UUID id) {

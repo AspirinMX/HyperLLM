@@ -201,6 +201,39 @@ class PreHoldServiceIT {
     }
 
     @Test
+    void reservesTokensPerWindowAndCorrectsThemToTheActualUsage() {
+        seedWallet(10_000);
+        assertThat(admitWithTokens("h1", 100, 60)).isEqualTo("OK");
+        String bucket = hash(GatewayRedisKeys.hold(id("h1")), "rate_second");
+        assertThat(admitWithTokens("h2", 100, 60))
+                .as("the second request would exceed the token window")
+                .isEqualTo("RATE_LIMIT");
+        assertThat(hash(GatewayRedisKeys.rateCounts("key", projectId), bucket))
+                .as("a rejected request must not be counted")
+                .isEqualTo("1");
+
+        // The first request used far fewer tokens than reserved; the window is corrected once.
+        settle("h1", List.of());
+        assertThat(hash(GatewayRedisKeys.rateTokens("key", projectId), bucket)).isEqualTo("0");
+        assertThat(admitWithTokens("h3", 100, 60)).isEqualTo("OK");
+    }
+
+    @Test
+    void rpmIsCountedInOneSecondBucketsAndExpiresFromTheWindow() {
+        seedWallet(10_000);
+        assertThat(admitWithRpm("h1", 1)).isEqualTo("OK");
+        String bucket = hash(GatewayRedisKeys.hold(id("h1")), "rate_second");
+        assertThat(admitWithRpm("h2", 1)).isEqualTo("RATE_LIMIT");
+        assertThat(hash(GatewayRedisKeys.rateCounts("key", projectId), bucket)).isEqualTo("1");
+
+        // Dropping the whole window is what the 60 second boundary does to the buckets.
+        redis.delete(GatewayRedisKeys.rateWindow("key", projectId),
+                GatewayRedisKeys.rateCounts("key", projectId),
+                GatewayRedisKeys.rateTokens("key", projectId)).block();
+        assertThat(admitWithRpm("h3", 1)).isEqualTo("OK");
+    }
+
+    @Test
     void servedReclaimChargesOnlyTheFloorAndCopiesTheSameAppliedEventToTheOutbox() throws Exception {
         seedPack(100L);
         seedGrant(5_000L);
@@ -209,7 +242,8 @@ class PreHoldServiceIT {
         var floor = List.of(AllocationLeg.pack(packId, 3, 150),
                 AllocationLeg.bonus(grantId, 100), AllocationLeg.cash(200));
         assertThat(service.admit(new PreHoldService.AdmitCommand(id("h1"), orgId, projectId, null,
-                "gpt", held, null, null, null, null, 1, 300L, "request-1", floor, "")).block()).isEqualTo("OK");
+                "gpt", held, null, null, null, null, 0L, null, null, 1, 300L,
+                "request-1", floor, "")).block()).isEqualTo("OK");
         service.markServed(lease("h1")).block();
         redis.opsForZSet().add(GatewayRedisKeys.holdsExpiry(), id("h1"), 1d).block();
 
@@ -283,10 +317,25 @@ class PreHoldServiceIT {
         return admitAsync(holdId, legs).block();
     }
 
+    private String admitWithTokens(String holdId, int tokensLimit, long estimate) {
+        return service.admit(new PreHoldService.AdmitCommand(
+                id(holdId), orgId, projectId, null, "gpt", List.of(AllocationLeg.cash(1)),
+                null, null, null, tokensLimit, estimate, null, null, 0, 300L,
+                holdId, List.of(), "")).block();
+    }
+
+    private String admitWithRpm(String holdId, int rpmLimit) {
+        return service.admit(new PreHoldService.AdmitCommand(
+                id(holdId), orgId, projectId, null, "gpt", List.of(AllocationLeg.cash(1)),
+                rpmLimit, null, null, null, 0L, null, null, 0, 300L,
+                holdId, List.of(), "")).block();
+    }
+
+
     private reactor.core.publisher.Mono<String> admitAsync(String holdId, List<AllocationLeg> legs) {
         return service.admit(new PreHoldService.AdmitCommand(
                 id(holdId), orgId, projectId, null, "gpt", legs,
-                null, null, null, null, 0, 300L, holdId, List.of(), ""));
+                null, null, null, null, 0L, null, null, 0, 300L, holdId, List.of(), ""));
     }
 
     private void seedWallet(long cash) {

@@ -5,18 +5,19 @@
 -- "remaining minus held" inside the same script, and the hold records the legs verbatim so the
 -- settlement later charges the batches that were actually frozen.
 --
--- A missing batch key aborts without writing anything: the mirror is loaded by a separate script,
--- and writing here would resurrect a half-built tenant.
+-- Rate limits are rolling windows of one-second buckets: the zset orders the buckets, and the two
+-- hashes hold the admitted requests and the reserved tokens of each bucket. A request that is
+-- rejected leaves both hashes untouched.
 --
--- KEYS[1] wallet hash
--- KEYS[2] done marker for this hold
--- KEYS[3] hold hash
--- KEYS[4] holds expiry zset
--- KEYS[5] key rpm counter, [6] project rpm counter, [7..9] concurrency counters
+-- KEYS[1] wallet, [2] done marker, [3] hold hash, [4] holds expiry zset,
+-- [5..7] key window zset / request hash / token hash,
+-- [8..10] project window zset / request hash / token hash,
+-- [11..13] key, project, organisation concurrency counters
 -- ARGV[1] holdId, [2] nowMs, [3] ttlMs, [4] legs, [5] renew flag, [6] orgId, [7] projectId,
 --       [8] apiKeyId, [9] modelCode, [10] createdAtIso, [11] pack prefix, [12] bonus prefix,
 --       [13] key rpm limit, [14] project rpm limit, [15] key concurrency, [16] project concurrency,
---       [17] org concurrency, [18] request id, [19] floor legs, [20] floor detail prefix
+--       [17] org concurrency, [18] request id, [19] floor legs, [20] floor detail prefix,
+--       [21] key tpm limit, [22] project tpm limit, [23] estimated tokens, [24] window seconds
 --
 -- Legs are encoded as "TYPE|id|units|micros" joined by ";". CASH legs carry no id and no units.
 local function splitLegs(raw)
@@ -95,12 +96,55 @@ if cash - heldCash < cashNeeded then
     return 'INSUFFICIENT_BALANCE'
 end
 
+local nowMs = tonumber(ARGV[2]) or 0
+local nowSec = math.floor(nowMs / 1000)
+local window = math.max(1, math.min(300, tonumber(ARGV[24]) or 60))
+local from = nowSec - window + 1
+
+-- Evicts buckets that left the window, then sums what remains. The eviction happens before the
+-- limit check and only removes data that can no longer contribute, so a rejection changes no usage.
+local function windowState(zset, counts, tokens)
+    local expired = redis.call('ZRANGEBYSCORE', zset, '-inf', from - 1)
+    if #expired > 0 then
+        redis.call('ZREM', zset, unpack(expired))
+        for _, member in ipairs(expired) do
+            redis.call('HDEL', counts, member)
+            redis.call('HDEL', tokens, member)
+        end
+    end
+    local fields = {}
+    for second = from, nowSec do
+        fields[#fields + 1] = tostring(second)
+    end
+    local requests, used = 0, 0
+    if #fields > 0 then
+        local countValues = redis.call('HMGET', counts, unpack(fields))
+        local tokenValues = redis.call('HMGET', tokens, unpack(fields))
+        for i = 1, #fields do
+            requests = requests + (tonumber(countValues[i]) or 0)
+            used = used + (tonumber(tokenValues[i]) or 0)
+        end
+    end
+    return requests, used
+end
+
+local estimated = math.max(0, tonumber(ARGV[23]) or 0)
+local keyRequests, keyTokens = windowState(KEYS[5], KEYS[6], KEYS[7])
+local projectRequests, projectTokens = windowState(KEYS[8], KEYS[9], KEYS[10])
 local keyRpmLimit = tonumber(ARGV[13]) or 0
 local projectRpmLimit = tonumber(ARGV[14]) or 0
-if keyRpmLimit > 0 and (tonumber(redis.call('GET', KEYS[5]) or '0') or 0) >= keyRpmLimit then
+local keyTpmLimit = tonumber(ARGV[21]) or 0
+local projectTpmLimit = tonumber(ARGV[22]) or 0
+if keyRpmLimit > 0 and keyRequests + 1 > keyRpmLimit then
     return 'RATE_LIMIT'
 end
-if projectRpmLimit > 0 and (tonumber(redis.call('GET', KEYS[6]) or '0') or 0) >= projectRpmLimit then
+if projectRpmLimit > 0 and projectRequests + 1 > projectRpmLimit then
+    return 'RATE_LIMIT'
+end
+if keyTpmLimit > 0 and keyTokens + estimated > keyTpmLimit then
+    return 'RATE_LIMIT'
+end
+if projectTpmLimit > 0 and projectTokens + estimated > projectTpmLimit then
     return 'RATE_LIMIT'
 end
 
@@ -108,7 +152,7 @@ local limits = {tonumber(ARGV[15]) or 0, tonumber(ARGV[16]) or 0, tonumber(ARGV[
 local acquired = {}
 for i = 1, 3 do
     if limits[i] > 0 then
-        local concKey = KEYS[6 + i]
+        local concKey = KEYS[10 + i]
         local current = redis.call('INCR', concKey)
         redis.call('PEXPIRE', concKey, tonumber(ARGV[3]) * 2)
         table.insert(acquired, concKey)
@@ -121,16 +165,19 @@ for i = 1, 3 do
     end
 end
 
-if keyRpmLimit > 0 then
-    if redis.call('INCR', KEYS[5]) == 1 then
-        redis.call('PEXPIRE', KEYS[5], 120000)
+local windowTtl = (window + 60) * 1000
+local function admitWindow(zset, counts, tokens)
+    redis.call('ZADD', zset, nowSec, nowSec)
+    redis.call('HINCRBY', counts, nowSec, 1)
+    if estimated > 0 then
+        redis.call('HINCRBY', tokens, nowSec, estimated)
     end
+    redis.call('PEXPIRE', zset, windowTtl)
+    redis.call('PEXPIRE', counts, windowTtl)
+    redis.call('PEXPIRE', tokens, windowTtl)
 end
-if projectRpmLimit > 0 then
-    if redis.call('INCR', KEYS[6]) == 1 then
-        redis.call('PEXPIRE', KEYS[6], 120000)
-    end
-end
+admitWindow(KEYS[5], KEYS[6], KEYS[7])
+admitWindow(KEYS[8], KEYS[9], KEYS[10])
 
 local holdId = ARGV[1]
 local ttlMs = tonumber(ARGV[3])
@@ -145,9 +192,12 @@ redis.call('HSET', KEYS[3],
         'fallback_legs', ARGV[19],
         'fallback_detail', ARGV[20],
         'concurrency_keys', table.concat(acquired, '|'),
+        'rate_tokens', KEYS[7] .. '|' .. KEYS[10],
+        'rate_second', tostring(nowSec),
+        'rate_estimate', tostring(estimated),
         'served', '0',
         'cash_micros', tostring(cashNeeded))
-redis.call('ZADD', KEYS[4], tonumber(ARGV[2]) + ttlMs, holdId)
+redis.call('ZADD', KEYS[4], nowMs + ttlMs, holdId)
 
 for _, item in ipairs(frozen) do
     redis.call('HINCRBY', item.key, item.field, item.amount)

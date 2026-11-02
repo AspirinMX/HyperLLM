@@ -93,6 +93,8 @@ public class GatewayProxyService {
             List<String> projectAllowedModels,
             Integer keyRpmLimit,
             Integer projRpmLimit,
+            Integer keyTpmLimit,
+            Integer projTpmLimit,
             Integer keyMaxConcurrency,
             Integer projMaxConcurrency,
             int orgMaxConcurrency,
@@ -543,7 +545,8 @@ public class GatewayProxyService {
         return mirrorService.heldLegs(lease.holdId())
                 .map(legs -> HeldLegCharger.charge(legs, exactCostMicros).legs())
                 .flatMap(charges -> preHoldService.settle(lease, charges,
-                        AllocationDetailCodec.encodeContextV1(resolved, billable), eventCreatedAt))
+                        AllocationDetailCodec.encodeContextV1(resolved, billable), eventCreatedAt,
+                        actualTokens(billable)))
                 .doOnNext(deducted -> {
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,
@@ -583,6 +586,11 @@ public class GatewayProxyService {
                     );
                     telemetryService.emitRequestEvent(reqEvent);
                 }).then();
+    }
+
+    private static long actualTokens(BillableUsage usage) {
+        return usage.promptTokens() + usage.cacheReadTokens() + usage.cacheWriteTokens()
+                + usage.completionTokens();
     }
 
     private Disposable startHeartbeat(PreHoldService.Lease lease) {
@@ -667,6 +675,7 @@ public class GatewayProxyService {
                 holdId, caller.orgId(), caller.projectId(), caller.apiKeyId(), modelCode,
                 plan.legs(),
                 caller.keyRpmLimit(), caller.projRpmLimit(),
+                caller.keyTpmLimit(), caller.projTpmLimit(), billableTokens,
                 caller.keyMaxConcurrency(), caller.projMaxConcurrency(), caller.orgMaxConcurrency(),
                 properties.getBilling().getLeaseTtlSeconds(), requestId, floor,
                 AllocationDetailCodec.encodeContextV1(pricing, floorUsage));
@@ -717,7 +726,7 @@ public class GatewayProxyService {
                         }
                         return Mono.just(new CallerContext(
                                 payload.orgId(), payload.projectId(), null, payload.userId(),
-                                null, payload.allowedModels(), null, null, null, null, 50, null, 10_000
+                                null, payload.allowedModels(), null, null, null, null, null, null, 50, null, 10_000
                         ));
                     });
         }
@@ -752,6 +761,7 @@ public class GatewayProxyService {
                 ctx.orgId(), ctx.projectId(), ctx.apiKeyId(), null,
                 ctx.keyAllowedModels(), ctx.projectAllowedModels(),
                 ctx.keyRpmLimit(), ctx.projectRpmLimit(),
+                ctx.keyTpmLimit(), ctx.projectTpmLimit(),
                 ctx.keyMaxConcurrency(), ctx.projectMaxConcurrency(),
                 ctx.orgMaxConcurrency(), ctx.orgDiscountRatioBps(), ctx.tierDefaultDiscountBps()
         ));
