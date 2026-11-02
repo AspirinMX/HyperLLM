@@ -85,11 +85,20 @@ public class JooqPaymentOrderRepository implements PaymentOrderRepository {
 
     @Override
     public long sumPendingTopupCredits(UUID orgId) {
+        return sumPendingTopupCredits(orgId, null);
+    }
+
+    @Override
+    public long sumPendingTopupCredits(UUID orgId, UUID excludeOrderId) {
+        var condition = PAYMENT_ORDERS.ORG_ID.eq(orgId)
+                .and(PAYMENT_ORDERS.ORDER_TYPE.eq(OrderType.WALLET_TOPUP.name()))
+                .and(PAYMENT_ORDERS.STATUS.eq(OrderStatus.PENDING.name()));
+        if (excludeOrderId != null) {
+            condition = condition.and(PAYMENT_ORDERS.ID.ne(excludeOrderId));
+        }
         Long sum = dsl.select(DSL.coalesce(DSL.sum(PAYMENT_ORDERS.CREDIT_MICROS), DSL.inline(0L)))
                 .from(PAYMENT_ORDERS)
-                .where(PAYMENT_ORDERS.ORG_ID.eq(orgId))
-                .and(PAYMENT_ORDERS.ORDER_TYPE.eq(OrderType.WALLET_TOPUP.name()))
-                .and(PAYMENT_ORDERS.STATUS.eq(OrderStatus.PENDING.name()))
+                .where(condition)
                 .fetchOne(0, Long.class);
         return sum == null ? 0L : sum;
     }

@@ -61,7 +61,7 @@ public class PaymentConfirmationTx {
         BillingMoneyEvent event = switch (order.orderType()) {
             case WALLET_TOPUP -> creditOutbox.appendCash(order.orgId(), "payment:" + order.orderNo(),
                     order.creditMicros(), BillingMoneyEvent.CreditSource.PAYMENT, order.id(),
-                    description, paidAt);
+                    order.id(), description, paidAt);
             case RESOURCE_PACK_PURCHASE -> grantPack(order, paidAt, description);
         };
         if (!orders.markPaid(order.id(), paid.externalTxId(), paidAt, event.eventId(),

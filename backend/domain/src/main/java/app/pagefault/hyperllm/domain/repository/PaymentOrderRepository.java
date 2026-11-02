@@ -38,6 +38,9 @@ public interface PaymentOrderRepository {
     /** Cash reserved by orders that are still PENDING; feeds the wallet capacity check. */
     long sumPendingTopupCredits(UUID orgId);
 
+    /** Same reservation, minus the order that is being confirmed right now. */
+    long sumPendingTopupCredits(UUID orgId, UUID excludeOrderId);
+
     boolean updateChannelReference(UUID id, String channelRef, String channelPayload,
                                    long expectedVersion, OffsetDateTime updatedAt);
 

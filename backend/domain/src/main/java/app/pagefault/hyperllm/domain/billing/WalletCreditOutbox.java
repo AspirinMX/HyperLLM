@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.enums.OutboxAggregateType;
 import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
+import app.pagefault.hyperllm.domain.repository.PaymentOrderRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +43,7 @@ public class WalletCreditOutbox {
 
     private final OutboxEventRepository outbox;
     private final WalletRepository wallets;
+    private final PaymentOrderRepository paymentOrders;
     private final ObjectMapper mapper;
 
     /** Authorizes a credit in the same transaction as its originating operation. */
@@ -62,10 +64,21 @@ public class WalletCreditOutbox {
     public BillingMoneyEvent appendCash(UUID orgId, String key, long amount,
                                         BillingMoneyEvent.CreditSource source, UUID orderId,
                                         String description, OffsetDateTime at) {
+        return appendCash(orgId, key, amount, source, orderId, null, description, at);
+    }
+
+    /**
+     * @param reservedOrderId the PENDING order whose own reservation must not be counted twice when
+     *                        its verified payment is being credited
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public BillingMoneyEvent appendCash(UUID orgId, String key, long amount,
+                                        BillingMoneyEvent.CreditSource source, UUID orderId,
+                                        UUID reservedOrderId, String description, OffsetDateTime at) {
         requirePositive(amount);
         Objects.requireNonNull(source, "credit source");
         Wallet wallet = lockWallet(orgId);
-        ensureCapacity(orgId, wallet, true, amount);
+        ensureCapacity(orgId, wallet, true, amount, paymentOrders.sumPendingTopupCredits(orgId, reservedOrderId));
         return authorize(orgId, key, amount, 0L, 0L, source, null, orderId, description, at);
     }
 
@@ -86,7 +99,7 @@ public class WalletCreditOutbox {
         }
         requireGrantTerms(applicableModels, expiresAt, at);
         Wallet wallet = lockWallet(orgId);
-        ensureCapacity(orgId, wallet, false, amount);
+        ensureCapacity(orgId, wallet, false, amount, 0L);
         UUID id = UuidV7.next();
         BillingMoneyEvent.Grant grant = BillingMoneyEvent.Grant.bonus(
                 id, amount, applicableModels, expiresAt, voucherId, redemptionCodeId);
@@ -150,11 +163,11 @@ public class WalletCreditOutbox {
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
     }
 
-    private void ensureCapacity(UUID orgId, Wallet wallet, boolean cash, long amount) {
+    private void ensureCapacity(UUID orgId, Wallet wallet, boolean cash, long amount, long pendingOrders) {
         var type = cash ? BillingMoneyEvent.EventType.RECHARGE : BillingMoneyEvent.EventType.BONUS_GRANT;
         long current = cash ? wallet.cashBalanceMicros() : wallet.bonusBalanceMicros();
         long credited = cash ? wallet.totalRechargedMicros() : wallet.totalBonusGrantedMicros();
-        long capacity = Math.min(MAX_MIRRORED_MICROS - current, Long.MAX_VALUE - credited);
+        long capacity = Math.min(MAX_MIRRORED_MICROS - current - pendingOrders, Long.MAX_VALUE - credited);
         if (amount > capacity || !outbox.unconfirmedCreditsFit(orgId, type, capacity - amount)) {
             throw new HyperLlmException(ErrorCode.BILLING_INVALID_AMOUNT, "Credit exceeds the wallet capacity");
         }
