@@ -15,6 +15,8 @@ public class AdminProperties {
         private String adminJwtSecret;
         private String aesMasterKey;
         private String keyPepperV1;
+        /** Pepper for redemption codes; falls back to the key pepper when absent. */
+        private String voucherCodePepper;
         private boolean cookieSecure = false;
         private long accessTtlMinutes = 15;
         private long mfaChallengeTtlMinutes = 10;

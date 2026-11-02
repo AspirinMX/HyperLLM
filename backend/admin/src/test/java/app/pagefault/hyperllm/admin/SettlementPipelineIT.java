@@ -120,6 +120,7 @@ class SettlementPipelineIT {
     @Autowired private OutboxRedeliveryJob reconciliation;
     @Autowired private LedgerFolder ledgerFolder;
     @Autowired private BonusGrantRepository grantRepository;
+    @Autowired private app.pagefault.hyperllm.domain.repository.ResourcePackRepository packRepository;
     @Autowired private BatchExpiryJob expiryJob;
     @Autowired private StringRedisTemplate redis;
     @Autowired private WalletCreditOutbox creditOutbox;
@@ -270,6 +271,36 @@ class SettlementPipelineIT {
         assertThat(redis.opsForZSet().score(GatewayRedisKeys.settlePending(), event.eventId().toString())).isNull();
         assertThat(ledgerFolder.fold(event)).isFalse();
         assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros()).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void grantsAPackIntoItsBatchAndTheModelIndex() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(now);
+        String wallet = GatewayRedisKeys.wallet(orgId);
+        redis.opsForHash().put(wallet, "cash_micros", "1000000");
+
+        var event = new TransactionTemplate(transactionManager).execute(status -> creditOutbox.appendPack(
+                orgId, "pack:" + orgId, "Starter", app.pagefault.hyperllm.domain.model.enums.PackUnitType.TOKENS,
+                1_000L, List.of("gpt-4o"), now.plusDays(30), null, "Pack purchase", now));
+
+        assertThat(ledgerFolder.fold(event)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+        var pack = packRepository.findById(event.eventId()).orElseThrow();
+        assertThat(pack.totalUnits()).isEqualTo(1_000L);
+        assertThat(pack.remainingUnits()).isEqualTo(1_000L);
+        assertThat(pack.applicableModels()).containsExactly("gpt-4o");
+        assertThat(redis.opsForHash().get(GatewayRedisKeys.packItem(event.eventId()), "remaining_units"))
+                .isEqualTo("1000");
+        assertThat(redis.opsForZSet().score(GatewayRedisKeys.pack(orgId, "gpt-4o"),
+                event.eventId().toString())).isNotNull();
+        assertThat(walletRepository.findByOrgId(orgId).orElseThrow().cashBalanceMicros())
+                .isEqualTo(1_000_000L);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> {
+                    assertThat(row.ledgerType()).isEqualTo(LedgerType.PACK_GRANT);
+                    assertThat(row.packDeltaUnits()).isEqualTo(1_000L);
+                });
     }
 
     @Test
