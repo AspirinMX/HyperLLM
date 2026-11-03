@@ -306,7 +306,7 @@ class PreHoldServiceIT {
     }
 
     private PreHoldService.Lease lease(String key) {
-        return new PreHoldService.Lease(orgId, List.of(), id(key));
+        return new PreHoldService.Lease(orgId, List.of(), id(key), 0L);
     }
 
     private static String id(String key) {

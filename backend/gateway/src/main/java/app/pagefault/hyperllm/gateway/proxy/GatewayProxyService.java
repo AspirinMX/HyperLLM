@@ -28,6 +28,7 @@ import app.pagefault.hyperllm.domain.model.routing.PricingRule;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
 import app.pagefault.hyperllm.gateway.billing.HeldLegCharger;
+import app.pagefault.hyperllm.gateway.billing.ChannelCapacityService;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
 import app.pagefault.hyperllm.gateway.cache.GatewayConfigCacheService;
@@ -103,6 +104,10 @@ public class GatewayProxyService {
     ) {
     }
 
+    /** All healthy candidates were tried and none had channel capacity left. */
+    private static final class RetryableCapacityException extends RuntimeException {
+    }
+
     private static final class RetryableUpstreamException extends RuntimeException {
         private final int statusCode;
 
@@ -115,6 +120,7 @@ public class GatewayProxyService {
     private final GatewayConfigCacheService cacheService;
     private final OutboxAdmissionGate outboxAdmissionGate;
     private final PreHoldService preHoldService;
+    private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
     private final GatewayProperties properties;
     private final ProtocolRegistry protocolRegistry;
@@ -222,20 +228,30 @@ public class GatewayProxyService {
             }
             int attemptIndex = attemptCounter.getAndIncrement();
             int retryCount = Math.max(0, attemptIndex - 1);
+            String attemptId = lease.holdId() + ":" + attemptIndex;
 
             PreparedUpstreamRequest prepared = adapter.prepareUpstreamRequest(rawBody, candidate.upstreamModelName());
             String upstreamApiKey = decryptChannelApiKey(candidate);
             String targetUrl = buildTargetUrl(candidate, protocolKind);
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
-            return executeSingleAttempt(
-                    exchange, client, targetUrl, candidate, upstreamApiKey,
-                    adapter, prepared, protocolKind, isStream,
-                    caller, route, lease, excludedChannels,
-                    requestStartNanos, requestId, traceId, clientIp, retryCount
-            );
+            return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
+                    .flatMap(capacity -> {
+                        if (!"OK".equals(capacity)) {
+                            // Try the next eligible candidate before giving up on the request.
+                            excludedChannels.add(candidate.channelId());
+                            return Mono.error(new RetryableCapacityException());
+                        }
+                        return executeSingleAttempt(
+                                exchange, client, targetUrl, candidate, upstreamApiKey,
+                                adapter, prepared, protocolKind, isStream,
+                                caller, route, lease, excludedChannels,
+                                requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
+                        );
+                    });
         }).retryWhen(Retry.max(properties.getUpstream().getMaxRetryAttempts())
-                .filter(RetryableUpstreamException.class::isInstance));
+                .filter(ex -> ex instanceof RetryableUpstreamException
+                        || ex instanceof RetryableCapacityException));
     }
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> executeSingleAttempt(
@@ -256,10 +272,17 @@ public class GatewayProxyService {
             String requestId,
             String traceId,
             String clientIp,
-            int retryCount
+            int retryCount,
+            String attemptId
     ) {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
+        AtomicBoolean capacityReleased = new AtomicBoolean(false);
+        Runnable releaseCapacity = () -> {
+            if (capacityReleased.compareAndSet(false, true)) {
+                channelCapacity.release(candidate.channelId(), attemptId).subscribe();
+            }
+        };
 
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
@@ -281,7 +304,8 @@ public class GatewayProxyService {
                                         exchange, adapter, prepared, protocolKind, status, bodyBytes,
                                         caller, route, candidate, lease, requestStartNanos,
                                         requestId, traceId, clientIp, retryCount
-                                ).doOnNext(responseSink::tryEmitValue)
+                                ).doFinally(signal -> releaseCapacity.run())
+                                        .doOnNext(responseSink::tryEmitValue)
                                         .doOnError(responseSink::tryEmitError)
                                         .thenMany(Flux.empty()));
                     }
@@ -289,7 +313,7 @@ public class GatewayProxyService {
                             exchange, clientResponse, adapter, prepared, protocolKind,
                             caller, route, candidate, lease, requestStartNanos,
                             requestId, traceId, clientIp, retryCount,
-                            responseSink, upstreamSubRef
+                            responseSink, upstreamSubRef, releaseCapacity
                     );
                 });
 
@@ -306,12 +330,15 @@ public class GatewayProxyService {
                         }
                 );
 
-        return responseSink.asMono().doOnCancel(() -> {
-            Subscription sub = upstreamSubRef.get();
-            if (sub != null) {
-                sub.cancel();
-            }
-        });
+        return responseSink.asMono()
+                .doOnError(ex -> releaseCapacity.run())
+                .doOnCancel(() -> {
+                    releaseCapacity.run();
+                    Subscription sub = upstreamSubRef.get();
+                    if (sub != null) {
+                        sub.cancel();
+                    }
+                });
     }
 
     private Flux<Void> bridgeStreamingResponse(
@@ -330,7 +357,8 @@ public class GatewayProxyService {
             String clientIp,
             int retryCount,
             Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink,
-            AtomicReference<Subscription> upstreamSubRef
+            AtomicReference<Subscription> upstreamSubRef,
+            Runnable releaseCapacity
     ) {
         StreamUsageTracker tracker = adapter.newStreamTracker(prepared.canonicalRequest());
         AtomicBoolean settled = new AtomicBoolean(false);
@@ -347,6 +375,7 @@ public class GatewayProxyService {
                     }
                 })
                 .doFinally(signal -> {
+                    releaseCapacity.run();
                     if (settled.get()) {
                         return;
                     }
@@ -683,7 +712,7 @@ public class GatewayProxyService {
         return preHoldService.admit(command)
                 .flatMap(status -> switch (status) {
                     case "OK" -> Mono.just(new PreHoldService.Lease(
-                            caller.orgId(), concurrencyKeys, holdId));
+                            caller.orgId(), concurrencyKeys, holdId, billableTokens));
                     case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
                     case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));
                     default -> Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
@@ -807,7 +836,15 @@ public class GatewayProxyService {
     }
 
     private static Throwable unwrapRetryError(Throwable ex) {
-        if (Exceptions.isRetryExhausted(ex) || ex instanceof RetryableUpstreamException) {
+        if (Exceptions.isRetryExhausted(ex)) {
+            Throwable cause = ex.getCause();
+            if (cause instanceof RetryableCapacityException) {
+                return new HyperLlmException(ErrorCode.CHANNEL_CAPACITY_EXCEEDED,
+                        "Every eligible upstream channel is at capacity", ex);
+            }
+            return new HyperLlmException(ErrorCode.CHANNEL_UNAVAILABLE, "Upstream retries exhausted", ex);
+        }
+        if (ex instanceof RetryableUpstreamException) {
             return new HyperLlmException(ErrorCode.CHANNEL_UNAVAILABLE, "Upstream retries exhausted", ex);
         }
         return ex;

@@ -52,7 +52,7 @@ public class PreHoldService {
     ) {
     }
 
-    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId) {
+    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens) {
     }
 
     public record SettleOutcome(String status, long cashCharged, long bonusCharged, long shortfallMicros) {

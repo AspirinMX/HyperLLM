@@ -37,6 +37,7 @@ public enum ErrorCode {
     CHANNEL_NAME_EXISTS(409, "Channel name already exists"),
     CHANNEL_PROBE_FAILED(502, "Upstream channel probe failed"),
     CHANNEL_UNAVAILABLE(503, "No healthy upstream channel available"),
+    CHANNEL_CAPACITY_EXCEEDED(429, "No upstream channel has capacity for this attempt"),
     PRICING_WINDOW_OVERLAP(409, "Pricing effective window overlaps an existing rule"),
 
     BILLING_INSUFFICIENT_BALANCE(402, "Insufficient wallet balance"),

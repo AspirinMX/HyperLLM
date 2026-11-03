@@ -159,6 +159,23 @@ public final class GatewayRedisKeys {
         return "gw:rl:adj:" + holdId;
     }
 
+    /** Capacity of one upstream channel, shared by every tenant routed to it. */
+    public static String channelRateWindow(UUID channelId) {
+        return "gw:rl:ch:win:" + channelId;
+    }
+
+    public static String channelRateCounts(UUID channelId) {
+        return "gw:rl:ch:cnt:" + channelId;
+    }
+
+    public static String channelRateTokens(UUID channelId) {
+        return "gw:rl:ch:tok:" + channelId;
+    }
+
+    public static String channelConcurrency(UUID channelId) {
+        return "gw:rl:ch:conc:" + channelId;
+    }
+
     public static String concurrencyCounter(String scope, UUID id) {
         return "gw:rl:conc:" + scope + ":" + id;
     }
