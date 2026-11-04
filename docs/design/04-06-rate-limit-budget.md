@@ -1,6 +1,6 @@
 # HyperLLM Phase 2.8 四层限流与项目预算
 
-设计已确认，待实现。依赖[Redis 预占与账务链路](./04-04-settlement-pipeline.md)。
+滚动窗口与渠道容量已实现；项目月度预算待实现。依赖[Redis 预占与账务链路](./04-04-settlement-pipeline.md)。
 
 ## 1. 四层限流
 

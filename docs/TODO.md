@@ -12,7 +12,7 @@
 | **Phase 0** | 仓库与多模块工程脚手架初始化 | ✅ 已完成 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
 | **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
-| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a 与 2.1–2.3 已完成；2.0b 进行中；2.4 起待开始） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
+| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a–2.7 已完成；2.8 限流层已落地、预算待实现；2.9–2.10 待开始） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
 | **Phase 3** | 全协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
@@ -113,8 +113,8 @@
 | **2.4** | **Redis 权威层** | 逐批次冻结、滑动 TTL、结算离开 PostgreSQL、事件门禁、控制面读 Redis、全局重建闸门 | 2.0b 至 2.3 | ✅ |
 | **2.5** | 结算落库与账本事务 | 逐腿扣库、明细落库、事务边界、折叠恒等、维护作业、对账工单 | 2.4 | ✅ |
 | **2.6** | Outbox 投递与生命周期 | 消耗异步批量、发放同事务提交；事件副本与巡检重投；Debezium 投递；水位删除 | 2.5 | ✅ |
-| **2.7** | [支付、兑换码与资源包购买](./design/04-05-payment.md) | 下单、验签、回调、核销 | 2.5、2.6 | 设计已确认，待实现 |
-| **2.8** | [四层限流与项目预算](./design/04-06-rate-limit-budget.md) | Key、Project、Org、Channel 限流与预算拦截 | 2.4 至 2.6 | 设计已确认，待实现 |
+| **2.7** | [支付、兑换码与资源包购买](./design/04-05-payment.md) | 下单、验签、回调、核销 | 2.5、2.6 | ✅（渠道沙箱联调待凭据） |
+| **2.8** | [四层限流与项目预算](./design/04-06-rate-limit-budget.md) | Key、Project、Org、Channel 限流与预算拦截 | 2.4 至 2.6 | 🚧（滚动窗口与渠道容量已落地，预算待实现） |
 | **2.9** | [ClickHouse 摄入与用量毛利](./design/04-07-analytics.md) | 请求事件入仓、聚合查询 | 2.6、2.7（包销售） | 设计已确认，待实现 |
 | **2.10** | [告警、对账与全链路验收](./design/04-08-alerts-reconcile.md) | Webhook、邮件、账务对账与 HTTP 验收 | 2.6 至 2.9 | 设计已确认，待实现 |
 
@@ -230,15 +230,17 @@
 
 ### 2.7 支付、兑换码与资源包购买
 
-- [ ] 在 `console` 实现支付抽象、下单、订单查询和验签回调，支持 Stripe、支付宝和微信支付收款。
-- [ ] 交付兑换码核销、资源包购买及相应的 `admin` 运营接口，复用 2.6 的投影链路。
-- [ ] 通过沙箱和模拟测试验证支付成功、签名与金额校验、回调重放及兑换码并发核销。
+- [x] 在 `console` 实现支付抽象、下单、订单查询和验签回调，支持 Stripe、支付宝和微信支付收款。
+- [x] 交付兑换码核销、资源包购买及相应的 `admin` 运营接口，复用 2.6 的投影链路。
+- [x] 通过本地模拟渠道、真实签名算法与回调重放测试验证支付成功、金额校验与兑换码重放；真实渠道沙箱联调待凭据。
+
+> **实现登记**：发放事件与 V5 schema；下单、三渠道 Adapter、统一确认事务与核销；运营接口；待支付订单计入现金容量。AliPay/微信只做到协议与验签单测，未经真实沙箱。
 
 **验收手段**：沙箱与模拟回调测试，覆盖验签失败、金额不符、回调重放、并发核销。
 
 ### 2.8 四层限流与项目预算
 
-- [ ] 补齐 API Key 和 Project 的 RPM 与 TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
+- [x] 补齐 API Key 和 Project 的 RPM 与 TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
 - [ ] 实现 Project 月度预算检查，软上限触发告警，硬上限在准入时拦截超预算请求。
 - [ ] 验证跨分钟限流、并发准入和预算超限的协议错误响应。
 
