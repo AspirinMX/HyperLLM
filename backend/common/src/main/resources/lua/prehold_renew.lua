@@ -4,7 +4,8 @@
 -- the hold froze: if it did not, a stream longer than the TTL would find its own reservation gone
 -- and the tenant would look suspended.
 --
--- KEYS[1] hold, [2] holds expiry zset, [3] wallet, [4..6] concurrency counters
+-- KEYS[1] hold, [2] holds expiry zset, [3] wallet, [4..6] concurrency counters,
+--       [7] project budget hash of the admission month
 -- ARGV[1] holdId, [2] new expiry epoch ms, [3] ttl millis, [4] renew flag,
 --       [5] pack prefix, [6] bonus prefix
 local function splitLegs(raw)
@@ -37,6 +38,9 @@ local function protect(key)
     end
 end
 protect(KEYS[3])
+if KEYS[7] and KEYS[7] ~= KEYS[1] and KEYS[7] ~= KEYS[3] then
+    protect(KEYS[7])
+end
 for _, leg in ipairs(splitLegs(redis.call('HGET', KEYS[1], 'legs') or '')) do
     if leg.kind == 'PACK' then
         protect(ARGV[5] .. leg.id)

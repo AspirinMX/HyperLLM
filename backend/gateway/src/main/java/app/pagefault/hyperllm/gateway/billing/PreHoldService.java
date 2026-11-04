@@ -48,11 +48,37 @@ public class PreHoldService {
             long ttlSeconds,
             String requestId,
             List<AllocationLeg> fallbackLegs,
-            String fallbackDetail
+            String fallbackDetail,
+            /** {@code null} when the project has no budget; otherwise the UTC month it is charged to. */
+            String budgetMonth,
+            String budgetKey,
+            long budgetEstimateMicros,
+            long budgetHardCapMicros,
+            long budgetSoftCapMicros,
+            long budgetFloorMicros
     ) {
+
+        /** Reservation of a request that is not charged to a project budget. */
+        public AdmitCommand(
+                String holdId, UUID orgId, UUID projectId, UUID apiKeyId, String modelCode,
+                List<AllocationLeg> legs, Integer keyRpmLimit, Integer projectRpmLimit,
+                Integer keyTpmLimit, Integer projectTpmLimit, long estimatedTokens,
+                Integer keyMaxConcurrency, Integer projectMaxConcurrency, int orgMaxConcurrency,
+                long ttlSeconds, String requestId, List<AllocationLeg> fallbackLegs, String fallbackDetail) {
+            this(holdId, orgId, projectId, apiKeyId, modelCode, legs, keyRpmLimit, projectRpmLimit,
+                    keyTpmLimit, projectTpmLimit, estimatedTokens, keyMaxConcurrency, projectMaxConcurrency,
+                    orgMaxConcurrency, ttlSeconds, requestId, fallbackLegs, fallbackDetail,
+                    null, null, 0L, 0L, 0L, 0L);
+        }
     }
 
-    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens) {
+    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens,
+                        String budgetKey) {
+
+        /** Lease of a project without a budget, and the shape used by the older tests. */
+        public Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens) {
+            this(orgId, concurrencyKeys, holdId, estimatedTokens, null);
+        }
     }
 
     public record SettleOutcome(String status, long cashCharged, long bonusCharged, long shortfallMicros) {
@@ -65,6 +91,7 @@ public class PreHoldService {
 
     private final ReactiveStringRedisTemplate redisTemplate;
     private final long doneTtlMillis;
+    private final long budgetTtlMillis;
     private final RedisScript<String> admitScript;
     private final RedisScript<Long> renewScript;
     @SuppressWarnings("rawtypes")
@@ -84,6 +111,7 @@ public class PreHoldService {
     ) {
         this.redisTemplate = redisTemplate;
         this.doneTtlMillis = Duration.ofSeconds(properties.getBilling().getLeaseTtlSeconds()).toMillis() * 12L;
+        this.budgetTtlMillis = Duration.ofDays(properties.getBilling().getBudgetTtlDays()).toMillis();
         this.admitScript = admitScript;
         this.renewScript = renewScript;
         this.settleScript = settleScript;
@@ -96,8 +124,11 @@ public class PreHoldService {
         long now = at.toInstant().toEpochMilli();
         long ttlMillis = Duration.ofSeconds(command.ttlSeconds()).toMillis();
         UUID effectiveKeyId = command.apiKeyId() != null ? command.apiKeyId() : command.projectId();
+        boolean budgeted = command.budgetMonth() != null && !command.budgetMonth().isBlank()
+                && command.budgetKey() != null;
+        String walletKey = GatewayRedisKeys.wallet(command.orgId());
         List<String> keys = List.of(
-                GatewayRedisKeys.wallet(command.orgId()), GatewayRedisKeys.holdDone(command.holdId()),
+                walletKey, GatewayRedisKeys.holdDone(command.holdId()),
                 GatewayRedisKeys.hold(command.holdId()), GatewayRedisKeys.holdsExpiry(),
                 GatewayRedisKeys.rateWindow("key", effectiveKeyId),
                 GatewayRedisKeys.rateCounts("key", effectiveKeyId),
@@ -107,7 +138,9 @@ public class PreHoldService {
                 GatewayRedisKeys.rateTokens("proj", command.projectId()),
                 GatewayRedisKeys.concurrencyCounter("key", effectiveKeyId),
                 GatewayRedisKeys.concurrencyCounter("proj", command.projectId()),
-                GatewayRedisKeys.concurrencyCounter("org", command.orgId()));
+                GatewayRedisKeys.concurrencyCounter("org", command.orgId()),
+                budgeted ? command.budgetKey() : walletKey,
+                budgeted ? GatewayRedisKeys.budgetSignal(command.projectId(), command.budgetMonth()) : walletKey);
         List<String> args = List.of(
                 command.holdId(), Long.toString(now), Long.toString(ttlMillis), encodeLegs(command.legs()),
                 "0", command.orgId().toString(), command.projectId().toString(),
@@ -117,7 +150,13 @@ public class PreHoldService {
                 limit(command.projectMaxConcurrency()), limit(command.orgMaxConcurrency()),
                 command.requestId(), encodeLegs(command.fallbackLegs()), command.fallbackDetail(),
                 limit(command.keyTpmLimit()), limit(command.projectTpmLimit()),
-                Long.toString(Math.max(0L, command.estimatedTokens())), "60");
+                Long.toString(Math.max(0L, command.estimatedTokens())), "60",
+                budgeted ? command.budgetMonth() : "",
+                Long.toString(budgeted ? Math.max(0L, command.budgetEstimateMicros()) : 0L),
+                Long.toString(budgeted ? Math.max(0L, command.budgetHardCapMicros()) : 0L),
+                Long.toString(budgeted ? Math.max(0L, command.budgetSoftCapMicros()) : 0L),
+                Long.toString(budgeted ? Math.max(0L, command.budgetFloorMicros()) : 0L),
+                Long.toString(budgetTtlMillis));
         return redisTemplate.execute(admitScript, keys, args).next().defaultIfEmpty("REJECTED");
     }
 
@@ -131,29 +170,43 @@ public class PreHoldService {
             Lease lease, List<AllocationLeg> charges, String detailPrefix, OffsetDateTime occurredAt,
             long actualTokens
     ) {
-        return transition(lease.holdId(), lease.orgId(), Transition.SETTLE, charges, detailPrefix,
-                occurredAt, actualTokens);
+        return settle(lease, charges, detailPrefix, occurredAt, actualTokens, 0L);
+    }
+
+    /**
+     * @param budgetChargeMicros the request's rated value; what the project month consumed, no
+     *                           matter which bucket paid for it
+     */
+    public Mono<SettleOutcome> settle(
+            Lease lease, List<AllocationLeg> charges, String detailPrefix, OffsetDateTime occurredAt,
+            long actualTokens, long budgetChargeMicros
+    ) {
+        return transition(lease.holdId(), lease.orgId(), lease.budgetKey(), Transition.SETTLE, charges,
+                detailPrefix, occurredAt, actualTokens, budgetChargeMicros);
     }
 
     public Mono<Void> release(Lease lease) {
-        return transition(lease.holdId(), lease.orgId(), Transition.RELEASE, List.of(), "", utcNow(), 0L).then();
+        return transition(lease.holdId(), lease.orgId(), lease.budgetKey(), Transition.RELEASE, List.of(),
+                "", utcNow(), 0L, 0L).then();
     }
 
     private Mono<SettleOutcome> transition(
-            String holdId, UUID orgId, Transition mode, List<AllocationLeg> charges, String detailPrefix,
-            OffsetDateTime occurredAt, long actualTokens
+            String holdId, UUID orgId, String budgetKey, Transition mode, List<AllocationLeg> charges,
+            String detailPrefix, OffsetDateTime occurredAt, long actualTokens, long budgetChargeMicros
     ) {
         List<String> keys = List.of(
                 GatewayRedisKeys.wallet(orgId), GatewayRedisKeys.hold(holdId), GatewayRedisKeys.holdDone(holdId),
                 GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.settleEvent(holdId), GatewayRedisKeys.settlePending(),
                 GatewayRedisKeys.ledgerPosition(orgId), GatewayRedisKeys.settlePendingOwners(),
                 GatewayRedisKeys.settleProof(holdId), GatewayRedisKeys.settleWaiting(orgId),
-                GatewayRedisKeys.rateAdjustment(holdId));
+                GatewayRedisKeys.rateAdjustment(holdId),
+                budgetKey != null && !budgetKey.isBlank() ? budgetKey : GatewayRedisKeys.wallet(orgId));
         List<String> args = List.of(
                 holdId, Long.toString(occurredAt.toInstant().toEpochMilli()), occurredAt.toString(), mode.name(),
                 encodeLegs(charges), detailPrefix, Long.toString(doneTtlMillis), Long.toString(EVIDENCE_TTL_MS),
                 GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix(), LegacyBonusBatch.idFor(orgId).toString(),
-                Long.toString(Math.max(0L, actualTokens)), Long.toString(EVIDENCE_TTL_MS));
+                Long.toString(Math.max(0L, actualTokens)), Long.toString(EVIDENCE_TTL_MS),
+                Long.toString(Math.max(0L, budgetChargeMicros)));
         return redisTemplate.execute(settleScript, keys, args).next().map(raw -> {
             String status = String.valueOf(raw.getFirst());
             if (raw.size() == 1) {
@@ -177,7 +230,8 @@ public class PreHoldService {
         List<String> keys = List.of(hold, GatewayRedisKeys.holdsExpiry(), GatewayRedisKeys.wallet(lease.orgId()),
                 counters.size() > 0 ? counters.get(0) : hold,
                 counters.size() > 1 ? counters.get(1) : hold,
-                counters.size() > 2 ? counters.get(2) : hold);
+                counters.size() > 2 ? counters.get(2) : hold,
+                lease.budgetKey() != null && !lease.budgetKey().isBlank() ? lease.budgetKey() : hold);
         return redisTemplate.execute(renewScript, keys, List.of(lease.holdId(),
                         Long.toString(System.currentTimeMillis() + ttlMillis), Long.toString(ttlMillis), "0",
                         GatewayRedisKeys.packItemPrefix(), GatewayRedisKeys.bonusItemPrefix()))
@@ -196,11 +250,17 @@ public class PreHoldService {
                 .flatMap(holdId -> redisTemplate.opsForHash().get(GatewayRedisKeys.hold(holdId), "org_id")
                         .map(value -> UUID.fromString(String.valueOf(value)))
                         .defaultIfEmpty(NO_ORG)
-                        .flatMap(orgId -> transition(holdId, orgId, Transition.RECLAIM, List.of(), "", utcNow(), 0L))
-                        .map(outcome -> switch (outcome.status()) {
-                            case "SETTLED", "RELEASED", "MISS_ENTITLEMENTS" -> 1;
-                            default -> 0;
-                        }), 16)
+                        .flatMap(orgId -> redisTemplate.opsForHash()
+                                .get(GatewayRedisKeys.hold(holdId), "budget_key")
+                                .map(String::valueOf)
+                                .defaultIfEmpty("")
+                                .flatMap(budgetKey -> transition(holdId, orgId,
+                                        budgetKey.isBlank() ? null : budgetKey, Transition.RECLAIM,
+                                        List.of(), "", utcNow(), 0L, 0L))
+                                .map(outcome -> switch (outcome.status()) {
+                                    case "SETTLED", "RELEASED", "MISS_ENTITLEMENTS" -> 1;
+                                    default -> 0;
+                                })), 16)
                 .reduce(0, Integer::sum);
     }
 

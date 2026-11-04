@@ -105,7 +105,7 @@ public class OutboxRedeliveryJob {
             return;
         }
         if (due(occurredAt, WRITE_OFF, now)) {
-            if (ledgerFolder.writeOff(owner.orgId(), eventId, occurredAt)) {
+            if (ledgerFolder.writeOff(owner.orgId(), eventId, occurredAt, sameEvent(event, owner) ? event : null)) {
                 meterRegistry.counter("ledger_degraded_resolved_total", "level", "L4").increment();
                 log.error("P1 wrote off unconfirmed settlement org={} event={}", owner.orgId(), eventId);
             }

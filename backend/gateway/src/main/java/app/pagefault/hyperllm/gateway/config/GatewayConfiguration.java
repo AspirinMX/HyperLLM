@@ -71,4 +71,9 @@ public class GatewayConfiguration {
         return RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class);
     }
 
+    @Bean(name = "budgetInitLuaScript")
+    public RedisScript<String> budgetInitLuaScript() {
+        return RedisScript.of(new ClassPathResource("lua/budget_init.lua"), String.class);
+    }
+
 }

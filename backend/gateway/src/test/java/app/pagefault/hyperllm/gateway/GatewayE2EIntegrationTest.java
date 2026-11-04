@@ -433,6 +433,101 @@ class GatewayE2EIntegrationTest {
         return false;
     }
 
+    @Test
+    void refusesRequestsOverTheProjectMonthlyBudgetWithTheProtocolError() throws Exception {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        CustomerTier tier = tierRepository.findActiveByCode("STANDARD").orElseThrow();
+        UUID ownerId = UuidV7.next();
+        UUID orgId = UuidV7.next();
+        UUID projectId = UuidV7.next();
+        userRepository.insert(new User(
+                ownerId, "budget-" + ownerId + "@acme.dev", now, "Budget User",
+                null, "en-US", "USD", orgId, UserStatus.ACTIVE, now, null, 0L, now, now
+        ));
+        organizationRepository.insert(new Organization(
+                orgId, "Budget Org", "budget-" + orgId.toString().substring(0, 8),
+                ownerId, tier.id(), 10_000, 10, false, OrgStatus.ACTIVE, null, 0L, now, now
+        ));
+        // One request reserves about 94k micros at the safety factor and costs 11k. The cap leaves
+        // room for exactly one admission, so the second must be refused without charging anything.
+        projectRepository.insert(new Project(
+                projectId, orgId, "budget", ProjectEnvironment.PRODUCTION, 100_000L, null,
+                null, null, null, null, false, (short) 7,
+                null, ProjectStatus.ACTIVE, null, 0L, now, now
+        ));
+        walletRepository.insert(new Wallet(orgId, 5_000_000L, 0L, 5_000_000L, 0L, 0L, 0L, null, 0L, now));
+
+        ApiKeyGenerator.GeneratedApiKey generated = ApiKeyGenerator.generateLiveKey();
+        apiKeyRepository.insert(new ApiKey(
+                UuidV7.next(), projectId, orgId, ownerId, "Budget Key", generated.keyPrefix(),
+                HmacSha256.hmacHex(generated.rawKey(), "gateway-test-pepper-v1"), (short) 1,
+                null, null, null, null, null, null, null, null,
+                ApiKeyStatus.ACTIVE, null, 0L, now, now
+        ));
+
+        Provider openai = providerRepository.findByCode("OPENAI").orElseThrow();
+        UUID channelId = UuidV7.next();
+        channelRepository.insert(new Channel(
+                channelId, openai.id(), "openai-budget-" + channelId, "us-east",
+                "http://127.0.0.1:" + WIREMOCK.port() + "/budget/v1",
+                aesGcmCipher.encryptUtf8("{\"apiKey\":\"sk-up-budget\"}", channelId.toString()),
+                (short) 1, 9000, null, null, null, null, ChannelStatus.ACTIVE, null, 0L, now, now
+        ));
+        UUID modelId = UuidV7.next();
+        modelRepository.insert(new VirtualModel(
+                modelId, "gpt-budget-test", "GPT Budget Test", "OpenAI",
+                ModelCapability.CHAT, ProtocolFamily.OPENAI, 128_000, 16_384,
+                true, true, false, true, RoutingStrategy.PRIORITY_WEIGHTED,
+                false, 300, ModelVisibility.PUBLIC, null, ModelStatus.ACTIVE, "{}", null, 0L, now, now
+        ));
+        bindingRepository.insert(new ModelChannelBinding(
+                UuidV7.next(), modelId, channelId, "gpt-4o-mini", (short) 1, 100,
+                null, null, "{}", BindingStatus.ACTIVE, null, 0L, now, now
+        ));
+        pricingRuleRepository.insert(new PricingRule(
+                UuidV7.next(), modelId, BillingMode.TOKEN,
+                1_000_000L, 10_000_000L, 0L, 0L, 0L, 0L, "[]", "{}",
+                now.minusDays(1), null, null, now
+        ));
+        WIREMOCK.stubFor(post(urlEqualTo("/budget/v1/chat/completions"))
+                .withHeader("Authorization", equalTo("Bearer sk-up-budget"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,"
+                                + "\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],"
+                                + "\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":1000}}")));
+        mirrorService.load(orgId, "gpt-budget-test").block();
+
+        String request = "{\"model\":\"gpt-budget-test\",\"max_tokens\":8192,"
+                + "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}";
+        webTestClient.post().uri("/v1/chat/completions")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(request)
+                .exchange().expectStatus().isOk();
+
+        webTestClient.post().uri("/v1/chat/completions")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(request)
+                .exchange()
+                .expectStatus().isEqualTo(429)
+                .expectHeader().exists(HttpHeaders.RETRY_AFTER)
+                .expectBody().jsonPath("$.error.code").isEqualTo("PROJECT_BUDGET_EXCEEDED");
+
+        String month = java.time.YearMonth.now(ZoneOffset.UTC).toString();
+        String budgetKey = GatewayRedisKeys.projectBudget(projectId, month);
+        assertThat(redisTemplate.opsForHash().get(budgetKey, "used_micros").block()).isEqualTo("11000");
+        assertThat(redisTemplate.opsForHash().get(budgetKey, "held_micros").block()).isEqualTo("0");
+
+        // A month that cannot be proven any more closes a hard-capped project instead of guessing.
+        redisTemplate.opsForHash().put(budgetKey, "state", "UNVERIFIED").block();
+        webTestClient.post().uri("/v1/chat/completions")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(request)
+                .exchange()
+                .expectStatus().isEqualTo(503)
+                .expectBody().jsonPath("$.error.code").isEqualTo("PROJECT_BUDGET_UNAVAILABLE");
+    }
+
     private KafkaConsumer<String, String> createConsumer() {
         return new KafkaConsumer<>(Map.of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),

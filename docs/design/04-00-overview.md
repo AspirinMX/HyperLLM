@@ -16,7 +16,7 @@
 | [04-02-entitlements.md](./04-02-entitlements.md) | 2.2 三顺位抵扣与组织模型协议价 | ✅ 已实现 | 04-01 |
 | [04-03-prehold-settle.md](./04-03-prehold-settle.md) | 2.3 网关预占、流式结算与回收 | ✅ 已实现 | 04-01、04-02 |
 | [04-04-settlement-pipeline.md](./04-04-settlement-pipeline.md) | 2.4 Redis 权威层 / 2.5 结算落库 / 2.6 Outbox 投递与生命周期 | ✅ 已实现 | 04-01、04-02、04-03 |
-| [04-05-payment.md](./04-05-payment.md) | 2.7 支付、兑换码与资源包购买 | ✅ 已实现（真实渠道沙箱待凭据） | 04-01、04-04 |
+| [04-05-payment.md](./04-05-payment.md) | 2.7 支付、兑换码与资源包购买 | ⏳ 设计已确认，待实现 | 04-01、04-04 |
 | [04-06-rate-limit-budget.md](./04-06-rate-limit-budget.md) | 2.8 四层限流与项目预算 | ⏳ 设计已确认，待实现 | 04-04 |
 | [04-07-analytics.md](./04-07-analytics.md) | 2.9 ClickHouse 摄入与用量/毛利 API | ⏳ 设计已确认，待实现 | 04-04、04-05（包销售） |
 | [04-08-alerts-reconcile.md](./04-08-alerts-reconcile.md) | 2.10 告警、对账与全链路验收 | ⏳ 设计已确认，待实现 | 04-04、04-05、04-06、04-07 |

@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules.BillingAlertRulesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ProjectBudgetMonths.ProjectBudgetMonthsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger.WalletLedgerPath;
@@ -269,6 +270,19 @@ public class Projects extends TableImpl<ProjectsRecord> {
             _billingAlertRules = new BillingAlertRulesPath(this, null, Keys.BILLING_ALERT_RULES__BILLING_ALERT_RULES_PROJECT_ID_FKEY.getInverseKey());
 
         return _billingAlertRules;
+    }
+
+    private transient ProjectBudgetMonthsPath _projectBudgetMonths;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.project_budget_months</code> table
+     */
+    public ProjectBudgetMonthsPath projectBudgetMonths() {
+        if (_projectBudgetMonths == null)
+            _projectBudgetMonths = new ProjectBudgetMonthsPath(this, null, Keys.PROJECT_BUDGET_MONTHS__PROJECT_BUDGET_MONTHS_PROJECT_ID_FKEY.getInverseKey());
+
+        return _projectBudgetMonths;
     }
 
     private transient ProjectMembersPath _projectMembers;

@@ -27,8 +27,10 @@ import app.pagefault.hyperllm.domain.model.routing.GatewayModelRoute;
 import app.pagefault.hyperllm.domain.model.routing.PricingRule;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
+import app.pagefault.hyperllm.gateway.billing.BillingAdmissionException;
 import app.pagefault.hyperllm.gateway.billing.HeldLegCharger;
 import app.pagefault.hyperllm.gateway.billing.ChannelCapacityService;
+import app.pagefault.hyperllm.gateway.billing.ProjectBudgetService;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
 import app.pagefault.hyperllm.gateway.cache.GatewayConfigCacheService;
@@ -100,8 +102,13 @@ public class GatewayProxyService {
             Integer projMaxConcurrency,
             int orgMaxConcurrency,
             Integer orgDiscountRatioBps,
-            int tierDefaultDiscountBps
+            int tierDefaultDiscountBps,
+            Long projectMonthlyHardCapMicros,
+            Long projectMonthlySoftCapMicros
     ) {
+    }
+
+    private record AdmitResult(String status, ProjectBudgetService.BudgetContext budget) {
     }
 
     /** All healthy candidates were tried and none had channel capacity left. */
@@ -120,6 +127,7 @@ public class GatewayProxyService {
     private final GatewayConfigCacheService cacheService;
     private final OutboxAdmissionGate outboxAdmissionGate;
     private final PreHoldService preHoldService;
+    private final ProjectBudgetService projectBudgetService;
     private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
     private final GatewayProperties properties;
@@ -575,7 +583,7 @@ public class GatewayProxyService {
                 .map(legs -> HeldLegCharger.charge(legs, exactCostMicros).legs())
                 .flatMap(charges -> preHoldService.settle(lease, charges,
                         AllocationDetailCodec.encodeContextV1(resolved, billable), eventCreatedAt,
-                        actualTokens(billable)))
+                        actualTokens(billable), exactCostMicros))
                 .doOnNext(deducted -> {
                     LlmRequestEvent reqEvent = new LlmRequestEvent(
                             eventCreatedAt,
@@ -697,9 +705,47 @@ public class GatewayProxyService {
             return Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
         }
 
-        var floorUsage = new BillableUsage(promptTokens, 0L, 0L, 0L, 0L);
         var floor = HeldLegCharger.promptFloor(plan.legs(), snapshot, floorCost, promptTokens);
         String holdId = UuidV7.next().toString();
+        List<String> concurrencyKeys = concurrencyKeys(caller);
+        return projectBudgetService.ensure(caller.orgId(), caller.projectId(),
+                        caller.projectMonthlyHardCapMicros(), caller.projectMonthlySoftCapMicros())
+                .flatMap(budget -> admitOnce(caller, modelCode, holdTarget, billableTokens, requestId,
+                        promptTokens, floorCost, pricing, plan, floor, holdId, budget)
+                        .flatMap(result -> "MISS_BUDGET".equals(result.status())
+                                ? projectBudgetService.reinstall(caller.orgId(), caller.projectId(), result.budget())
+                                        .flatMap(refreshed -> admitOnce(caller, modelCode, holdTarget, billableTokens,
+                                                requestId, promptTokens, floorCost, pricing, plan, floor, holdId,
+                                                refreshed))
+                                : Mono.just(result)))
+                .flatMap(result -> switch (result.status()) {
+                    case "OK" -> Mono.just(new PreHoldService.Lease(
+                            caller.orgId(), concurrencyKeys, holdId, billableTokens, result.budget().key()));
+                    case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
+                    case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));
+                    case "BUDGET_EXCEEDED" -> Mono.error(new BillingAdmissionException(
+                            ErrorCode.PROJECT_BUDGET_EXCEEDED, projectBudgetService.secondsUntilNextMonth()));
+                    case "BUDGET_UNAVAILABLE", "MISS_BUDGET" -> Mono.error(
+                            new BillingAdmissionException(ErrorCode.PROJECT_BUDGET_UNAVAILABLE, 60L));
+                    default -> Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
+                });
+    }
+
+    private Mono<AdmitResult> admitOnce(
+            CallerContext caller,
+            String modelCode,
+            long holdTarget,
+            long billableTokens,
+            String requestId,
+            long promptTokens,
+            long floorCost,
+            ResolvedPricing pricing,
+            AllocationPlan plan,
+            List<app.pagefault.hyperllm.domain.billing.AllocationLeg> floor,
+            String holdId,
+            ProjectBudgetService.BudgetContext budget
+    ) {
+        var floorUsage = new BillableUsage(promptTokens, 0L, 0L, 0L, 0L);
         PreHoldService.AdmitCommand command = new PreHoldService.AdmitCommand(
                 holdId, caller.orgId(), caller.projectId(), caller.apiKeyId(), modelCode,
                 plan.legs(),
@@ -707,16 +753,10 @@ public class GatewayProxyService {
                 caller.keyTpmLimit(), caller.projTpmLimit(), billableTokens,
                 caller.keyMaxConcurrency(), caller.projMaxConcurrency(), caller.orgMaxConcurrency(),
                 properties.getBilling().getLeaseTtlSeconds(), requestId, floor,
-                AllocationDetailCodec.encodeContextV1(pricing, floorUsage));
-        List<String> concurrencyKeys = concurrencyKeys(caller);
-        return preHoldService.admit(command)
-                .flatMap(status -> switch (status) {
-                    case "OK" -> Mono.just(new PreHoldService.Lease(
-                            caller.orgId(), concurrencyKeys, holdId, billableTokens));
-                    case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
-                    case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));
-                    default -> Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
-                });
+                AllocationDetailCodec.encodeContextV1(pricing, floorUsage),
+                budget.month(), budget.key(), holdTarget,
+                budget.hardCapMicros(), budget.softCapMicros(), floorCost);
+        return preHoldService.admit(command).map(status -> new AdmitResult(status, budget));
     }
 
 
@@ -755,7 +795,8 @@ public class GatewayProxyService {
                         }
                         return Mono.just(new CallerContext(
                                 payload.orgId(), payload.projectId(), null, payload.userId(),
-                                null, payload.allowedModels(), null, null, null, null, null, null, 50, null, 10_000
+                                null, payload.allowedModels(), null, null, null, null, null, null, 50, null, 10_000,
+                                null, null
                         ));
                     });
         }
@@ -792,7 +833,8 @@ public class GatewayProxyService {
                 ctx.keyRpmLimit(), ctx.projectRpmLimit(),
                 ctx.keyTpmLimit(), ctx.projectTpmLimit(),
                 ctx.keyMaxConcurrency(), ctx.projectMaxConcurrency(),
-                ctx.orgMaxConcurrency(), ctx.orgDiscountRatioBps(), ctx.tierDefaultDiscountBps()
+                ctx.orgMaxConcurrency(), ctx.orgDiscountRatioBps(), ctx.tierDefaultDiscountBps(),
+                ctx.projectMonthlyHardCapMicros(), ctx.projectMonthlySoftCapMicros()
         ));
     }
 

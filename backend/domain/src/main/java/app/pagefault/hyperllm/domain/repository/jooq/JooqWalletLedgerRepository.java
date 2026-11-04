@@ -44,6 +44,8 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 .set(WALLET_LEDGER.HOLD_ID, entry.holdId())
                 .set(WALLET_LEDGER.SHORTFALL_MICROS, entry.shortfallMicros())
                 .set(WALLET_LEDGER.SETTLED_AFTER_RECLAIM, entry.settledAfterReclaim())
+                .set(WALLET_LEDGER.BUDGET_MONTH, entry.budgetMonth())
+                .set(WALLET_LEDGER.BUDGET_CHARGE_MICROS, entry.budgetChargeMicros())
                 .set(WALLET_LEDGER.CREATED_AT, entry.createdAt())
                 .onConflictDoNothing()
                 .execute();
@@ -100,7 +102,9 @@ public class JooqWalletLedgerRepository implements WalletLedgerRepository {
                 r.getCreatedAt(),
                 r.getHoldId(),
                 r.getShortfallMicros() == null ? 0L : r.getShortfallMicros(),
-                Boolean.TRUE.equals(r.getSettledAfterReclaim())
+                Boolean.TRUE.equals(r.getSettledAfterReclaim()),
+                r.getBudgetMonth(),
+                r.getBudgetChargeMicros() == null ? 0L : r.getBudgetChargeMicros()
         );
     }
 }

@@ -22,6 +22,12 @@ import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
 import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
 import app.pagefault.hyperllm.domain.model.enums.GrantSource;
 import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
+import app.pagefault.hyperllm.domain.repository.ProjectBudgetRepository;
+import app.pagefault.hyperllm.domain.repository.ProjectRepository;
+import app.pagefault.hyperllm.domain.model.tenant.Project;
+import app.pagefault.hyperllm.domain.model.enums.BudgetMonthState;
+import app.pagefault.hyperllm.domain.model.enums.ProjectEnvironment;
+import app.pagefault.hyperllm.domain.model.enums.ProjectStatus;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import app.pagefault.hyperllm.domain.model.enums.UserStatus;
 import app.pagefault.hyperllm.domain.model.tenant.CustomerTier;
@@ -124,6 +130,8 @@ class SettlementPipelineIT {
     @Autowired private BatchExpiryJob expiryJob;
     @Autowired private StringRedisTemplate redis;
     @Autowired private WalletCreditOutbox creditOutbox;
+    @Autowired private ProjectRepository projectRepository;
+    @Autowired private ProjectBudgetRepository budgetRepository;
     @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
@@ -376,6 +384,48 @@ class SettlementPipelineIT {
         assertThat(outboxRepository.exists(eventId)).isFalse();
     }
 
+    @Test
+    void foldsTheRatedRequestValueIntoTheProjectMonthExactlyOnce() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(now);
+        UUID projectId = seedProject(orgId, now);
+        java.time.YearMonth month = java.time.YearMonth.now(ZoneOffset.UTC);
+        var event = new BillingMoneyEvent(UuidV7.next(), BillingMoneyEvent.EventType.CONSUME, now, orgId,
+                projectId, null, "req:budget-" + orgId, -100L, 0L, 0L, 0L,
+                List.of(BillingMoneyEvent.Leg.cash(100L)), "{\"v\":1}", null, false, "Budget fold",
+                null, null, null, month.toString(), 500L);
+
+        assertThat(ledgerFolder.fold(event)).isTrue();
+        assertThat(ledgerFolder.fold(event)).isFalse();
+
+        assertThat(budgetRepository.confirmedMicros(projectId, month.atDay(1))).isEqualTo(500L);
+        assertThat(budgetRepository.find(projectId, month.atDay(1)).orElseThrow().state())
+                .isEqualTo(BudgetMonthState.CONFIRMED);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).items())
+                .singleElement().satisfies(row -> {
+                    assertThat(row.budgetChargeMicros()).isEqualTo(500L);
+                    assertThat(row.budgetMonth()).isEqualTo(month.atDay(1));
+                });
+    }
+
+    @Test
+    void writingOffAnUnpricedSettlementMarksTheProjectMonthUnverified() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID orgId = seedWallet(now);
+        UUID projectId = seedProject(orgId, now);
+        java.time.YearMonth month = java.time.YearMonth.now(ZoneOffset.UTC);
+        var event = new BillingMoneyEvent(UuidV7.next(), BillingMoneyEvent.EventType.CONSUME, now, orgId,
+                projectId, null, "req:unknown-" + orgId, -100L, 0L, 0L, 0L,
+                List.of(BillingMoneyEvent.Leg.cash(100L)), "{}", null, false, "Unknown value",
+                null, null, null, month.toString(), 500L);
+
+        assertThat(ledgerFolder.writeOff(orgId, event.eventId(), event.occurredAt(), event)).isTrue();
+
+        assertThat(budgetRepository.find(projectId, month.atDay(1)).orElseThrow().state())
+                .isEqualTo(BudgetMonthState.UNVERIFIED);
+        assertThat(walletLedgerRepository.listByOrg(orgId, PageQuery.of(1, 10)).total()).isZero();
+    }
+
     private BillingMoneyEvent recordPendingDebit(UUID orgId, OffsetDateTime at) throws Exception {
         UUID id = UuidV7.next();
         var event = new BillingMoneyEvent(id, BillingMoneyEvent.EventType.CONSUME, at, orgId, null, null,
@@ -407,6 +457,15 @@ class SettlementPipelineIT {
         ));
         walletRepository.insert(new Wallet(orgId, 1_000_000L, 0L, 1_000_000L, 0L, 0L, 0L, null, 0L, now));
         return orgId;
+    }
+
+    private UUID seedProject(UUID orgId, OffsetDateTime now) {
+        UUID projectId = UuidV7.next();
+        projectRepository.insert(new Project(
+                projectId, orgId, "Budget " + projectId, ProjectEnvironment.PRODUCTION,
+                10_000_000L, 5_000_000L, null, null, null, null,
+                false, (short) 3, null, ProjectStatus.ACTIVE, null, 0L, now, now));
+        return projectId;
     }
 
     private boolean awaitLedgerRows(UUID orgId, long expected) throws InterruptedException {

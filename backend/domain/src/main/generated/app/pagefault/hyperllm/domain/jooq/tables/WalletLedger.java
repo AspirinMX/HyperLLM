@@ -13,6 +13,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.WalletLedgerRecord;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.Collection;
@@ -166,6 +167,16 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
      */
     public final TableField<WalletLedgerRecord, Boolean> SETTLED_AFTER_RECLAIM = createField(DSL.name("settled_after_reclaim"), SQLDataType.BOOLEAN.nullable(false).defaultValue(DSL.field(DSL.raw("false"), SQLDataType.BOOLEAN)), this, "");
 
+    /**
+     * The column <code>public.wallet_ledger.budget_month</code>.
+     */
+    public final TableField<WalletLedgerRecord, LocalDate> BUDGET_MONTH = createField(DSL.name("budget_month"), SQLDataType.LOCALDATE, this, "");
+
+    /**
+     * The column <code>public.wallet_ledger.budget_charge_micros</code>.
+     */
+    public final TableField<WalletLedgerRecord, Long> BUDGET_CHARGE_MICROS = createField(DSL.name("budget_charge_micros"), SQLDataType.BIGINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.BIGINT)), this, "");
+
     private WalletLedger(Name alias, Table<WalletLedgerRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -235,7 +246,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_HOLD, Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_ORDER, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
+        return Arrays.asList(Indexes.IDX_WALLET_LEDGER_HOLD, Indexes.IDX_WALLET_LEDGER_ORG_CREATED, Indexes.IDX_WALLET_LEDGER_PROJECT_BUDGET, Indexes.IDX_WALLET_LEDGER_PROJECT_CREATED, Indexes.IDX_WALLET_LEDGER_REF_ORDER, Indexes.IDX_WALLET_LEDGER_REF_REQUEST);
     }
 
     @Override
@@ -306,6 +317,7 @@ public class WalletLedger extends TableImpl<WalletLedgerRecord> {
     @Override
     public List<Check<WalletLedgerRecord>> getChecks() {
         return Arrays.asList(
+            Internal.createCheck(this, DSL.name("chk_wallet_ledger_budget_charge"), "((budget_charge_micros >= 0))", true),
             Internal.createCheck(this, DSL.name("chk_wallet_ledger_shortfall_non_negative"), "((shortfall_micros >= 0))", true),
             Internal.createCheck(this, DSL.name("wallet_ledger_ledger_type_check"), "(((ledger_type)::text = ANY ((ARRAY['RECHARGE'::character varying, 'CONSUME'::character varying, 'BONUS_GRANT'::character varying, 'PACK_GRANT'::character varying, 'BONUS_EXPIRE'::character varying, 'REFUND'::character varying, 'ADJUST'::character varying])::text[])))", true)
         );

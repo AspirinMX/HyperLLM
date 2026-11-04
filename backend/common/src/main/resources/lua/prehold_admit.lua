@@ -9,15 +9,23 @@
 -- hashes hold the admitted requests and the reserved tokens of each bucket. A request that is
 -- rejected leaves both hashes untouched.
 --
+-- The project budget is a second, independent reservation: it freezes the request's rated upper
+-- bound in the UTC month, and only when the month is provably complete does a hard cap refuse.
+-- A rejection leaves the rate hashes, the concurrency counters, the wallet and the budget untouched.
+--
 -- KEYS[1] wallet, [2] done marker, [3] hold hash, [4] holds expiry zset,
 -- [5..7] key window zset / request hash / token hash,
 -- [8..10] project window zset / request hash / token hash,
--- [11..13] key, project, organisation concurrency counters
+-- [11..13] key, project, organisation concurrency counters,
+-- [14] project budget hash of the admission month, [15] budget rejection signal
 -- ARGV[1] holdId, [2] nowMs, [3] ttlMs, [4] legs, [5] renew flag, [6] orgId, [7] projectId,
 --       [8] apiKeyId, [9] modelCode, [10] createdAtIso, [11] pack prefix, [12] bonus prefix,
 --       [13] key rpm limit, [14] project rpm limit, [15] key concurrency, [16] project concurrency,
 --       [17] org concurrency, [18] request id, [19] floor legs, [20] floor detail prefix,
---       [21] key tpm limit, [22] project tpm limit, [23] estimated tokens, [24] window seconds
+--       [21] key tpm limit, [22] project tpm limit, [23] estimated tokens, [24] window seconds,
+--       [25] budget month (blank when the project has none), [26] budget estimate micros,
+--       [27] hard cap micros, [28] soft cap micros, [29] prompt-only floor micros,
+--       [30] budget key ttl ms
 --
 -- Legs are encoded as "TYPE|id|units|micros" joined by ";". CASH legs carry no id and no units.
 local function splitLegs(raw)
@@ -148,6 +156,33 @@ if projectTpmLimit > 0 and projectTokens + estimated > projectTpmLimit then
     return 'RATE_LIMIT'
 end
 
+local budgetMonth = ARGV[25] or ''
+local budgetEstimate = math.max(0, tonumber(ARGV[26]) or 0)
+local hardCap = tonumber(ARGV[27]) or 0
+local softCap = tonumber(ARGV[28]) or 0
+if budgetMonth ~= '' then
+    if redis.call('EXISTS', KEYS[14]) == 0 then
+        return 'MISS_BUDGET'
+    end
+    local state = redis.call('HGET', KEYS[14], 'state')
+    if state ~= 'CONFIRMED' then
+        if hardCap > 0 then
+            return 'BUDGET_UNAVAILABLE'
+        end
+    else
+        local used = tonumber(redis.call('HGET', KEYS[14], 'used_micros') or '0') or 0
+        local held = tonumber(redis.call('HGET', KEYS[14], 'held_micros') or '0') or 0
+        if hardCap > 0 and used + held + budgetEstimate > hardCap then
+            -- Evidence for the alert sampler: the gateway only records, it never notifies.
+            redis.call('HINCRBY', KEYS[15], 'rejections', 1)
+            redis.call('HSET', KEYS[15], 'project_id', ARGV[7], 'month', budgetMonth,
+                    'hard_cap_micros', tostring(hardCap), 'last_rejected_at', ARGV[10])
+            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[30]))
+            return 'BUDGET_EXCEEDED'
+        end
+    end
+end
+
 local limits = {tonumber(ARGV[15]) or 0, tonumber(ARGV[16]) or 0, tonumber(ARGV[17]) or 0}
 local acquired = {}
 for i = 1, 3 do
@@ -196,6 +231,10 @@ redis.call('HSET', KEYS[3],
         'rate_second', tostring(nowSec),
         'rate_estimate', tostring(estimated),
         'served', '0',
+        'budget_month', budgetMonth,
+        'budget_key', budgetMonth ~= '' and KEYS[14] or '',
+        'budget_frozen_micros', tostring(budgetEstimate),
+        'budget_floor_micros', tostring(math.max(0, tonumber(ARGV[29]) or 0)),
         'cash_micros', tostring(cashNeeded))
 redis.call('ZADD', KEYS[4], nowMs + ttlMs, holdId)
 
@@ -204,6 +243,12 @@ for _, item in ipairs(frozen) do
 end
 if cashNeeded > 0 then
     redis.call('HINCRBY', KEYS[1], 'held_cash_micros', cashNeeded)
+end
+if budgetMonth ~= '' then
+    redis.call('HSET', KEYS[14], 'month', budgetMonth,
+            'hard_cap_micros', tostring(hardCap), 'soft_cap_micros', tostring(softCap))
+    redis.call('HINCRBY', KEYS[14], 'held_micros', budgetEstimate)
+    redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[30]))
 end
 
 -- A reservation keeps its authority alive through expiry and one sweep window.
@@ -214,6 +259,9 @@ local function protect(key)
     end
 end
 protect(KEYS[1])
+if budgetMonth ~= '' then
+    protect(KEYS[14])
+end
 for _, reservation in ipairs(frozen) do
     protect(reservation.key)
 end

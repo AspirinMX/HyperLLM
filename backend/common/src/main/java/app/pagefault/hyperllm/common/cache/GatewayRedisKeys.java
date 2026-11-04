@@ -179,4 +179,14 @@ public final class GatewayRedisKeys {
     public static String concurrencyCounter(String scope, UUID id) {
         return "gw:rl:conc:" + scope + ":" + id;
     }
+
+    /** One project's budget authority for a UTC month, formatted {@code YYYY-MM}. */
+    public static String projectBudget(UUID projectId, String month) {
+        return "gw:budget:proj:" + projectId + ":" + month;
+    }
+
+    /** Rejections recorded by the gateway for the alert sampler; the gateway never notifies. */
+    public static String budgetSignal(UUID projectId, String month) {
+        return "gw:alert:budget:" + projectId + ":" + month;
+    }
 }

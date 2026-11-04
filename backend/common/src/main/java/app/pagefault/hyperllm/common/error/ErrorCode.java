@@ -43,6 +43,8 @@ public enum ErrorCode {
     BILLING_INSUFFICIENT_BALANCE(402, "Insufficient wallet balance"),
     BILLING_INVALID_AMOUNT(400, "Invalid billing amount"),
     RATE_LIMITED(429, "Rate limit or concurrency limit exceeded"),
+    PROJECT_BUDGET_EXCEEDED(429, "Project monthly budget exhausted"),
+    PROJECT_BUDGET_UNAVAILABLE(503, "Project budget state cannot be verified; retry shortly"),
     PROTOCOL_INVALID_REQUEST(400, "Invalid request payload"),
     UPSTREAM_ERROR(502, "Upstream provider error"),
     CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),

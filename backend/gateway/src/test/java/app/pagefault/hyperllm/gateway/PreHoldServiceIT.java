@@ -21,6 +21,8 @@ import reactor.core.publisher.Flux;
 
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -301,12 +303,113 @@ class PreHoldServiceIT {
         assertThat(queue.depth()).isZero();
     }
 
+    @Test
+    void hardCapRefusesTheRequestThatWouldExceedTheBudget() {
+        String month = month();
+        seedBudget(month, 0L, 0L, 1_000L, 0L, "CONFIRMED");
+
+        assertThat(admitWithBudget("h1", 600L, 400L, 1_000L, 0L)).isEqualTo("OK");
+        assertThat(admitWithBudget("h2", 600L, 400L, 1_000L, 0L))
+                .as("600 already frozen plus 600 more is over the 1000 hard cap")
+                .isEqualTo("BUDGET_EXCEEDED");
+
+        assertThat(hash(budgetKey(month), "held_micros")).isEqualTo("600");
+        assertThat(hash(budgetKey(month), "used_micros")).isEqualTo("0");
+        assertThat(hash(budgetSignal(month), "rejections")).isEqualTo("1");
+        assertThat(hash(wallet(), "held_cash_micros"))
+                .as("a rejected request reserves no wallet money either")
+                .isEqualTo("1");
+    }
+
+    @Test
+    void settlementMovesTheBudgetFreezeToUsedAndCarriesItOnTheEvent() throws Exception {
+        String month = month();
+        seedBudget(month, 0L, 0L, 10_000L, 5_000L, "CONFIRMED");
+        admitWithBudget("h1", 600L, 100L, 10_000L, 5_000L);
+
+        PreHoldService.SettleOutcome outcome = settleWithBudget("h1",
+                List.of(AllocationLeg.cash(200L)), 400L);
+
+        assertThat(outcome.cashCharged()).isEqualTo(200L);
+        assertThat(hash(budgetKey(month), "held_micros")).isEqualTo("0");
+        assertThat(hash(budgetKey(month), "used_micros")).isEqualTo("400");
+        var mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        var event = mapper.readValue(queue.takeBatch(10, 0).getFirst().payload(), BillingMoneyEvent.class);
+        assertThat(event.budgetMonth()).isEqualTo(month);
+        assertThat(event.budgetChargeMicros()).isEqualTo(400L);
+    }
+
+    @Test
+    void releaseReturnsTheBudgetFreezeWithoutChargingIt() {
+        String month = month();
+        seedBudget(month, 0L, 0L, 10_000L, 0L, "CONFIRMED");
+        admitWithBudget("h1", 600L, 100L, 10_000L, 0L);
+
+        service.release(new PreHoldService.Lease(orgId, List.of(), id("h1"), 0L, budgetKey(month))).block();
+
+        assertThat(hash(budgetKey(month), "held_micros")).isEqualTo("0");
+        assertThat(hash(budgetKey(month), "used_micros")).isEqualTo("0");
+    }
+
+    @Test
+    void unverifiedMonthClosesAHardCappedProjectUntilItIsResolved() {
+        String month = month();
+        seedBudget(month, 900L, 0L, 1_000L, 0L, "UNVERIFIED");
+
+        assertThat(admitWithBudget("h1", 100L, 50L, 1_000L, 0L)).isEqualTo("BUDGET_UNAVAILABLE");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+    }
+
+    @Test
+    void aMissingMonthAsksTheCallerToInstallIt() {
+        assertThat(admitWithBudget("h1", 100L, 50L, 1_000L, 0L)).isEqualTo("MISS_BUDGET");
+        assertThat(hash(wallet(), "held_cash_micros")).isEqualTo("0");
+    }
+
     private PreHoldService.SettleOutcome settle(String key, List<AllocationLeg> charges) {
         return service.settle(lease(key), charges, "", OffsetDateTime.now()).block();
     }
 
     private PreHoldService.Lease lease(String key) {
         return new PreHoldService.Lease(orgId, List.of(), id(key), 0L);
+    }
+
+    private String admitWithBudget(String holdId, long estimate, long floor, long hardCap, long softCap) {
+        String month = month();
+        return service.admit(new PreHoldService.AdmitCommand(
+                id(holdId), orgId, projectId, null, "gpt", List.of(AllocationLeg.cash(1)),
+                null, null, null, null, 0L, null, null, 0, 300L, holdId, List.of(), "",
+                month, budgetKey(month), estimate, hardCap, softCap, floor)).block();
+    }
+
+    private PreHoldService.SettleOutcome settleWithBudget(String key, List<AllocationLeg> charges,
+                                                          long budgetCharge) {
+        return service.settle(new PreHoldService.Lease(orgId, List.of(), id(key), 0L, budgetKey(month())),
+                charges, "", OffsetDateTime.now(), 0L, budgetCharge).block();
+    }
+
+    private static String month() {
+        return YearMonth.now(ZoneOffset.UTC).toString();
+    }
+
+    private String budgetKey(String month) {
+        return GatewayRedisKeys.projectBudget(projectId, month);
+    }
+
+    private String budgetSignal(String month) {
+        return GatewayRedisKeys.budgetSignal(projectId, month);
+    }
+
+    private void seedBudget(String month, long used, long held, long hardCap, long softCap, String state) {
+        redis.opsForHash().putAll(GatewayRedisKeys.projectBudget(projectId, month), Map.of(
+                "month", month,
+                "used_micros", String.valueOf(used),
+                "held_micros", String.valueOf(held),
+                "hard_cap_micros", String.valueOf(hardCap),
+                "soft_cap_micros", String.valueOf(softCap),
+                "state", state,
+                "start_at", OffsetDateTime.now(ZoneOffset.UTC).toString(),
+                "loaded", "1")).block();
     }
 
     private static String id(String key) {

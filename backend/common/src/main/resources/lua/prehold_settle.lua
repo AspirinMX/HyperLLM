@@ -1,9 +1,9 @@
 -- Single terminal transition for a reservation. Expiry, explicit release and normal settlement
 -- contend on the same hold/done keys. The event records only deltas this invocation applied.
 -- KEYS: wallet, hold, done, expiry zset, event copy, pending zset, org ledger position, owner hash,
---       proof, org waiting set, rate correction marker
+--       proof, org waiting set, rate correction marker, project budget hash
 -- ARGV: holdId, nowMs, occurredAt, mode, charges, detail prefix, done TTL ms, evidence TTL ms,
---       pack prefix, bonus prefix, legacy grant id, actual tokens, marker TTL ms
+--       pack prefix, bonus prefix, legacy grant id, actual tokens, marker TTL ms, budget charge micros
 local holdId, now, at, mode = ARGV[1], tonumber(ARGV[2]), ARGV[3], ARGV[4]
 local function digits(value)
     return string.format('%.0f', value)
@@ -35,7 +35,8 @@ if redis.call('EXISTS', KEYS[3]) == 1 then
 end
 local hold = redis.call('HMGET', KEYS[2], 'org_id', 'project_id', 'api_key_id', 'model_code',
         'request_id', 'served', 'legs', 'fallback_legs', 'fallback_detail', 'concurrency_keys',
-        'rate_tokens', 'rate_second', 'rate_estimate')
+        'rate_tokens', 'rate_second', 'rate_estimate',
+        'budget_month', 'budget_frozen_micros', 'budget_floor_micros')
 if not hold[1] then
     redis.call('ZREM', KEYS[4], holdId)
     return {'MISSING_HOLD'}
@@ -78,6 +79,18 @@ local cash, totalCashHeld = tonumber(wallet[1]), tonumber(wallet[2] or '0')
 local walletValid = integer(cash) and integer(totalCashHeld) and integer(cashHeld)
         and cash >= totalCashHeld and totalCashHeld >= cashHeld
 valid = valid and walletValid
+
+-- The budget charge is the rated value of this request: what the month consumed, not what the
+-- wallet moved. A reclaimed lease has only its prompt-only floor as evidence.
+local budgetMonth = hold[14] or ''
+local budgetCharge = 0
+if valid and budgetMonth ~= '' then
+    if mode == 'SETTLE' then
+        budgetCharge = math.max(0, tonumber(ARGV[14]) or 0)
+    elseif reclaim and hold[6] == '1' then
+        budgetCharge = math.max(0, tonumber(hold[16]) or 0)
+    end
+end
 
 local wantedCash, bonus, units, value = 0, 0, 0, 0
 local applied = {}
@@ -124,7 +137,7 @@ if valid and charge then
     if cashCharge > 0 then
         table.insert(applied, {kind = 'CASH', id = '', units = 0, micros = cashCharge})
     end
-    if cashCharge > 0 or bonus > 0 or units > 0 then
+    if cashCharge > 0 or bonus > 0 or units > 0 or budgetCharge > 0 then
         local messageLegs, detailLegs = {}, {}
         for _, leg in ipairs(applied) do
             local virtual = leg.kind == 'BONUS' and leg.id == ARGV[11]
@@ -152,6 +165,8 @@ if valid and charge then
                 .. ',"packDeltaUnits":' .. digits(-units) .. ',"shortfallMicros":' .. digits(shortfall)
                 .. ',"legs":[' .. table.concat(messageLegs, ',') .. '],"allocationDetailJson":' .. cjson.encode(detail)
                 .. ',"holdId":' .. cjson.encode(holdId) .. ',"settledAfterReclaim":' .. tostring(reclaim)
+                .. ',"budgetMonth":' .. (budgetMonth == '' and 'null' or cjson.encode(budgetMonth))
+                .. ',"budgetChargeMicros":' .. digits(budgetCharge)
                 .. ',"description":' .. cjson.encode('Model ' .. hold[4]) .. '}'
     end
 end
@@ -170,6 +185,21 @@ if walletValid and cashHeld > 0 then
 end
 if cashCharge > 0 then
     redis.call('HINCRBY', KEYS[1], 'cash_micros', digits(-cashCharge))
+end
+-- A missing budget key means the month was rebuilt or is unknown; the fold still adds this exact
+-- charge, so the month never loses money, only the now-meaningless freeze.
+if valid and budgetMonth ~= '' and redis.call('EXISTS', KEYS[12]) == 1 then
+    local frozenBudget = math.max(0, tonumber(hold[15]) or 0)
+    local heldBudget = tonumber(redis.call('HGET', KEYS[12], 'held_micros') or '0') or 0
+    local remainingHeld = heldBudget - frozenBudget
+    if remainingHeld < 0 then
+        remainingHeld = 0
+    end
+    redis.call('HSET', KEYS[12], 'held_micros', digits(remainingHeld))
+    if budgetCharge > 0 then
+        redis.call('HINCRBY', KEYS[12], 'used_micros', digits(budgetCharge))
+        redis.call('HSET', KEYS[12], 'last_charge_at', at)
+    end
 end
 for key in string.gmatch(hold[10] or '', '([^|]+)') do
     if tonumber(redis.call('GET', key) or '0') > 0 then

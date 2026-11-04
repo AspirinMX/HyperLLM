@@ -24,6 +24,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentNotifications;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
+import app.pagefault.hyperllm.domain.jooq.tables.ProjectBudgetMonths;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
@@ -161,6 +162,11 @@ public class Public extends SchemaImpl {
     public final PricingRules PRICING_RULES = PricingRules.PRICING_RULES;
 
     /**
+     * The table <code>public.project_budget_months</code>.
+     */
+    public final ProjectBudgetMonths PROJECT_BUDGET_MONTHS = ProjectBudgetMonths.PROJECT_BUDGET_MONTHS;
+
+    /**
      * The table <code>public.project_members</code>.
      */
     public final ProjectMembers PROJECT_MEMBERS = ProjectMembers.PROJECT_MEMBERS;
@@ -266,6 +272,7 @@ public class Public extends SchemaImpl {
             PaymentNotifications.PAYMENT_NOTIFICATIONS,
             PaymentOrders.PAYMENT_ORDERS,
             PricingRules.PRICING_RULES,
+            ProjectBudgetMonths.PROJECT_BUDGET_MONTHS,
             ProjectMembers.PROJECT_MEMBERS,
             Projects.PROJECTS,
             Providers.PROVIDERS,

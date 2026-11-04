@@ -2,10 +2,12 @@ package app.pagefault.hyperllm.console.controller;
 
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
+import app.pagefault.hyperllm.console.dto.BudgetDtos.ProjectBudgetDto;
 import app.pagefault.hyperllm.console.dto.TenantDtos.CreateProjectRequest;
 import app.pagefault.hyperllm.console.dto.TenantDtos.ProjectDto;
 import app.pagefault.hyperllm.console.dto.TenantDtos.ReplaceProjectMembersRequest;
 import app.pagefault.hyperllm.console.dto.TenantDtos.UpdateProjectRequest;
+import app.pagefault.hyperllm.console.service.ConsoleBudgetService;
 import app.pagefault.hyperllm.console.service.ConsoleProjectAndKeyService;
 import app.pagefault.hyperllm.console.web.ConsoleRequestContext;
 import jakarta.servlet.http.HttpServletRequest;
@@ -33,6 +35,7 @@ import java.util.UUID;
 public class ConsoleProjectController {
 
     private final ConsoleProjectAndKeyService service;
+    private final ConsoleBudgetService budgetService;
 
     @GetMapping("/orgs/{orgId}/projects")
     public PageResponse<ProjectDto> listProjects(
@@ -66,6 +69,12 @@ public class ConsoleProjectController {
             HttpServletRequest request
     ) {
         return service.updateProject(projectId, ConsoleRequestContext.requirePrincipal(request).userId(), body);
+    }
+
+    @GetMapping("/projects/{projectId}/budget")
+    public ProjectBudgetDto getProjectBudget(@PathVariable UUID projectId, HttpServletRequest request) {
+        return budgetService.getCurrentMonth(
+                projectId, ConsoleRequestContext.requirePrincipal(request).userId());
     }
 
     @DeleteMapping("/projects/{projectId}")

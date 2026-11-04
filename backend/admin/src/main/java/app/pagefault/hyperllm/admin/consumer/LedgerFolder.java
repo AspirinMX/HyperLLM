@@ -15,6 +15,7 @@ import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
+import app.pagefault.hyperllm.domain.repository.ProjectBudgetRepository;
 import app.pagefault.hyperllm.domain.repository.ResourcePackRepository;
 import app.pagefault.hyperllm.domain.repository.WalletLedgerRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
@@ -23,7 +24,10 @@ import org.jooq.DSLContext;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeParseException;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -56,6 +60,7 @@ public class LedgerFolder {
     private final DSLContext dsl;
     private final WalletCreditProjection credits;
     private final SettlementWorklist worklist;
+    private final ProjectBudgetRepository budgetRepository;
 
     public enum RepairResult { ADJUSTED, ALREADY_RESOLVED, IN_DELIVERY }
 
@@ -91,6 +96,16 @@ public class LedgerFolder {
     /** Audits the write-off and fences late delivery using the same wallet lock as the fold. */
     @Transactional
     public boolean writeOff(UUID orgId, UUID id, OffsetDateTime at) {
+        return writeOff(orgId, id, at, null);
+    }
+
+    /**
+     * The same write-off, with whatever evidence survived. When the event carried a budget charge,
+     * the month cannot be proven any more, so it is marked unverified instead of silently pricing
+     * the unknown part at zero.
+     */
+    @Transactional
+    public boolean writeOff(UUID orgId, UUID id, OffsetDateTime at, BillingMoneyEvent event) {
         long version = lockWallet(orgId);
         if (resolved(id, at)) {
             return false;
@@ -99,6 +114,10 @@ public class LedgerFolder {
             throw new IllegalStateException("Cannot close settlement " + id);
         }
         worklist.fenceSnapshot(orgId, id, Math.incrementExact(version));
+        if (event != null && event.projectId() != null && event.budgetMonth() != null
+                && event.budgetChargeMicros() > 0L) {
+            budgetRepository.markUnverified(event.projectId(), month(event.budgetMonth()));
+        }
         audit(orgId, id, at, WRITE_OFF);
         return true;
     }
@@ -155,7 +174,9 @@ public class LedgerFolder {
                 at,
                 event.holdId(),
                 event.shortfallMicros(),
-                event.settledAfterReclaim()));
+                event.settledAfterReclaim(),
+                month(event.budgetMonth()),
+                Math.max(0L, event.budgetChargeMicros())));
         if (!inserted) {
             return false;
         }
@@ -198,6 +219,7 @@ public class LedgerFolder {
         if (expiredBonusConsumed > 0L) {
             restoreExpiredBonus(event, expiredBonusConsumed);
         }
+        applyBudget(event);
         Totals totals = Totals.of(event);
         if (!walletRepository.applyEventDelta(
                 event.orgId(),
@@ -218,6 +240,33 @@ public class LedgerFolder {
         }
         return true;
     }
+
+    /**
+     * Adds the request's rated value to its project month. The ledger insert above is the gate, so a
+     * redelivery cannot add it twice, and the fold survives independently of which bucket paid.
+     */
+    private void applyBudget(BillingMoneyEvent event) {
+        if (event.projectId() == null || event.budgetMonth() == null || event.budgetMonth().isBlank()) {
+            return;
+        }
+        if (event.budgetChargeMicros() <= 0L) {
+            return;
+        }
+        budgetRepository.applyCharge(event.projectId(), month(event.budgetMonth()),
+                event.budgetChargeMicros());
+    }
+
+    private static LocalDate month(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return YearMonth.parse(value).atDay(1);
+        } catch (DateTimeParseException ex) {
+            throw new IllegalStateException("Invalid budget month " + value, ex);
+        }
+    }
+
 
     /**
      * Creates the batch the credit authorized. The batch id is the event id, so a redelivery hits

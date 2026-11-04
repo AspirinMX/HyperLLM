@@ -84,5 +84,7 @@ public class GatewayProperties {
         private int defaultOutputTokens = 8192;
         private int lazyReclaimBatch = 3;
         private long packAvailabilityTtlSeconds = 300;
+        /** How long a project month survives without a touch; long enough to outlive the month. */
+        private long budgetTtlDays = 40;
     }
 }

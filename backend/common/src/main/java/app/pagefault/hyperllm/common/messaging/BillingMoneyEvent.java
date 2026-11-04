@@ -40,7 +40,11 @@ public record BillingMoneyEvent(
         String description,
         CreditSource creditSource,
         Grant grant,
-        UUID orderId
+        UUID orderId,
+        /** UTC month as {@code YYYY-MM}; {@code null} when the project has no budget. */
+        String budgetMonth,
+        /** Rated value of the request, independent of which bucket paid for it. */
+        long budgetChargeMicros
 ) {
 
     /** Set by the durable credit producer. Older payloads keep their original fold behavior. */
@@ -147,7 +151,18 @@ public record BillingMoneyEvent(
                              String description) {
         this(eventId, eventType, occurredAt, orgId, projectId, apiKeyId, idempotencyKey, cashDeltaMicros,
                 bonusDeltaMicros, packDeltaUnits, shortfallMicros, legs, allocationDetailJson, holdId,
-                settledAfterReclaim, description, null, null, null);
+                settledAfterReclaim, description, null, null, null, null, 0L);
+    }
+
+    /** Payload written before project budgets existed. */
+    public BillingMoneyEvent(UUID eventId, EventType eventType, OffsetDateTime occurredAt, UUID orgId,
+                             UUID projectId, UUID apiKeyId, String idempotencyKey, long cashDeltaMicros,
+                             long bonusDeltaMicros, long packDeltaUnits, long shortfallMicros, List<Leg> legs,
+                             String allocationDetailJson, UUID holdId, boolean settledAfterReclaim,
+                             String description, CreditSource creditSource, Grant grant, UUID orderId) {
+        this(eventId, eventType, occurredAt, orgId, projectId, apiKeyId, idempotencyKey, cashDeltaMicros,
+                bonusDeltaMicros, packDeltaUnits, shortfallMicros, legs, allocationDetailJson, holdId,
+                settledAfterReclaim, description, creditSource, grant, orderId, null, 0L);
     }
 
     /** Payload written by the first durable credit producer, before grants carried their terms. */
@@ -158,7 +173,7 @@ public record BillingMoneyEvent(
                              String description, CreditSource creditSource) {
         this(eventId, eventType, occurredAt, orgId, projectId, apiKeyId, idempotencyKey, cashDeltaMicros,
                 bonusDeltaMicros, packDeltaUnits, shortfallMicros, legs, allocationDetailJson, holdId,
-                settledAfterReclaim, description, creditSource, null, null);
+                settledAfterReclaim, description, creditSource, null, null, null, 0L);
     }
 
     public BillingMoneyEvent {

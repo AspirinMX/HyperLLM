@@ -6,6 +6,7 @@ package app.pagefault.hyperllm.domain.jooq.tables.records;
 
 import app.pagefault.hyperllm.domain.jooq.tables.WalletLedger;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
@@ -322,6 +323,36 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         return (Boolean) get(19);
     }
 
+    /**
+     * Setter for <code>public.wallet_ledger.budget_month</code>.
+     */
+    public WalletLedgerRecord setBudgetMonth(LocalDate value) {
+        set(20, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallet_ledger.budget_month</code>.
+     */
+    public LocalDate getBudgetMonth() {
+        return (LocalDate) get(20);
+    }
+
+    /**
+     * Setter for <code>public.wallet_ledger.budget_charge_micros</code>.
+     */
+    public WalletLedgerRecord setBudgetChargeMicros(Long value) {
+        set(21, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.wallet_ledger.budget_charge_micros</code>.
+     */
+    public Long getBudgetChargeMicros() {
+        return (Long) get(21);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -345,7 +376,7 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
     /**
      * Create a detached, initialised WalletLedgerRecord
      */
-    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt, UUID holdId, Long shortfallMicros, Boolean settledAfterReclaim) {
+    public WalletLedgerRecord(UUID id, UUID orgId, UUID projectId, UUID apiKeyId, String ledgerType, String idempotencyKey, Long cashDeltaMicros, Long bonusDeltaMicros, Long packDeltaUnits, Long cashBalanceAfterMicros, Long bonusBalanceAfterMicros, JSONB allocationDetailJson, String refRequestId, UUID refOrderId, UUID refAdjustmentId, String description, OffsetDateTime createdAt, UUID holdId, Long shortfallMicros, Boolean settledAfterReclaim, LocalDate budgetMonth, Long budgetChargeMicros) {
         super(WalletLedger.WALLET_LEDGER);
 
         setId(id);
@@ -368,6 +399,8 @@ public class WalletLedgerRecord extends UpdatableRecordImpl<WalletLedgerRecord> 
         setHoldId(holdId);
         setShortfallMicros(shortfallMicros);
         setSettledAfterReclaim(settledAfterReclaim);
+        setBudgetMonth(budgetMonth);
+        setBudgetChargeMicros(budgetChargeMicros);
         resetChangedOnNotNull();
     }
 }

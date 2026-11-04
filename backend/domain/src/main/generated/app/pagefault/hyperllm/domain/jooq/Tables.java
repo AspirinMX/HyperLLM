@@ -24,6 +24,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentNotifications;
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders;
 import app.pagefault.hyperllm.domain.jooq.tables.PricingRules;
+import app.pagefault.hyperllm.domain.jooq.tables.ProjectBudgetMonths;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
@@ -145,6 +146,11 @@ public class Tables {
      * The table <code>public.pricing_rules</code>.
      */
     public static final PricingRules PRICING_RULES = PricingRules.PRICING_RULES;
+
+    /**
+     * The table <code>public.project_budget_months</code>.
+     */
+    public static final ProjectBudgetMonths PROJECT_BUDGET_MONTHS = ProjectBudgetMonths.PROJECT_BUDGET_MONTHS;
 
     /**
      * The table <code>public.project_members</code>.
