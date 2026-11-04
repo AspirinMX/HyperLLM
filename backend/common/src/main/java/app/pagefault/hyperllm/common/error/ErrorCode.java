@@ -45,6 +45,7 @@ public enum ErrorCode {
     RATE_LIMITED(429, "Rate limit or concurrency limit exceeded"),
     PROJECT_BUDGET_EXCEEDED(429, "Project monthly budget exhausted"),
     PROJECT_BUDGET_UNAVAILABLE(503, "Project budget state cannot be verified; retry shortly"),
+    ANALYTICS_UNAVAILABLE(503, "The usage warehouse is unavailable; retry shortly"),
     PROTOCOL_INVALID_REQUEST(400, "Invalid request payload"),
     UPSTREAM_ERROR(502, "Upstream provider error"),
     CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),

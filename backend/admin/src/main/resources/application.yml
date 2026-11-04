@@ -56,6 +56,16 @@ hyperllm:
     aes-master-key: ${HYPERLLM_AES_MASTER_KEY}
     key-pepper-v1: ${HYPERLLM_KEY_PEPPER_V1}
     cookie-secure: ${HYPERLLM_COOKIE_SECURE:false}
+  analytics:
+    enabled: ${HYPERLLM_ANALYTICS_ENABLED:true}
+    consumer-group: ${HYPERLLM_ANALYTICS_CONSUMER_GROUP:hyperllm-admin-requests}
+    concurrency: ${HYPERLLM_ANALYTICS_CONCURRENCY:3}
+    rollup-hours-per-run: ${HYPERLLM_ANALYTICS_ROLLUP_HOURS:24}
+    clickhouse:
+      url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/hyperllm}
+      username: ${CLICKHOUSE_USER:hyperllm}
+      password: ${CLICKHOUSE_PASSWORD:hyperllm_dev_password}
+      pool-size: ${HYPERLLM_CLICKHOUSE_POOL_SIZE:4}
   admin:
     mfa:
       required: ${HYPERLLM_ADMIN_MFA_REQUIRED:true}

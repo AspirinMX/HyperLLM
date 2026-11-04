@@ -6,6 +6,9 @@ package app.pagefault.hyperllm.domain.jooq;
 
 import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminUsers;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsHours;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsIngestPositions;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsRejects;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys;
 import app.pagefault.hyperllm.domain.jooq.tables.AuditLogs;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules;
@@ -44,6 +47,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.jooq.Catalog;
+import org.jooq.Sequence;
 import org.jooq.Table;
 import org.jooq.impl.SchemaImpl;
 
@@ -70,6 +74,21 @@ public class Public extends SchemaImpl {
      * The table <code>public.admin_users</code>.
      */
     public final AdminUsers ADMIN_USERS = AdminUsers.ADMIN_USERS;
+
+    /**
+     * The table <code>public.analytics_hours</code>.
+     */
+    public final AnalyticsHours ANALYTICS_HOURS = AnalyticsHours.ANALYTICS_HOURS;
+
+    /**
+     * The table <code>public.analytics_ingest_positions</code>.
+     */
+    public final AnalyticsIngestPositions ANALYTICS_INGEST_POSITIONS = AnalyticsIngestPositions.ANALYTICS_INGEST_POSITIONS;
+
+    /**
+     * The table <code>public.analytics_rejects</code>.
+     */
+    public final AnalyticsRejects ANALYTICS_REJECTS = AnalyticsRejects.ANALYTICS_REJECTS;
 
     /**
      * The table <code>public.api_keys</code>.
@@ -250,10 +269,20 @@ public class Public extends SchemaImpl {
     }
 
     @Override
+    public final List<Sequence<?>> getSequences() {
+        return Arrays.asList(
+            Sequences.ANALYTICS_ROLLUP_VERSION_SEQ
+        );
+    }
+
+    @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
             AdminSessions.ADMIN_SESSIONS,
             AdminUsers.ADMIN_USERS,
+            AnalyticsHours.ANALYTICS_HOURS,
+            AnalyticsIngestPositions.ANALYTICS_INGEST_POSITIONS,
+            AnalyticsRejects.ANALYTICS_REJECTS,
             ApiKeys.API_KEYS,
             AuditLogs.AUDIT_LOGS,
             BillingAlertRules.BILLING_ALERT_RULES,

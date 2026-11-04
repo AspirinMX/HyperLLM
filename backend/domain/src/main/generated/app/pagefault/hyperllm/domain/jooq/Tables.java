@@ -6,6 +6,9 @@ package app.pagefault.hyperllm.domain.jooq;
 
 import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions;
 import app.pagefault.hyperllm.domain.jooq.tables.AdminUsers;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsHours;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsIngestPositions;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsRejects;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys;
 import app.pagefault.hyperllm.domain.jooq.tables.AuditLogs;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules;
@@ -56,6 +59,21 @@ public class Tables {
      * The table <code>public.admin_users</code>.
      */
     public static final AdminUsers ADMIN_USERS = AdminUsers.ADMIN_USERS;
+
+    /**
+     * The table <code>public.analytics_hours</code>.
+     */
+    public static final AnalyticsHours ANALYTICS_HOURS = AnalyticsHours.ANALYTICS_HOURS;
+
+    /**
+     * The table <code>public.analytics_ingest_positions</code>.
+     */
+    public static final AnalyticsIngestPositions ANALYTICS_INGEST_POSITIONS = AnalyticsIngestPositions.ANALYTICS_INGEST_POSITIONS;
+
+    /**
+     * The table <code>public.analytics_rejects</code>.
+     */
+    public static final AnalyticsRejects ANALYTICS_REJECTS = AnalyticsRejects.ANALYTICS_REJECTS;
 
     /**
      * The table <code>public.api_keys</code>.

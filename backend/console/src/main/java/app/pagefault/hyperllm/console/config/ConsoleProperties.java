@@ -10,6 +10,7 @@ public class ConsoleProperties {
     private Security security = new Security();
     private Billing billing = new Billing();
     private Auth auth = new Auth();
+    private Analytics analytics = new Analytics();
 
     @Data
     public static class Security {
@@ -29,5 +30,14 @@ public class ConsoleProperties {
     @Data
     public static class Auth {
         private boolean otpDebugEchoEnabled = false;
+    }
+
+    @Data
+    public static class Analytics {
+        private String url = "jdbc:clickhouse://localhost:8123/hyperllm";
+        private String username = "hyperllm";
+        private String password = "hyperllm_dev_password";
+        private int poolSize = 4;
+        private int connectTimeoutMs = 3_000;
     }
 }

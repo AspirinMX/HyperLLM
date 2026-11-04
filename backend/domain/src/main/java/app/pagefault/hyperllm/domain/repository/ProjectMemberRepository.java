@@ -13,6 +13,9 @@ public interface ProjectMemberRepository {
 
     List<UUID> listUserIdsByProject(UUID projectId);
 
+    /** Projects of one organisation that a developer was explicitly granted. */
+    List<UUID> listProjectIdsByUser(UUID orgId, UUID userId);
+
     boolean hasAccess(UUID projectId, UUID userId);
 
     int deleteByOrgAndUser(UUID orgId, UUID userId);

@@ -54,6 +54,14 @@ public class JooqProjectMemberRepository implements ProjectMemberRepository {
     }
 
     @Override
+    public List<UUID> listProjectIdsByUser(UUID orgId, UUID userId) {
+        return dsl.select(PROJECT_MEMBERS.PROJECT_ID)
+                .from(PROJECT_MEMBERS)
+                .where(PROJECT_MEMBERS.ORG_ID.eq(orgId).and(PROJECT_MEMBERS.USER_ID.eq(userId)))
+                .fetch(PROJECT_MEMBERS.PROJECT_ID);
+    }
+
+    @Override
     public List<UUID> listUserIdsByProject(UUID projectId) {
         return dsl.select(PROJECT_MEMBERS.USER_ID)
                 .from(PROJECT_MEMBERS)

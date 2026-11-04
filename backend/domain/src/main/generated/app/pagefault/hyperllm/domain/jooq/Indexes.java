@@ -5,6 +5,7 @@ package app.pagefault.hyperllm.domain.jooq;
 
 
 import app.pagefault.hyperllm.domain.jooq.tables.AdminSessions;
+import app.pagefault.hyperllm.domain.jooq.tables.AnalyticsHours;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys;
 import app.pagefault.hyperllm.domain.jooq.tables.AuditLogs;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules;
@@ -48,6 +49,7 @@ public class Indexes {
     // -------------------------------------------------------------------------
 
     public static final Index IDX_ADMIN_SESSIONS_ADMIN_REVOKED = Internal.createIndex(DSL.name("idx_admin_sessions_admin_revoked"), AdminSessions.ADMIN_SESSIONS, new OrderField[] { AdminSessions.ADMIN_SESSIONS.ADMIN_USER_ID, AdminSessions.ADMIN_SESSIONS.REVOKED_AT }, false);
+    public static final Index IDX_ANALYTICS_HOURS_DIRTY = Internal.createIndex(DSL.name("idx_analytics_hours_dirty"), AnalyticsHours.ANALYTICS_HOURS, new OrderField[] { AnalyticsHours.ANALYTICS_HOURS.HOUR_START }, false);
     public static final Index IDX_API_KEYS_ORG = Internal.createIndex(DSL.name("idx_api_keys_org"), ApiKeys.API_KEYS, new OrderField[] { ApiKeys.API_KEYS.ORG_ID }, false);
     public static final Index IDX_API_KEYS_PROJECT_STATUS_ACTIVE = Internal.createIndex(DSL.name("idx_api_keys_project_status_active"), ApiKeys.API_KEYS, new OrderField[] { ApiKeys.API_KEYS.PROJECT_ID, ApiKeys.API_KEYS.STATUS }, false);
     public static final Index IDX_AUDIT_LOGS_ACTOR_CREATED = Internal.createIndex(DSL.name("idx_audit_logs_actor_created"), AuditLogs.AUDIT_LOGS, new OrderField[] { AuditLogs.AUDIT_LOGS.ACTOR_TYPE, AuditLogs.AUDIT_LOGS.ACTOR_ID, AuditLogs.AUDIT_LOGS.CREATED_AT.desc() }, false);

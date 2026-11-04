@@ -51,6 +51,11 @@ hyperllm:
     cookie-secure: ${HYPERLLM_COOKIE_SECURE:false}
   billing:
     signup-bonus-micros: ${HYPERLLM_SIGNUP_BONUS_MICROS:5000000}
+  analytics:
+    url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/hyperllm}
+    username: ${CLICKHOUSE_USER:hyperllm}
+    password: ${CLICKHOUSE_PASSWORD:hyperllm_dev_password}
+    pool-size: ${HYPERLLM_CLICKHOUSE_POOL_SIZE:4}
   auth:
     otp-debug-echo-enabled: ${HYPERLLM_OTP_DEBUG_ECHO:false}
   payment:

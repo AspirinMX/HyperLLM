@@ -1,3 +1,9 @@
+-- Phase 2 (2.9): request facts and the versioned hourly rollup.
+--
+-- This file is the operator-facing copy; admin also ships the same statements as a classpath
+-- resource so an existing Compose volume is upgraded on the next start. Keep the two in sync.
+-- Every statement is idempotent and safe to run repeatedly.
+
 CREATE DATABASE IF NOT EXISTS hyperllm;
 
 CREATE TABLE IF NOT EXISTS hyperllm.llm_request_events (
@@ -35,53 +41,63 @@ CREATE TABLE IF NOT EXISTS hyperllm.llm_request_events (
     tpot_ms               Float32,
     duration_ms           UInt32,
     client_ip_prefix      String,
-    region                LowCardinality(String)
+    region                LowCardinality(String),
+    -- Delivery position of this fact. It is the tie-breaker of duplicate identities and the
+    -- boundary the rollup uses to include only what the consumer has committed.
+    kafka_partition       UInt32 DEFAULT 0,
+    kafka_offset          UInt64 DEFAULT 0,
+    cost_known            UInt8 DEFAULT 1,
+    ingested_at           DateTime64(3, 'UTC') DEFAULT now64(3)
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (org_id, project_id, event_date, created_at, request_id)
 TTL event_date + INTERVAL 365 DAY DELETE;
 
-CREATE TABLE IF NOT EXISTS hyperllm.mv_usage_hourly (
-    hour_bucket              DateTime('UTC'),
-    org_id                   UUID,
-    project_id               UUID,
-    api_key_id               UUID,
-    virtual_model            LowCardinality(String),
-    channel_id               UUID,
-    request_count            SimpleAggregateFunction(sum, UInt64),
-    success_count            SimpleAggregateFunction(sum, UInt64),
-    sum_prompt_tokens        SimpleAggregateFunction(sum, UInt64),
-    sum_cached_tokens        SimpleAggregateFunction(sum, UInt64),
-    sum_completion_tokens    SimpleAggregateFunction(sum, UInt64),
-    sum_cost_micros          SimpleAggregateFunction(sum, Int64),
-    sum_cash_cost_micros     SimpleAggregateFunction(sum, Int64),
-    sum_bonus_cost_micros    SimpleAggregateFunction(sum, Int64),
-    sum_upstream_cost_micros SimpleAggregateFunction(sum, Int64),
-    ttft_p95_state           AggregateFunction(quantile(0.95), UInt32)
+-- Upgrading a volume created before 2.9 adds the delivery columns in place.
+ALTER TABLE hyperllm.llm_request_events ADD COLUMN IF NOT EXISTS kafka_partition UInt32 DEFAULT 0;
+ALTER TABLE hyperllm.llm_request_events ADD COLUMN IF NOT EXISTS kafka_offset UInt64 DEFAULT 0;
+ALTER TABLE hyperllm.llm_request_events ADD COLUMN IF NOT EXISTS cost_known UInt8 DEFAULT 1;
+ALTER TABLE hyperllm.llm_request_events ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3, 'UTC') DEFAULT now64(3);
+
+-- The old incremental view summed every inserted block, including re-deliveries. The rollup job
+-- publishes a deduplicated version per hour instead; the view is stopped but its history is kept.
+DROP VIEW IF EXISTS hyperllm.mv_usage_hourly_mv;
+
+CREATE TABLE IF NOT EXISTS hyperllm.usage_hourly (
+    hour_bucket               DateTime('UTC'),
+    version                   UInt64,
+    org_id                    UUID,
+    project_id                UUID,
+    api_key_id                UUID,
+    virtual_model             LowCardinality(String),
+    channel_id                UUID,
+    request_count             UInt64,
+    success_count             UInt64,
+    sum_prompt_tokens         UInt64,
+    sum_cached_read_tokens    UInt64,
+    sum_cached_write_tokens   UInt64,
+    sum_completion_tokens     UInt64,
+    sum_reasoning_tokens      UInt64,
+    sum_cost_micros           Int64,
+    sum_cash_cost_micros      Int64,
+    sum_bonus_cost_micros     Int64,
+    sum_upstream_cost_micros  Int64,
+    sum_pack_units            Int64,
+    unknown_cost_requests     UInt64,
+    ttft_state                AggregateFunction(quantilesTDigest(0.5, 0.9, 0.99), UInt32),
+    duration_state            AggregateFunction(quantilesTDigest(0.5, 0.9, 0.99), UInt32)
 ) ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(hour_bucket)
-ORDER BY (org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket);
+ORDER BY (org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket, version);
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS hyperllm.mv_usage_hourly_mv TO hyperllm.mv_usage_hourly AS
-SELECT
-    toStartOfHour(created_at) AS hour_bucket,
-    org_id,
-    project_id,
-    api_key_id,
-    virtual_model,
-    channel_id,
-    toUInt64(1) AS request_count,
-    toUInt64(http_status >= 200 AND http_status < 300) AS success_count,
-    toUInt64(prompt_tokens) AS sum_prompt_tokens,
-    toUInt64(cached_read_tokens) AS sum_cached_tokens,
-    toUInt64(completion_tokens) AS sum_completion_tokens,
-    cost_micros AS sum_cost_micros,
-    cash_cost_micros AS sum_cash_cost_micros,
-    bonus_cost_micros AS sum_bonus_cost_micros,
-    upstream_cost_micros AS sum_upstream_cost_micros,
-    quantileState(0.95)(ttft_ms) AS ttft_p95_state
-FROM hyperllm.llm_request_events
-GROUP BY org_id, project_id, api_key_id, virtual_model, channel_id, hour_bucket;
+-- Which version of an hour readers may use. A row is written only after the facts of that version
+-- are fully inserted, so an interrupted rollup never becomes visible.
+CREATE TABLE IF NOT EXISTS hyperllm.usage_hourly_published (
+    hour_bucket  DateTime('UTC'),
+    version      UInt64,
+    published_at DateTime64(3, 'UTC') DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(published_at)
+ORDER BY hour_bucket;
 
 CREATE TABLE IF NOT EXISTS hyperllm.llm_debug_payloads (
     created_at                 DateTime64(3, 'UTC'),
