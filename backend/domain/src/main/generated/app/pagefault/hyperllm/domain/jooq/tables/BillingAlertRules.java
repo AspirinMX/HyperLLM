@@ -7,6 +7,7 @@ package app.pagefault.hyperllm.domain.jooq.tables;
 import app.pagefault.hyperllm.domain.jooq.Indexes;
 import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationDeliveries.NotificationDeliveriesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.records.BillingAlertRulesRecord;
@@ -233,6 +234,19 @@ public class BillingAlertRules extends TableImpl<BillingAlertRulesRecord> {
             _projects = new ProjectsPath(this, Keys.BILLING_ALERT_RULES__BILLING_ALERT_RULES_PROJECT_ID_FKEY, null);
 
         return _projects;
+    }
+
+    private transient NotificationDeliveriesPath _notificationDeliveries;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.notification_deliveries</code> table
+     */
+    public NotificationDeliveriesPath notificationDeliveries() {
+        if (_notificationDeliveries == null)
+            _notificationDeliveries = new NotificationDeliveriesPath(this, null, Keys.NOTIFICATION_DELIVERIES__NOTIFICATION_DELIVERIES_RULE_ID_FKEY.getInverseKey());
+
+        return _notificationDeliveries;
     }
 
     @Override

@@ -56,6 +56,17 @@ public class JooqNotificationEndpointRepository implements NotificationEndpointR
     }
 
     @Override
+    public List<NotificationEndpoint> listByIds(java.util.Collection<UUID> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        return dsl.selectFrom(NOTIFICATION_ENDPOINTS)
+                .where(NOTIFICATION_ENDPOINTS.ID.in(ids))
+                .and(NOTIFICATION_ENDPOINTS.DELETED_AT.isNull())
+                .fetch(this::toDomain);
+    }
+
+    @Override
     public boolean update(NotificationEndpoint next, long expectedVersion) {
         int updated = dsl.update(NOTIFICATION_ENDPOINTS)
                 .set(NOTIFICATION_ENDPOINTS.CHANNEL_TYPE, next.channelType().name())

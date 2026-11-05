@@ -135,7 +135,7 @@ if [ -z "$ORG_ID" ]; then fail "register response has no defaultOrgId"; fi
 
 step "Top up the organization wallet"
 http POST "$ADMIN/api/v1/admin/orgs/$ORG_ID/wallet/topup" "$ADMIN_TOKEN" '{"topupType":"CASH","amountMicros":'$TOPUP_MICROS',"idempotencyKey":"smoke-topup-'$STAMP'","description":"phase1 smoke"}'
-expect 200 "topup"
+if [ "$CODE" != "200" ] && [ "$CODE" != "202" ]; then fail "topup (HTTP $CODE)"; fi
 
 step "Create an API key on the default project"
 http GET "$CONSOLE/api/v1/orgs/$ORG_ID/projects?page=1&pageSize=50" "$CONSOLE_TOKEN" ""

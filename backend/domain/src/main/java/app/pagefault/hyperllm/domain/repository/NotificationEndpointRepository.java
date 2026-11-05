@@ -15,6 +15,8 @@ public interface NotificationEndpointRepository {
 
     List<NotificationEndpoint> listActiveByOrg(UUID orgId);
 
+    List<NotificationEndpoint> listByIds(java.util.Collection<UUID> ids);
+
     boolean update(NotificationEndpoint next, long expectedVersion);
 
     boolean softDelete(UUID id, long expectedVersion, OffsetDateTime deletedAt);

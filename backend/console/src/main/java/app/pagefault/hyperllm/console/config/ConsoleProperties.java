@@ -10,6 +10,7 @@ public class ConsoleProperties {
     private Security security = new Security();
     private Billing billing = new Billing();
     private Auth auth = new Auth();
+    private Alerts alerts = new Alerts();
     private Analytics analytics = new Analytics();
 
     @Data
@@ -30,6 +31,12 @@ public class ConsoleProperties {
     @Data
     public static class Auth {
         private boolean otpDebugEchoEnabled = false;
+    }
+
+    @Data
+    public static class Alerts {
+        /** Only for local development; production webhook targets must be HTTPS. */
+        private boolean allowHttp = false;
     }
 
     @Data

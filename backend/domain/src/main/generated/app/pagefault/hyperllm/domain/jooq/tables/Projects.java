@@ -8,6 +8,7 @@ import app.pagefault.hyperllm.domain.jooq.Keys;
 import app.pagefault.hyperllm.domain.jooq.Public;
 import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules.BillingAlertRulesPath;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationDeliveries.NotificationDeliveriesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Organizations.OrganizationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectBudgetMonths.ProjectBudgetMonthsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
@@ -270,6 +271,19 @@ public class Projects extends TableImpl<ProjectsRecord> {
             _billingAlertRules = new BillingAlertRulesPath(this, null, Keys.BILLING_ALERT_RULES__BILLING_ALERT_RULES_PROJECT_ID_FKEY.getInverseKey());
 
         return _billingAlertRules;
+    }
+
+    private transient NotificationDeliveriesPath _notificationDeliveries;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.notification_deliveries</code> table
+     */
+    public NotificationDeliveriesPath notificationDeliveries() {
+        if (_notificationDeliveries == null)
+            _notificationDeliveries = new NotificationDeliveriesPath(this, null, Keys.NOTIFICATION_DELIVERIES__NOTIFICATION_DELIVERIES_PROJECT_ID_FKEY.getInverseKey());
+
+        return _notificationDeliveries;
     }
 
     private transient ProjectBudgetMonthsPath _projectBudgetMonths;

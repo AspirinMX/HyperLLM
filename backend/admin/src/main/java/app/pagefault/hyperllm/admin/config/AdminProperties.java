@@ -10,6 +10,8 @@ public class AdminProperties {
     private Security security = new Security();
     private Admin admin = new Admin();
     private Analytics analytics = new Analytics();
+    private Alerts alerts = new Alerts();
+    private Reconciliation reconciliation = new Reconciliation();
 
     @Data
     public static class Security {
@@ -39,6 +41,29 @@ public class AdminProperties {
     public static class Bootstrap {
         private String email;
         private String password;
+    }
+
+    @Data
+    public static class Reconciliation {
+        private boolean enabled = true;
+    }
+
+    @Data
+    public static class Alerts {
+        private boolean enabled = true;
+        /** Only for local development; production webhook targets must be HTTPS. */
+        private boolean allowHttp = false;
+        /** Allows a loopback or private target so a test can run a local receiver. */
+        private boolean allowLoopback = false;
+        private int samplerBatch = 500;
+        private int deliveryBatch = 50;
+        private int maxAttempts = 5;
+        private String smtpHost = "";
+        private int smtpPort = 587;
+        private String smtpUsername = "";
+        private String smtpPassword = "";
+        private String mailFrom = "alerts@hyperllm.local";
+        private boolean smtpStartTls = true;
     }
 
     @Data

@@ -29,6 +29,8 @@ public class AnalyticsConfiguration {
         factory.setConsumerFactory(consumerFactory);
         factory.setBatchListener(true);
         factory.setConcurrency(properties.getAnalytics().getConcurrency());
+        // The report plane is switchable on its own; disabling it must also stop its consumer.
+        factory.setAutoStartup(properties.getAnalytics().isEnabled());
         DefaultErrorHandler errorHandler =
                 new DefaultErrorHandler(new FixedBackOff(2_000L, FixedBackOff.UNLIMITED_ATTEMPTS));
         errorHandler.setAckAfterHandle(false);

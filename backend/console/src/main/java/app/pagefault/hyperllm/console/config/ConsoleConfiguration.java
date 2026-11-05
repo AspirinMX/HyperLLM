@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.console.config;
 
+import app.pagefault.hyperllm.common.crypto.AesGcmCipher;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
@@ -20,6 +21,11 @@ public class ConsoleConfiguration {
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AesGcmCipher aesGcmCipher(ConsoleProperties properties) {
+        return AesGcmCipher.fromBase64((byte) 1, properties.getSecurity().getAesMasterKey());
     }
 
 

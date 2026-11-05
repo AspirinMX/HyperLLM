@@ -59,6 +59,17 @@ public class JooqBillingAlertRuleRepository implements BillingAlertRuleRepositor
     }
 
     @Override
+    public List<BillingAlertRule> listActivePage(int limit, int offset) {
+        return dsl.selectFrom(BILLING_ALERT_RULES)
+                .where(BILLING_ALERT_RULES.STATUS.eq(ToggleStatus.ACTIVE.name()))
+                .and(BILLING_ALERT_RULES.DELETED_AT.isNull())
+                .orderBy(BILLING_ALERT_RULES.CREATED_AT.asc())
+                .limit(limit)
+                .offset(offset)
+                .fetch(this::toDomain);
+    }
+
+    @Override
     public boolean touchLastTriggered(UUID id, OffsetDateTime triggeredAt) {
         int updated = dsl.update(BILLING_ALERT_RULES)
                 .set(BILLING_ALERT_RULES.LAST_TRIGGERED_AT, triggeredAt)

@@ -16,6 +16,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants;
 import app.pagefault.hyperllm.domain.jooq.tables.Channels;
 import app.pagefault.hyperllm.domain.jooq.tables.CustomerTiers;
 import app.pagefault.hyperllm.domain.jooq.tables.ModelChannelBindings;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationDeliveries;
 import app.pagefault.hyperllm.domain.jooq.tables.NotificationEndpoints;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers;
@@ -31,6 +32,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.ProjectBudgetMonths;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects;
 import app.pagefault.hyperllm.domain.jooq.tables.Providers;
+import app.pagefault.hyperllm.domain.jooq.tables.ReconciliationFindings;
 import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes;
 import app.pagefault.hyperllm.domain.jooq.tables.RefreshTokens;
 import app.pagefault.hyperllm.domain.jooq.tables.ResourcePackSkus;
@@ -126,6 +128,11 @@ public class Public extends SchemaImpl {
     public final ModelChannelBindings MODEL_CHANNEL_BINDINGS = ModelChannelBindings.MODEL_CHANNEL_BINDINGS;
 
     /**
+     * The table <code>public.notification_deliveries</code>.
+     */
+    public final NotificationDeliveries NOTIFICATION_DELIVERIES = NotificationDeliveries.NOTIFICATION_DELIVERIES;
+
+    /**
      * The table <code>public.notification_endpoints</code>.
      */
     public final NotificationEndpoints NOTIFICATION_ENDPOINTS = NotificationEndpoints.NOTIFICATION_ENDPOINTS;
@@ -199,6 +206,11 @@ public class Public extends SchemaImpl {
      * The table <code>public.providers</code>.
      */
     public final Providers PROVIDERS = Providers.PROVIDERS;
+
+    /**
+     * The table <code>public.reconciliation_findings</code>.
+     */
+    public final ReconciliationFindings RECONCILIATION_FINDINGS = ReconciliationFindings.RECONCILIATION_FINDINGS;
 
     /**
      * The table <code>public.redemption_codes</code>.
@@ -290,6 +302,7 @@ public class Public extends SchemaImpl {
             Channels.CHANNELS,
             CustomerTiers.CUSTOMER_TIERS,
             ModelChannelBindings.MODEL_CHANNEL_BINDINGS,
+            NotificationDeliveries.NOTIFICATION_DELIVERIES,
             NotificationEndpoints.NOTIFICATION_ENDPOINTS,
             OrgInvitations.ORG_INVITATIONS,
             OrgMembers.ORG_MEMBERS,
@@ -305,6 +318,7 @@ public class Public extends SchemaImpl {
             ProjectMembers.PROJECT_MEMBERS,
             Projects.PROJECTS,
             Providers.PROVIDERS,
+            ReconciliationFindings.RECONCILIATION_FINDINGS,
             RedemptionCodes.REDEMPTION_CODES,
             RefreshTokens.REFRESH_TOKENS,
             ResourcePackSkus.RESOURCE_PACK_SKUS,

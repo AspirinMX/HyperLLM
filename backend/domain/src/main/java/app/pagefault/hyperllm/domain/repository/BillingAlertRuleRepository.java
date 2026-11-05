@@ -15,6 +15,9 @@ public interface BillingAlertRuleRepository {
 
     List<BillingAlertRule> listActiveByOrg(UUID orgId);
 
+    /** Active rules across tenants, page by page, for the sampler. */
+    List<BillingAlertRule> listActivePage(int limit, int offset);
+
     /** Unconditional write; cooldown evaluation belongs to 2.9. */
     boolean touchLastTriggered(UUID id, OffsetDateTime triggeredAt);
 

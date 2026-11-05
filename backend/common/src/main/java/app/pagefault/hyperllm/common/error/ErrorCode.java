@@ -67,7 +67,14 @@ public enum ErrorCode {
     PACK_SKU_NOT_PURCHASABLE(409, "Resource pack SKU is not on sale"),
     VOUCHER_CODE_INVALID(400, "The redemption code is not valid"),
     VOUCHER_LIMIT_REACHED(409, "The voucher redemption limit has been reached"),
-    VOUCHER_NOT_FOUND(404, "Voucher not found");
+    VOUCHER_NOT_FOUND(404, "Voucher not found"),
+    ALERT_RULE_NOT_FOUND(404, "Alert rule not found"),
+    ALERT_RULE_EXISTS(409, "An identical alert rule already exists"),
+    NOTIFICATION_ENDPOINT_NOT_FOUND(404, "Notification endpoint not found"),
+    NOTIFICATION_ENDPOINT_IN_USE(409, "The notification endpoint is referenced by an active rule"),
+    ALERT_DELIVERY_NOT_FOUND(404, "Notification delivery not found"),
+    RECONCILIATION_FINDING_NOT_FOUND(404, "Reconciliation finding not found"),
+    BUDGET_MONTH_NOT_FOUND(404, "Project budget month not found");
 
     private final int httpStatus;
     private final String defaultMessage;

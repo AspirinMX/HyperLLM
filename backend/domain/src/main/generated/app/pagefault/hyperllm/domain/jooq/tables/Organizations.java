@@ -11,6 +11,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.ApiKeys.ApiKeysPath;
 import app.pagefault.hyperllm.domain.jooq.tables.BillingAlertRules.BillingAlertRulesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.BonusGrants.BonusGrantsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.CustomerTiers.CustomerTiersPath;
+import app.pagefault.hyperllm.domain.jooq.tables.NotificationDeliveries.NotificationDeliveriesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.NotificationEndpoints.NotificationEndpointsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgInvitations.OrgInvitationsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.OrgMembers.OrgMembersPath;
@@ -19,6 +20,7 @@ import app.pagefault.hyperllm.domain.jooq.tables.PaymentAnomalies.PaymentAnomali
 import app.pagefault.hyperllm.domain.jooq.tables.PaymentOrders.PaymentOrdersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ProjectMembers.ProjectMembersPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Projects.ProjectsPath;
+import app.pagefault.hyperllm.domain.jooq.tables.ReconciliationFindings.ReconciliationFindingsPath;
 import app.pagefault.hyperllm.domain.jooq.tables.RedemptionCodes.RedemptionCodesPath;
 import app.pagefault.hyperllm.domain.jooq.tables.ResourcePacks.ResourcePacksPath;
 import app.pagefault.hyperllm.domain.jooq.tables.Users.UsersPath;
@@ -289,6 +291,19 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
         return _bonusGrants;
     }
 
+    private transient NotificationDeliveriesPath _notificationDeliveries;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.notification_deliveries</code> table
+     */
+    public NotificationDeliveriesPath notificationDeliveries() {
+        if (_notificationDeliveries == null)
+            _notificationDeliveries = new NotificationDeliveriesPath(this, null, Keys.NOTIFICATION_DELIVERIES__NOTIFICATION_DELIVERIES_ORG_ID_FKEY.getInverseKey());
+
+        return _notificationDeliveries;
+    }
+
     private transient NotificationEndpointsPath _notificationEndpoints;
 
     /**
@@ -391,6 +406,19 @@ public class Organizations extends TableImpl<OrganizationsRecord> {
             _projects = new ProjectsPath(this, null, Keys.PROJECTS__PROJECTS_ORG_ID_FKEY.getInverseKey());
 
         return _projects;
+    }
+
+    private transient ReconciliationFindingsPath _reconciliationFindings;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.reconciliation_findings</code> table
+     */
+    public ReconciliationFindingsPath reconciliationFindings() {
+        if (_reconciliationFindings == null)
+            _reconciliationFindings = new ReconciliationFindingsPath(this, null, Keys.RECONCILIATION_FINDINGS__RECONCILIATION_FINDINGS_ORG_ID_FKEY.getInverseKey());
+
+        return _reconciliationFindings;
     }
 
     private transient RedemptionCodesPath _redemptionCodes;
