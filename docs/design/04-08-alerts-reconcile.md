@@ -1,6 +1,8 @@
 # HyperLLM Phase 2.10 告警、对账与全链路验收
 
-设计已确认，待实现。依赖[账务与恢复](./04-04-settlement-pipeline.md)、[支付与权益](./04-05-payment.md)、[项目预算](./04-06-rate-limit-budget.md) 和 [用量报表](./04-07-analytics.md)。
+已实现。依赖[账务与恢复](./04-04-settlement-pipeline.md)、[支付与权益](./04-05-payment.md)、[项目预算](./04-06-rate-limit-budget.md) 和 [用量报表](./04-07-analytics.md)。
+
+> **实现登记**：规则与端点由 `console` 维护；`admin` 采样器锁定规则、执行冷却并写 `notification_deliveries`，投递作业按端点独立重试。对账作业按账本/钱包、批次/钱包、钱包/Redis、短缺证据四项检查，未确认结算窗口归因为 `PENDING_SETTLEMENT`。联调入口为 [`scripts/e2e/phase2-smoke.sh`](../../scripts/e2e/phase2-smoke.sh)。
 
 ## 1. 余额与预算告警
 

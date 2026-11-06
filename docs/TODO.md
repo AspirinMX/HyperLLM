@@ -12,7 +12,7 @@
 | **Phase 0** | 仓库与多模块工程脚手架初始化 | ✅ 已完成 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
 | **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
-| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | 🚧 进行中（2.0a–2.7 已完成；2.8 限流层已落地、预算待实现；2.9–2.10 待开始） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
+| **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | ✅ 已完成（2.0a–2.10；2.7 真实渠道沙箱联调待凭据） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
 | **Phase 3** | 全协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
@@ -114,9 +114,9 @@
 | **2.5** | 结算落库与账本事务 | 逐腿扣库、明细落库、事务边界、折叠恒等、维护作业、对账工单 | 2.4 | ✅ |
 | **2.6** | Outbox 投递与生命周期 | 消耗异步批量、发放同事务提交；事件副本与巡检重投；Debezium 投递；水位删除 | 2.5 | ✅ |
 | **2.7** | [支付、兑换码与资源包购买](./design/04-05-payment.md) | 下单、验签、回调、核销 | 2.5、2.6 | ✅（渠道沙箱联调待凭据） |
-| **2.8** | [四层限流与项目预算](./design/04-06-rate-limit-budget.md) | Key、Project、Org、Channel 限流与预算拦截 | 2.4 至 2.6 | 🚧（滚动窗口与渠道容量已落地，预算待实现） |
-| **2.9** | [ClickHouse 摄入与用量毛利](./design/04-07-analytics.md) | 请求事件入仓、聚合查询 | 2.6、2.7（包销售） | 设计已确认，待实现 |
-| **2.10** | [告警、对账与全链路验收](./design/04-08-alerts-reconcile.md) | Webhook、邮件、账务对账与 HTTP 验收 | 2.6 至 2.9 | 设计已确认，待实现 |
+| **2.8** | [四层限流与项目预算](./design/04-06-rate-limit-budget.md) | Key、Project、Org、Channel 限流与预算拦截 | 2.4 至 2.6 | ✅ |
+| **2.9** | [ClickHouse 摄入与用量毛利](./design/04-07-analytics.md) | 请求事件入仓、聚合查询 | 2.6、2.7（包销售） | ✅ |
+| **2.10** | [告警、对账与全链路验收](./design/04-08-alerts-reconcile.md) | Webhook、邮件、账务对账与 HTTP 验收 | 2.6 至 2.9 | ✅ |
 
 ### 2.0a Phase 1 基线收口
 
@@ -241,26 +241,33 @@
 ### 2.8 四层限流与项目预算
 
 - [x] 补齐 API Key 和 Project 的 RPM 与 TPM 滑动窗口，完善 Organization 并发保护和 Channel 上游容量保护。
-- [ ] 实现 Project 月度预算检查，软上限触发告警，硬上限在准入时拦截超预算请求。
-- [ ] 验证跨分钟限流、并发准入和预算超限的协议错误响应。
+- [x] 实现 Project 月度预算检查，软上限触发告警，硬上限在准入时拦截超预算请求。
+- [x] 验证跨分钟限流、并发准入和预算超限的协议错误响应。
 
-**验收手段**：跨分钟限流、并发准入、预算软硬限的协议错误体断言。
+> **实现登记**：预算预占/结算、`project_budget_months` 折叠与 `429 PROJECT_BUDGET_EXCEEDED` / `503 PROJECT_BUDGET_UNAVAILABLE`。软上限告警由 2.10 的采样作业投递；硬上限拒绝证据写 `gw:alert:budget:{projectId}:{month}`。
+> 滚动窗口与渠道容量见 Phase 2.8 的网关提交。
+
+**验收手段**：跨分钟限流、并发准入、预算软硬限的协议错误体断言（`PreHoldServiceIT`、`GatewayE2EIntegrationTest`、`SettlementPipelineIT`）。
 
 ### 2.9 ClickHouse 摄入、用量与毛利 API
 
-- [ ] 接通 `llm.request.events` 到 ClickHouse `llm_request_events` 和 `mv_usage_hourly` 的摄入，遵循 ZDR，仅落盘结构化用量元数据。
-- [ ] 在 `console` 提供按租户权限过滤的聚合用量查询，在 `admin` 提供毛利查询。
-- [ ] 验证重复投递后的指标准确性、明细与聚合的一致性、查询权限和 ZDR 约束。
+- [x] 接通 `llm.request.events` 到 ClickHouse `llm_request_events` 和 `mv_usage_hourly` 的摄入，遵循 ZDR，仅落盘结构化用量元数据。
+- [x] 在 `console` 提供按租户权限过滤的聚合用量查询，在 `admin` 提供毛利查询。
+- [x] 验证重复投递后的指标准确性、明细与聚合的一致性、查询权限和 ZDR 约束。
 
-**验收手段**：重复投递后指标一致性、明细与聚合一致性、ZDR 断言。
+> **实现登记**：摄入消费者按 Kafka 位置提交、`analytics_hours` 脏小时队列、带版本的 `usage_hourly` 与 `usage_hourly_published`；旧的增量视图在 `infra/clickhouse/init/01-init-olap.sql` 中停用。查询只取每小时最新已发布版本。
+
+**验收手段**：`AnalyticsPipelineIT`（同一请求两个 offset、未发布版本不可见、拒收记录、ZDR 列白名单）、`ConsoleUsageIT`（发布版本、组织隔离、开发者项目范围）。
 
 ### 2.10 告警、对账与全链路验收
 
-- [ ] 上线低余额及 Project 月度软硬预算的 Webhook 和邮件告警，验证冷却期与失败处理。
-- [ ] 在 `admin` 周期性对账，按方案 7.5 节的四项职责执行：账本折叠值与快照一致、快照与 Redis 差额可解释、批次之和等于赠金快照、`shortfall` 与 `settledAfterReclaim` 可解释。
-- [ ] 对账覆盖 Redis 已扣但尚无账本记录的窗口。按事件证据复用 L1–L4，缺少逐笔证据的差额登记并告警。
-- [ ] 补齐可重复执行的 HTTP 联调脚本，覆盖充值或兑换、预占、SSE 调用、结算入账、报表与告警，并回归 Phase 1 的配置 CDC、故障重试和账本落盘。
-- [ ] 通过 Maven `test`、`verify` 和 Compose `pipeline` 配置校验，并在联调环境验证并发防超支、重复投递幂等和消费恢复后的余额一致性。
+- [x] 上线低余额及 Project 月度软硬预算的 Webhook 和邮件告警，验证冷却期与失败处理。
+- [x] 在 `admin` 周期性对账，按方案 7.5 节的四项职责执行：账本折叠值与快照一致、快照与 Redis 差额可解释、批次之和等于赠金快照、`shortfall` 与 `settledAfterReclaim` 可解释。
+- [x] 对账覆盖 Redis 已扣但尚无账本记录的窗口。按事件证据复用 L1–L4，缺少逐笔证据的差额登记并告警。
+- [x] 补齐可重复执行的 HTTP 联调脚本，覆盖充值或兑换、预占、SSE 调用、结算入账、报表与告警，并回归 Phase 1 的配置 CDC、故障重试和账本落盘。
+- [x] 通过 Maven `test`、`verify` 和 Compose `pipeline` 配置校验，并在联调环境验证并发防超支、重复投递幂等和消费恢复后的余额一致性。
+
+> **实现登记**：告警采样器锁定规则后检查冷却并写 `notification_deliveries`；Webhook 强制 HTTPS、禁止重定向、校验解析地址，签名覆盖时间戳与正文；邮件走 SMTP Adapter。对账作业把能由未确认结算解释的窗口归因给 `PENDING_SETTLEMENT`，其余写入 `reconciliation_findings`（P1 记日志与指标），运营接口可查询与关闭。`scripts/e2e/phase2-smoke.sh` 覆盖充值、兑换、SSE、结算、预算、报表、告警配置、对账与 CDC 驱逐。
 
 **验收手段**：全链路 HTTP 脚本可重复执行，注入的偏差可定位。有证据的扣款经逐笔工单收敛，缺证差额可查询。
 

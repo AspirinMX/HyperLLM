@@ -1,6 +1,8 @@
 # HyperLLM Phase 2.8 四层限流与项目预算
 
-滚动窗口与渠道容量已实现；项目月度预算待实现。依赖[Redis 预占与账务链路](./04-04-settlement-pipeline.md)。
+滚动窗口、渠道容量与项目月度预算均已实现。依赖[Redis 预占与账务链路](./04-04-settlement-pipeline.md)。
+
+> **实现登记**：项目预算与钱包预占在同一个 `prehold_admit.lua` 内冻结（`gw:budget:proj:{projectId}:{month}`），结算在同一终态脚本里把冻结转成已用；`project_budget_months` 是 Redis 重启后的可证下界。无法证明的月份返回 `503 PROJECT_BUDGET_UNAVAILABLE`，不按 0 补齐。
 
 ## 1. 四层限流
 

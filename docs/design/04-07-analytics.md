@@ -1,6 +1,8 @@
 # HyperLLM Phase 2.9 ClickHouse 摄入、用量与毛利
 
-设计已确认，待实现。依赖[结算事件与 Redis 权威层](./04-04-settlement-pipeline.md)。资源包销售额读取 [支付订单](./04-05-payment.md)。
+已实现。依赖[结算事件与 Redis 权威层](./04-04-settlement-pipeline.md)。资源包销售额读取 [支付订单](./04-05-payment.md)。
+
+> **实现登记**：`admin` 的请求事件消费者按 Kafka 分区/offset 批写 `llm_request_events`，ClickHouse 成功后在同一 PostgreSQL 事务推进 `analytics_ingest_positions` 并标记 `analytics_hours`；汇总任务按已提交位置去重后写入带版本的 `usage_hourly`，写入 `usage_hourly_published` 后共享查询才会选中。控制面 API 为 `GET /api/v1/orgs/{orgId}/usage` 与 `GET /api/v1/admin/analytics/{margin,pack-sales,rejects}`。
 
 ## 1. 数据源与口径
 
