@@ -6,6 +6,7 @@ import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ConsoleAuthProvider } from "@/components/providers/console-auth-provider";
 
 interface AppProvidersProps {
   children: ReactNode;
@@ -22,8 +23,10 @@ export function AppProviders({ children }: AppProvidersProps) {
       <MotionConfig reducedMotion="user">
         <AnimateUIProvider reducedMotion="user">
           <TooltipProvider delay={240}>
-            {children}
-            <Toaster position="top-right" richColors={false} closeButton />
+            <ConsoleAuthProvider>
+              {children}
+              <Toaster position="top-right" richColors={false} closeButton />
+            </ConsoleAuthProvider>
           </TooltipProvider>
         </AnimateUIProvider>
       </MotionConfig>
