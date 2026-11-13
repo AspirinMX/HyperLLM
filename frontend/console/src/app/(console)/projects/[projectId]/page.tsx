@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { Suspense, use, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -54,7 +54,7 @@ const USAGE_CHART_CONFIG: ChartConfig = {
   costUsd: { label: "消费 (USD)", color: "var(--chart-1)" },
 };
 
-export default function ProjectDetailPage({
+function ProjectDetailContent({
   params,
 }: {
   params: Promise<{ projectId: string }>;
@@ -462,5 +462,24 @@ export default function ProjectDetailPage({
         ) : null}
       </Tabs>
     </div>
+  );
+}
+
+export default function ProjectDetailPage({
+  params,
+}: {
+  params: Promise<{ projectId: string }>;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex flex-col gap-4">
+          <Skeleton className="h-7 w-48" />
+          <Skeleton className="h-32 w-full" />
+        </div>
+      }
+    >
+      <ProjectDetailContent params={params} />
+    </Suspense>
   );
 }
