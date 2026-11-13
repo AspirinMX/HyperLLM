@@ -6,6 +6,7 @@ import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AdminAuthProvider } from "@/components/providers/admin-auth-provider";
 
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
@@ -18,8 +19,10 @@ export function AppProviders({ children }: { children: ReactNode }) {
       <MotionConfig reducedMotion="user">
         <AnimateUIProvider reducedMotion="user">
           <TooltipProvider delay={240}>
-            {children}
-            <Toaster position="top-right" richColors={false} closeButton />
+            <AdminAuthProvider>
+              {children}
+              <Toaster position="top-right" richColors={false} closeButton />
+            </AdminAuthProvider>
           </TooltipProvider>
         </AnimateUIProvider>
       </MotionConfig>
