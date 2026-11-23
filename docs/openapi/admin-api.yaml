@@ -1,0 +1,1791 @@
+openapi: 3.1.0
+info:
+  title: HyperLLM Admin Operator Control Plane API
+  version: 1.0.0
+  summary: Operator control plane for upstream channels, virtual models, pricing, commerce, margin analytics, alerts, and reconciliation
+  description: |
+    Operator-facing control plane (`backend/admin`, Spring MVC + Java 21 virtual threads, default port `8082`).
+
+    ### Isolated Admin Security & TOTP MFA
+    - Uses completely separate signing secrets, issuer (`hyperllm-admin`), audience (`admin-api`),
+      and refresh cookie (`hl_admin_rt`, `Path=/api/v1/admin/auth`) from `backend/console`.
+    - When `HYPERLLM_ADMIN_MFA_REQUIRED=true`:
+      1. `POST /api/v1/admin/auth/login` returns `mfaRequired: true`, `mfaAction: MFA_SETUP | MFA_VERIFY`,
+         and a short-lived `challengeToken` (`type = ADMIN_MFA_CHALLENGE`).
+      2. Pass `challengeToken` as `Authorization: Bearer <challengeToken>` to `/mfa/setup` or
+         `/mfa/verify` to upgrade into a full `ADMIN_ACCESS` token and `hl_admin_rt` cookie.
+    - Role-based access control enforces `SUPER_ADMIN`, `OPS`, `FINANCE`, and `AUDITOR`.
+
+    ### Upstream Secret Encryption
+    - Channel API keys submitted to `/api/v1/admin/channels` are encrypted at rest with
+      `AES-256-GCM` bound to `channel_id` as AAD; plaintext credentials are never returned by read endpoints.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8082
+    description: Local Admin backend
+  - url: https://admin-api.internal.hyperllm.example.com
+    description: Internal production Admin API (example)
+
+tags:
+  - name: Admin Auth
+    description: Operator login, TOTP MFA enrollment/verification, refresh, and logout
+  - name: Providers & Channels
+    description: Upstream provider catalog, encrypted channel pool CRUD, and live connectivity probe
+  - name: Models & Pricing
+    description: Virtual model catalog, channel routing bindings, and versioned pricing rule publication
+  - name: Tenants & Wallets
+    description: Organization listing, live Redis wallet inspection, status governance, and outbox-backed top-ups
+  - name: Commerce & Payments
+    description: Resource pack SKUs, vouchers, redemption code batches, payment orders, refunds, and anomaly resolution
+  - name: Analytics
+    description: Gross margin breakdown, resource pack sales reports, and analytics ingestion rejects
+  - name: Alert Deliveries
+    description: Outbound alert delivery inspection and manual retry
+  - name: Reconciliation
+    description: Automated ledger-to-Redis reconciliation findings, manual runs, and unverified budget month resolution
+
+security:
+  - adminBearerAuth: []
+
+paths:
+  /api/v1/admin/auth/login:
+    post:
+      tags: [Admin Auth]
+      operationId: adminLogin
+      summary: Authenticate an operator with username/email and password
+      description: |
+        Checks admin account status, CIDR allowlist (`allowedCidrs`), and BCrypt password.
+        Returns either a full session (when MFA is disabled) or a scoped MFA challenge token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginRequest"
+      responses:
+        "200":
+          description: Full admin session or MFA challenge
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/admin/auth/mfa/setup:
+    post:
+      tags: [Admin Auth]
+      operationId: adminSetupMfa
+      summary: Start or complete TOTP MFA enrollment (requires `MFA_SETUP` challenge token)
+      description: |
+        - Call with an empty body (or omitted `code`) to generate a new Base32 secret and `otpauth://` URI.
+        - Call again with `{ "secret", "code" }` to verify the 6-digit TOTP code, encrypt and store the
+          secret, and receive a full `AdminAuthResponse` + `hl_admin_rt` cookie.
+      security:
+        - adminMfaChallengeAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminMfaSetupRequest"
+      responses:
+        "200":
+          description: Either initial `MfaSetupChallengeResponse` or finalized `AdminAuthResponse`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/MfaSetupChallengeResponse"
+                  - $ref: "#/components/schemas/AdminAuthResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/admin/auth/mfa/verify:
+    post:
+      tags: [Admin Auth]
+      operationId: adminVerifyMfa
+      summary: Verify TOTP code and upgrade `MFA_VERIFY` challenge token into a full admin session
+      security:
+        - adminMfaChallengeAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminMfaVerifyRequest"
+      responses:
+        "200":
+          description: Full admin access token with `hl_admin_rt` cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/admin/auth/refresh:
+    post:
+      tags: [Admin Auth]
+      operationId: adminRefresh
+      summary: Refresh admin access token using `hl_admin_rt` HttpOnly cookie
+      security:
+        - adminRefreshCookie: []
+      parameters:
+        - $ref: "#/components/parameters/AdminRefreshCookieParam"
+      responses:
+        "200":
+          description: Refreshed admin access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/admin/auth/logout:
+    post:
+      tags: [Admin Auth]
+      operationId: adminLogout
+      summary: Revoke admin session and clear `hl_admin_rt` cookie
+      parameters:
+        - $ref: "#/components/parameters/AdminRefreshCookieParam"
+      responses:
+        "204":
+          description: Logged out
+
+  /api/v1/admin/providers:
+    get:
+      tags: [Providers & Channels]
+      operationId: adminListProviders
+      summary: List built-in and configured upstream providers (`SUPER_ADMIN`, `OPS`, `AUDITOR`)
+      responses:
+        "200":
+          description: Provider catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderDto"
+
+  /api/v1/admin/channels:
+    get:
+      tags: [Providers & Channels]
+      operationId: adminListChannels
+      summary: List upstream channels (credentials never returned; `SUPER_ADMIN`, `OPS`, `AUDITOR`)
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated channel list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseChannelDto"
+    post:
+      tags: [Providers & Channels]
+      operationId: adminCreateChannel
+      summary: Create an upstream channel with AES-256-GCM encrypted credentials (`SUPER_ADMIN`, `OPS`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChannelRequest"
+      responses:
+        "201":
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/channels/{channelId}:
+    parameters:
+      - name: channelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Providers & Channels]
+      operationId: adminGetChannel
+      summary: Get channel metadata (`SUPER_ADMIN`, `OPS`, `AUDITOR`)
+      responses:
+        "200":
+          description: Channel details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelDto"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+    patch:
+      tags: [Providers & Channels]
+      operationId: adminUpdateChannel
+      summary: Update channel settings, optional new API key, or status (`SUPER_ADMIN`, `OPS`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateChannelRequest"
+      responses:
+        "200":
+          description: Updated channel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+    delete:
+      tags: [Providers & Channels]
+      operationId: adminDeleteChannel
+      summary: Soft-delete a channel (`SUPER_ADMIN`, `OPS`)
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: Channel deleted
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/channels/{channelId}/probe:
+    parameters:
+      - name: channelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Providers & Channels]
+      operationId: adminProbeChannel
+      summary: Run live upstream connectivity and credential probe (`SUPER_ADMIN`, `OPS`)
+      responses:
+        "200":
+          description: Probe latency and health result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelProbeDto"
+        "502":
+          $ref: "#/components/responses/ProblemBadGateway"
+
+  /api/v1/admin/models:
+    get:
+      tags: [Models & Pricing]
+      operationId: adminListModels
+      summary: List all virtual models (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated virtual models
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseVirtualModelDto"
+    post:
+      tags: [Models & Pricing]
+      operationId: adminCreateModel
+      summary: Register a new virtual model (`SUPER_ADMIN`, `OPS`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVirtualModelRequest"
+      responses:
+        "201":
+          description: Virtual model created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualModelDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/models/{modelId}:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Models & Pricing]
+      operationId: adminUpdateModel
+      summary: Update virtual model metadata, routing strategy, or status (`SUPER_ADMIN`, `OPS`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateVirtualModelRequest"
+      responses:
+        "200":
+          description: Updated virtual model
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualModelDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+    delete:
+      tags: [Models & Pricing]
+      operationId: adminDeleteModel
+      summary: Soft-delete a virtual model (`SUPER_ADMIN`, `OPS`)
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: Model deleted
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/models/{modelId}/bindings:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Models & Pricing]
+      operationId: adminListModelBindings
+      summary: List upstream channel bindings for a virtual model (`SUPER_ADMIN`, `OPS`, `AUDITOR`)
+      responses:
+        "200":
+          description: Channel bindings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BindingDto" }
+    put:
+      tags: [Models & Pricing]
+      operationId: adminReplaceModelBindings
+      summary: Atomically replace all channel routing bindings for a model (`SUPER_ADMIN`, `OPS`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplaceBindingsRequest"
+      responses:
+        "200":
+          description: Replaced bindings (triggers Redis L2 refresh and CDC L1 eviction)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BindingDto" }
+    delete:
+      tags: [Models & Pricing]
+      operationId: adminClearModelBindings
+      summary: Clear all channel bindings for a model (`SUPER_ADMIN`, `OPS`)
+      responses:
+        "204":
+          description: All bindings cleared
+
+  /api/v1/admin/models/{modelId}/pricing-rules:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Models & Pricing]
+      operationId: adminListPricingRules
+      summary: List versioned pricing rules for a virtual model (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      responses:
+        "200":
+          description: Pricing rule history and scheduled versions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PricingRuleDto" }
+    post:
+      tags: [Models & Pricing]
+      operationId: adminPublishPricingRule
+      summary: Publish a non-overlapping versioned pricing rule (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishPricingRuleRequest"
+      responses:
+        "201":
+          description: Pricing rule published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingRuleDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/orgs:
+    get:
+      tags: [Tenants & Wallets]
+      operationId: adminListOrgs
+      summary: List tenant organizations with ledger-confirmed inline balances (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/OrgStatus" }
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated tenant list (inline balances reflect confirmed PostgreSQL ledger fold)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseAdminOrgDto"
+
+  /api/v1/admin/orgs/{orgId}/wallet:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Tenants & Wallets]
+      operationId: adminGetOrgWallet
+      summary: Inspect single tenant's real-time Redis wallet including `heldMicros` and `availableMicros`
+      responses:
+        "200":
+          description: Live tenant wallet breakdown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminWalletDetailDto"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+  /api/v1/admin/orgs/{orgId}/status:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    patch:
+      tags: [Tenants & Wallets]
+      operationId: adminUpdateOrgStatus
+      summary: Activate, suspend, or close a tenant organization (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrgStatusRequest"
+      responses:
+        "200":
+          description: Updated tenant status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminOrgDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/orgs/{orgId}/wallet/topup:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    post:
+      tags: [Tenants & Wallets]
+      operationId: adminTopupWallet
+      summary: Authorize an asynchronous manual cash or bonus credit via Outbox (`SUPER_ADMIN`, `FINANCE`)
+      description: |
+        Commits a credit authorization into `outbox_events` and returns `202 Accepted` with `eventId`.
+        Debezium delivers the event to `cdc.billing`, where `LedgerFolder` folds `wallet_ledger` and
+        projects the delta idempotently to Redis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminWalletTopupRequest"
+      responses:
+        "202":
+          description: Credit event accepted into outbox pipeline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminWalletTopupResponse"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+  /api/v1/admin/resource-pack-skus:
+    get:
+      tags: [Commerce & Payments]
+      operationId: adminListPackSkus
+      summary: List resource pack SKUs (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PackSkuStatus" }
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated pack SKUs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponsePackSkuAdminDto"
+    post:
+      tags: [Commerce & Payments]
+      operationId: adminCreatePackSku
+      summary: Create a purchasable resource pack SKU (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePackSkuRequest"
+      responses:
+        "201":
+          description: Resource pack SKU created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackSkuAdminDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/resource-pack-skus/{skuId}:
+    parameters:
+      - name: skuId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Commerce & Payments]
+      operationId: adminUpdatePackSku
+      summary: Update a resource pack SKU (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePackSkuRequest"
+      responses:
+        "200":
+          description: Updated SKU
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackSkuAdminDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/vouchers:
+    get:
+      tags: [Commerce & Payments]
+      operationId: adminListVouchers
+      summary: List promotional vouchers (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated voucher list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseVoucherAdminDto"
+    post:
+      tags: [Commerce & Payments]
+      operationId: adminCreateVoucher
+      summary: Create a voucher campaign (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVoucherRequest"
+      responses:
+        "201":
+          description: Voucher created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherAdminDto"
+
+  /api/v1/admin/vouchers/{voucherId}/status:
+    parameters:
+      - name: voucherId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Commerce & Payments]
+      operationId: adminUpdateVoucherStatus
+      summary: Pause, reactivate, or end a voucher (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateVoucherStatusRequest"
+      responses:
+        "200":
+          description: Updated voucher
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherAdminDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/vouchers/{voucherId}/code-batches:
+    parameters:
+      - name: voucherId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Commerce & Payments]
+      operationId: adminCreateVoucherCodeBatch
+      summary: Generate a batch of up to 10,000 one-time plaintext redemption codes (`SUPER_ADMIN`, `OPS`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCodeBatchRequest"
+      responses:
+        "201":
+          description: Generated redemption codes (plaintext returned once; only HMAC digests stored)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeBatchResponse"
+
+  /api/v1/admin/payment-anomalies:
+    get:
+      tags: [Commerce & Payments]
+      operationId: adminListPaymentAnomalies
+      summary: List payment callback anomalies requiring operator investigation
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PaymentAnomalyStatus" }
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated payment anomalies
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponsePaymentAnomalyDto"
+
+  /api/v1/admin/payment-anomalies/{anomalyId}/resolve:
+    parameters:
+      - name: anomalyId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Commerce & Payments]
+      operationId: adminResolvePaymentAnomaly
+      summary: Mark a payment anomaly as `RESOLVED` or `IGNORED` (`SUPER_ADMIN`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveAnomalyRequest"
+      responses:
+        "204":
+          description: Anomaly resolved
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+  /api/v1/admin/payment-orders/{orderId}/refund:
+    parameters:
+      - name: orderId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Commerce & Payments]
+      operationId: adminRefundPaymentOrder
+      summary: Record a refund on a paid order (`SUPER_ADMIN`, `FINANCE`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundOrderRequest"
+      responses:
+        "200":
+          description: Refunded payment order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentOrderAdminDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/orgs/{orgId}/payment-orders:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Commerce & Payments]
+      operationId: adminListOrgPaymentOrders
+      summary: List payment orders for a specific tenant (`SUPER_ADMIN`, `OPS`, `FINANCE`, `AUDITOR`)
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated tenant payment orders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponsePaymentOrderAdminDto"
+
+  /api/v1/admin/analytics/margin:
+    get:
+      tags: [Analytics]
+      operationId: adminQueryMargin
+      summary: Query revenue, upstream cost, and gross contribution margin from ClickHouse
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: groupBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [CHANNEL, MODEL, ORG, HOUR]
+            default: CHANNEL
+      responses:
+        "200":
+          description: Margin breakdown rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MarginRow" }
+        "503":
+          $ref: "#/components/responses/ProblemServiceUnavailable"
+
+  /api/v1/admin/analytics/pack-sales:
+    get:
+      tags: [Analytics]
+      operationId: adminQueryPackSales
+      summary: Query paid and refunded resource pack sales aggregated by channel and currency
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Resource pack sales report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackSalesReport"
+
+  /api/v1/admin/analytics/rejects:
+    get:
+      tags: [Analytics]
+      operationId: adminListAnalyticsRejects
+      summary: List malformed or rejected Kafka request telemetry records
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Rejected telemetry records
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RejectRow" }
+
+  /api/v1/admin/alerts/deliveries:
+    get:
+      tags: [Alert Deliveries]
+      operationId: adminListAlertDeliveries
+      summary: Inspect outbound alert delivery queue and history
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, DELIVERED, RETRYING, DEAD]
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        "200":
+          description: Alert delivery records
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertDeliveryDto" }
+
+  /api/v1/admin/alerts/deliveries/{id}/retry:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Alert Deliveries]
+      operationId: adminRetryAlertDelivery
+      summary: Re-queue a `RETRYING` or `DEAD` alert delivery for immediate retry
+      responses:
+        "202":
+          description: Delivery re-queued
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/admin/reconciliation/findings:
+    get:
+      tags: [Reconciliation]
+      operationId: adminListReconciliationFindings
+      summary: List ledger-vs-Redis reconciliation findings
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [OPEN, RESOLVED]
+            default: OPEN
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        "200":
+          description: Reconciliation findings ordered by severity and recency
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ReconciliationFinding" }
+
+  /api/v1/admin/reconciliation/findings/{id}/resolve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Reconciliation]
+      operationId: adminResolveReconciliationFinding
+      summary: Resolve a reconciliation finding with an operator audit note
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveFindingRequest"
+      responses:
+        "204":
+          description: Finding marked as `RESOLVED`
+
+  /api/v1/admin/reconciliation/run:
+    post:
+      tags: [Reconciliation]
+      operationId: adminRunReconciliation
+      summary: Trigger an on-demand reconciliation sweep across up to 200 organizations
+      responses:
+        "200":
+          description: Count of reconciled organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checkedOrganisations]
+                properties:
+                  checkedOrganisations:
+                    type: integer
+                    example: 14
+
+  /api/v1/admin/reconciliation/orgs/{orgId}/projects/{projectId}/budget/{month}/resolve:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+      - name: projectId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: month
+        in: path
+        required: true
+        description: UTC year-month formatted as `YYYY-MM`
+        schema:
+          type: string
+          pattern: "^\\d{4}-\\d{2}$"
+          example: "2026-11"
+    post:
+      tags: [Reconciliation]
+      operationId: adminResolveProjectBudgetMonth
+      summary: Resolve an `UNVERIFIED` project budget month by confirming authoritative monthly spend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BudgetResolutionRequest"
+      responses:
+        "204":
+          description: Project budget month restored to `CONFIRMED` and Redis mirror cleared for reload
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+components:
+  securitySchemes:
+    adminBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Admin HS256 Access JWT (`iss=hyperllm-admin`, `aud=admin-api`, `type=ADMIN_ACCESS`)
+    adminMfaChallengeAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived MFA challenge JWT (`type=ADMIN_MFA_CHALLENGE`, `scope=MFA_SETUP|MFA_VERIFY`)
+    adminRefreshCookie:
+      type: apiKey
+      in: cookie
+      name: hl_admin_rt
+      description: HttpOnly admin session refresh cookie scoped to `/api/v1/admin/auth`
+
+  parameters:
+    OrgIdPath:
+      name: orgId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PageParam:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSizeParam:
+      name: pageSize
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    VersionQueryParam:
+      name: version
+      in: query
+      required: true
+      schema: { type: integer, format: int64 }
+    AdminRefreshCookieParam:
+      name: hl_admin_rt
+      in: cookie
+      required: false
+      schema: { type: string }
+
+  responses:
+    ProblemBadRequest:
+      description: Validation or malformed request error
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemUnauthorized:
+      description: Missing, invalid, or expired admin JWT
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemForbidden:
+      description: Insufficient admin role, MFA required, or CIDR blocked
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemNotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemConflict:
+      description: Duplicate name/code, pricing overlap, or optimistic lock conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemBadGateway:
+      description: Upstream probe failed
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+    ProblemServiceUnavailable:
+      description: ClickHouse analytics warehouse unavailable
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProblemDetail" }
+
+  schemas:
+    FieldErrorItem:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string }
+        message: { type: string }
+    ProblemDetail:
+      type: object
+      required: [type, title, status, detail, code, traceId, timestamp, fieldErrors]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        traceId: { type: string }
+        timestamp: { type: string, format: date-time }
+        fieldErrors:
+          type: array
+          items: { $ref: "#/components/schemas/FieldErrorItem" }
+
+    # Enums
+    AdminRole:
+      type: string
+      enum: [SUPER_ADMIN, OPS, FINANCE, AUDITOR]
+    AuthScheme:
+      type: string
+      enum: [BEARER, X_API_KEY, AZURE_API_KEY, AWS_SIGV4, GCP_OAUTH]
+    ProtocolFamily:
+      type: string
+      enum: [OPENAI, ANTHROPIC, GEMINI, COHERE_RERANK]
+    ChannelStatus:
+      type: string
+      enum: [ACTIVE, DISABLED, CIRCUIT_OPEN, EXHAUSTED]
+    ModelCapability:
+      type: string
+      enum: [CHAT, REASONING, EMBEDDING, IMAGE, AUDIO_TTS, AUDIO_STT, RERANK]
+    RoutingStrategy:
+      type: string
+      enum: [PRIORITY_WEIGHTED, LOWEST_COST, TTFT_AWARE]
+    ModelVisibility:
+      type: string
+      enum: [PUBLIC, RESTRICTED]
+    ModelStatus:
+      type: string
+      enum: [ACTIVE, DEPRECATED, DISABLED]
+    BindingStatus:
+      type: string
+      enum: [ACTIVE, DISABLED]
+    BillingMode:
+      type: string
+      enum: [TOKEN, PER_CALL, IMAGE, AUDIO_CHAR, AUDIO_DURATION]
+    OrgStatus:
+      type: string
+      enum: [ACTIVE, SUSPENDED, CLOSED]
+    TopupType:
+      type: string
+      enum: [CASH, BONUS]
+    PackUnitType:
+      type: string
+      enum: [TOKENS, CALLS]
+    PackSkuStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, RETIRED]
+    VoucherType:
+      type: string
+      enum: [SIGNUP_BONUS, PROMO_CODE, CAMPAIGN]
+    VoucherStatus:
+      type: string
+      enum: [ACTIVE, PAUSED, ENDED]
+    OrderType:
+      type: string
+      enum: [WALLET_TOPUP, RESOURCE_PACK_PURCHASE]
+    OrderStatus:
+      type: string
+      enum: [PENDING, PAID, FAILED, CLOSED, REFUNDED]
+    PaymentChannel:
+      type: string
+      enum: [STRIPE, ALIPAY, WECHAT_PAY]
+    PaymentAnomalyKind:
+      type: string
+      enum: [SIGNATURE, AMOUNT_MISMATCH, CURRENCY_MISMATCH, ORDER_MISMATCH, TRANSACTION_CONFLICT, UNMATCHED_PAYMENT, CHANNEL_CONFLICT]
+    PaymentAnomalyStatus:
+      type: string
+      enum: [OPEN, RESOLVED, IGNORED]
+
+    # Auth DTOs
+    AdminLoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login: { type: string, description: Admin username or email }
+        password: { type: string }
+    AdminMfaSetupRequest:
+      type: object
+      properties:
+        secret: { type: [string, "null"] }
+        code: { type: [string, "null"], example: "654321" }
+    AdminMfaVerifyRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, example: "654321" }
+    MfaSetupChallengeResponse:
+      type: object
+      required: [secret, otpauthUri]
+      properties:
+        secret: { type: string }
+        otpauthUri: { type: string, example: "otpauth://totp/HyperLLM-Admin:admin@hyperllm.local?secret=..." }
+    AdminAuthResponse:
+      type: object
+      required: [mfaRequired, expiresInSeconds, adminId, username, email, role, mfaVerified]
+      properties:
+        mfaRequired: { type: boolean }
+        mfaAction: { type: [string, "null"], enum: [MFA_SETUP, MFA_VERIFY, null] }
+        accessToken: { type: [string, "null"] }
+        challengeToken: { type: [string, "null"] }
+        expiresInSeconds: { type: integer, format: int64 }
+        adminId: { type: string, format: uuid }
+        username: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/AdminRole" }
+        mfaVerified: { type: boolean }
+
+    # Provider & Channel DTOs
+    ProviderDto:
+      type: object
+      required: [id, code, displayName, protocolFamily, defaultBaseUrl, authScheme, status]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, example: openai }
+        displayName: { type: string, example: OpenAI }
+        protocolFamily: { $ref: "#/components/schemas/ProtocolFamily" }
+        defaultBaseUrl: { type: string, format: uri }
+        authScheme: { $ref: "#/components/schemas/AuthScheme" }
+        status: { type: string }
+    CreateChannelRequest:
+      type: object
+      required: [providerId, name, apiKey]
+      properties:
+        providerId: { type: string, format: uuid }
+        name: { type: string }
+        region: { type: [string, "null"], example: us-east-1 }
+        baseUrlOverride: { type: [string, "null"], format: uri }
+        apiKey: { type: string, description: Upstream provider API key (immediately AES-256-GCM encrypted) }
+        defaultCostDiscountBps: { type: [integer, "null"], minimum: 1, description: Basis points (10000 = 1.0x) }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+        healthCheckModel: { type: [string, "null"] }
+    UpdateChannelRequest:
+      type: object
+      required: [name, defaultCostDiscountBps, status, version]
+      properties:
+        name: { type: string }
+        region: { type: [string, "null"] }
+        baseUrlOverride: { type: [string, "null"], format: uri }
+        apiKey: { type: [string, "null"], description: Omit or null to keep existing encrypted key }
+        defaultCostDiscountBps: { type: integer, minimum: 1 }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+        healthCheckModel: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/ChannelStatus" }
+        version: { type: integer, format: int64 }
+    ChannelDto:
+      type: object
+      required: [id, providerId, name, hasCredentials, credentialKeyVersion, defaultCostDiscountBps, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        providerId: { type: string, format: uuid }
+        name: { type: string }
+        region: { type: [string, "null"] }
+        baseUrlOverride: { type: [string, "null"] }
+        hasCredentials: { type: boolean }
+        credentialKeyVersion: { type: integer }
+        defaultCostDiscountBps: { type: integer }
+        rpmLimit: { type: [integer, "null"] }
+        tpmLimit: { type: [integer, "null"] }
+        maxConcurrency: { type: [integer, "null"] }
+        healthCheckModel: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/ChannelStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ChannelProbeDto:
+      type: object
+      required: [channelId, healthy, httpStatus, latencyMs, endpointUrl]
+      properties:
+        channelId: { type: string, format: uuid }
+        healthy: { type: boolean }
+        httpStatus: { type: integer }
+        latencyMs: { type: integer, format: int64 }
+        endpointUrl: { type: string }
+        message: { type: [string, "null"] }
+
+    # Model, Binding & Pricing DTOs
+    CreateVirtualModelRequest:
+      type: object
+      required:
+        - modelCode
+        - displayName
+        - capabilityType
+        - nativeProtocol
+        - contextWindow
+        - supportsTools
+        - supportsVision
+        - supportsThinking
+        - supportsPromptCache
+        - routingStrategy
+        - stickyCacheEnabled
+        - stickyTtlSeconds
+        - visibility
+      properties:
+        modelCode: { type: string, example: claude-sonnet-4-5 }
+        displayName: { type: string }
+        providerBadge: { type: [string, "null"] }
+        capabilityType: { $ref: "#/components/schemas/ModelCapability" }
+        nativeProtocol: { $ref: "#/components/schemas/ProtocolFamily" }
+        contextWindow: { type: integer, minimum: 1 }
+        maxOutputTokens: { type: [integer, "null"], minimum: 1 }
+        supportsTools: { type: boolean }
+        supportsVision: { type: boolean }
+        supportsThinking: { type: boolean }
+        supportsPromptCache: { type: boolean }
+        routingStrategy: { $ref: "#/components/schemas/RoutingStrategy" }
+        stickyCacheEnabled: { type: boolean }
+        stickyTtlSeconds: { type: integer, minimum: 0 }
+        visibility: { $ref: "#/components/schemas/ModelVisibility" }
+        fallbackModelCode: { type: [string, "null"] }
+    UpdateVirtualModelRequest:
+      type: object
+      required:
+        - displayName
+        - contextWindow
+        - supportsTools
+        - supportsVision
+        - supportsThinking
+        - supportsPromptCache
+        - routingStrategy
+        - stickyCacheEnabled
+        - stickyTtlSeconds
+        - visibility
+        - status
+        - version
+      properties:
+        displayName: { type: string }
+        providerBadge: { type: [string, "null"] }
+        contextWindow: { type: integer, minimum: 1 }
+        maxOutputTokens: { type: [integer, "null"], minimum: 1 }
+        supportsTools: { type: boolean }
+        supportsVision: { type: boolean }
+        supportsThinking: { type: boolean }
+        supportsPromptCache: { type: boolean }
+        routingStrategy: { $ref: "#/components/schemas/RoutingStrategy" }
+        stickyCacheEnabled: { type: boolean }
+        stickyTtlSeconds: { type: integer, minimum: 0 }
+        visibility: { $ref: "#/components/schemas/ModelVisibility" }
+        fallbackModelCode: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/ModelStatus" }
+        version: { type: integer, format: int64 }
+    VirtualModelDto:
+      type: object
+      required:
+        - id
+        - modelCode
+        - displayName
+        - capabilityType
+        - nativeProtocol
+        - contextWindow
+        - supportsTools
+        - supportsVision
+        - supportsThinking
+        - supportsPromptCache
+        - routingStrategy
+        - stickyCacheEnabled
+        - stickyTtlSeconds
+        - visibility
+        - status
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: string, format: uuid }
+        modelCode: { type: string }
+        displayName: { type: string }
+        providerBadge: { type: [string, "null"] }
+        capabilityType: { $ref: "#/components/schemas/ModelCapability" }
+        nativeProtocol: { $ref: "#/components/schemas/ProtocolFamily" }
+        contextWindow: { type: integer }
+        maxOutputTokens: { type: [integer, "null"] }
+        supportsTools: { type: boolean }
+        supportsVision: { type: boolean }
+        supportsThinking: { type: boolean }
+        supportsPromptCache: { type: boolean }
+        routingStrategy: { $ref: "#/components/schemas/RoutingStrategy" }
+        stickyCacheEnabled: { type: boolean }
+        stickyTtlSeconds: { type: integer }
+        visibility: { $ref: "#/components/schemas/ModelVisibility" }
+        fallbackModelCode: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/ModelStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    BindingItemRequest:
+      type: object
+      required: [channelId, upstreamModelName, priorityTier, weight]
+      properties:
+        channelId: { type: string, format: uuid }
+        upstreamModelName: { type: string }
+        priorityTier: { type: integer, minimum: 1 }
+        weight: { type: integer, minimum: 1 }
+        costDiscountBpsOverride: { type: [integer, "null"], minimum: 1 }
+        status: { $ref: "#/components/schemas/BindingStatus" }
+    ReplaceBindingsRequest:
+      type: object
+      required: [bindings]
+      properties:
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/BindingItemRequest" }
+    BindingDto:
+      type: object
+      required: [id, virtualModelId, channelId, upstreamModelName, priorityTier, weight, status, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        virtualModelId: { type: string, format: uuid }
+        channelId: { type: string, format: uuid }
+        upstreamModelName: { type: string }
+        priorityTier: { type: integer }
+        weight: { type: integer }
+        costDiscountBpsOverride: { type: [integer, "null"] }
+        status: { $ref: "#/components/schemas/BindingStatus" }
+        updatedAt: { type: string, format: date-time }
+    PublishPricingRuleRequest:
+      type: object
+      required:
+        - billingMode
+        - inputPriceMicros1m
+        - outputPriceMicros1m
+        - cacheReadPriceMicros1m
+        - cacheWritePriceMicros1m
+        - reasoningPriceMicros1m
+        - perCallMicros
+        - effectiveFrom
+      properties:
+        billingMode: { $ref: "#/components/schemas/BillingMode" }
+        inputPriceMicros1m: { type: integer, format: int64, minimum: 0 }
+        outputPriceMicros1m: { type: integer, format: int64, minimum: 0 }
+        cacheReadPriceMicros1m: { type: integer, format: int64, minimum: 0 }
+        cacheWritePriceMicros1m: { type: integer, format: int64, minimum: 0 }
+        reasoningPriceMicros1m: { type: integer, format: int64, minimum: 0 }
+        perCallMicros: { type: integer, format: int64, minimum: 0 }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: [string, "null"], format: date-time }
+    PricingRuleDto:
+      type: object
+      required:
+        - id
+        - virtualModelId
+        - billingMode
+        - inputPriceMicros1m
+        - outputPriceMicros1m
+        - cacheReadPriceMicros1m
+        - cacheWritePriceMicros1m
+        - reasoningPriceMicros1m
+        - perCallMicros
+        - effectiveFrom
+        - createdAt
+      properties:
+        id: { type: string, format: uuid }
+        virtualModelId: { type: string, format: uuid }
+        billingMode: { $ref: "#/components/schemas/BillingMode" }
+        inputPriceMicros1m: { type: integer, format: int64 }
+        outputPriceMicros1m: { type: integer, format: int64 }
+        cacheReadPriceMicros1m: { type: integer, format: int64 }
+        cacheWritePriceMicros1m: { type: integer, format: int64 }
+        reasoningPriceMicros1m: { type: integer, format: int64 }
+        perCallMicros: { type: integer, format: int64 }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    # Tenants & Wallet DTOs
+    AdminOrgDto:
+      type: object
+      required: [id, name, slug, ownerUserId, tierId, maxConcurrency, personal, status, liveDetailAvailable, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        ownerUserId: { type: string, format: uuid }
+        tierId: { type: string, format: uuid }
+        discountRatioBps: { type: [integer, "null"] }
+        maxConcurrency: { type: integer }
+        personal: { type: boolean }
+        status: { $ref: "#/components/schemas/OrgStatus" }
+        cashBalanceMicros: { type: [integer, "null"], format: int64 }
+        bonusBalanceMicros: { type: [integer, "null"], format: int64 }
+        liveDetailAvailable: { type: boolean }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AdminWalletDetailDto:
+      type: object
+      required:
+        - orgId
+        - cashMicros
+        - bonusMicros
+        - heldMicros
+        - availableMicros
+        - ledgerConfirmed
+        - totalRechargedMicros
+        - totalBonusGrantedMicros
+        - totalConsumedCashMicros
+        - totalConsumedBonusMicros
+      properties:
+        orgId: { type: string, format: uuid }
+        cashMicros: { type: integer, format: int64 }
+        bonusMicros: { type: integer, format: int64 }
+        heldMicros: { type: integer, format: int64 }
+        availableMicros: { type: integer, format: int64 }
+        ledgerConfirmed: { type: boolean }
+        totalRechargedMicros: { type: integer, format: int64 }
+        totalBonusGrantedMicros: { type: integer, format: int64 }
+        totalConsumedCashMicros: { type: integer, format: int64 }
+        totalConsumedBonusMicros: { type: integer, format: int64 }
+    UpdateOrgStatusRequest:
+      type: object
+      required: [status, version]
+      properties:
+        status: { $ref: "#/components/schemas/OrgStatus" }
+        version: { type: integer, format: int64 }
+    AdminWalletTopupRequest:
+      type: object
+      required: [topupType, amountMicros, idempotencyKey]
+      properties:
+        topupType: { $ref: "#/components/schemas/TopupType" }
+        amountMicros: { type: integer, format: int64, minimum: 1 }
+        idempotencyKey: { type: string }
+        description: { type: [string, "null"] }
+    AdminWalletTopupResponse:
+      type: object
+      required: [orgId, eventId]
+      properties:
+        orgId: { type: string, format: uuid }
+        eventId: { type: string, format: uuid }
+
+    # Commerce & Payment DTOs
+    CreatePackSkuRequest:
+      type: object
+      required: [code, name, unitType, applicableModels, totalUnits, priceMicros, validDays, status]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        unitType: { $ref: "#/components/schemas/PackUnitType" }
+        applicableModels:
+          type: array
+          minItems: 1
+          items: { type: string }
+        totalUnits: { type: integer, format: int64, minimum: 1 }
+        priceMicros: { type: integer, format: int64, minimum: 1 }
+        validDays: { type: integer, minimum: 1 }
+        status: { $ref: "#/components/schemas/PackSkuStatus" }
+    UpdatePackSkuRequest:
+      type: object
+      required: [name, unitType, applicableModels, totalUnits, priceMicros, validDays, status, version]
+      properties:
+        name: { type: string }
+        unitType: { $ref: "#/components/schemas/PackUnitType" }
+        applicableModels:
+          type: array
+          minItems: 1
+          items: { type: string }
+        totalUnits: { type: integer, format: int64, minimum: 1 }
+        priceMicros: { type: integer, format: int64, minimum: 1 }
+        validDays: { type: integer, minimum: 1 }
+        status: { $ref: "#/components/schemas/PackSkuStatus" }
+        version: { type: integer, format: int64 }
+    PackSkuAdminDto:
+      type: object
+      required: [id, code, name, unitType, applicableModels, totalUnits, priceMicros, validDays, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        unitType: { $ref: "#/components/schemas/PackUnitType" }
+        applicableModels:
+          type: array
+          items: { type: string }
+        totalUnits: { type: integer, format: int64 }
+        priceMicros: { type: integer, format: int64 }
+        validDays: { type: integer }
+        status: { $ref: "#/components/schemas/PackSkuStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateVoucherRequest:
+      type: object
+      required: [name, voucherType, amountMicros, maxRedemptionsPerOrg]
+      properties:
+        name: { type: string }
+        voucherType: { $ref: "#/components/schemas/VoucherType" }
+        amountMicros: { type: integer, format: int64, minimum: 1 }
+        applicableModels:
+          type: [array, "null"]
+          items: { type: string }
+        validDays: { type: [integer, "null"] }
+        fixedExpiresAt: { type: [string, "null"], format: date-time }
+        maxRedemptionsTotal: { type: [integer, "null"] }
+        maxRedemptionsPerOrg: { type: integer, minimum: 1 }
+    VoucherAdminDto:
+      type: object
+      required: [id, name, voucherType, amountMicros, maxRedemptionsPerOrg, status, version, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        voucherType: { $ref: "#/components/schemas/VoucherType" }
+        amountMicros: { type: integer, format: int64 }
+        applicableModels:
+          type: [array, "null"]
+          items: { type: string }
+        validDays: { type: [integer, "null"] }
+        fixedExpiresAt: { type: [string, "null"], format: date-time }
+        maxRedemptionsTotal: { type: [integer, "null"] }
+        maxRedemptionsPerOrg: { type: integer }
+        status: { $ref: "#/components/schemas/VoucherStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+    UpdateVoucherStatusRequest:
+      type: object
+      required: [status, version]
+      properties:
+        status: { $ref: "#/components/schemas/VoucherStatus" }
+        version: { type: integer, format: int64 }
+    CreateCodeBatchRequest:
+      type: object
+      required: [quantity]
+      properties:
+        quantity: { type: integer, minimum: 1, maximum: 10000 }
+    CodeBatchResponse:
+      type: object
+      required: [batchId, voucherId, quantity, codes]
+      properties:
+        batchId: { type: string, format: uuid }
+        voucherId: { type: string, format: uuid }
+        quantity: { type: integer }
+        codes:
+          type: array
+          items: { type: string }
+    PaymentAnomalyDto:
+      type: object
+      required: [id, paymentChannel, kind, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: [string, "null"], format: uuid }
+        orderId: { type: [string, "null"], format: uuid }
+        paymentChannel: { $ref: "#/components/schemas/PaymentChannel" }
+        kind: { $ref: "#/components/schemas/PaymentAnomalyKind" }
+        status: { $ref: "#/components/schemas/PaymentAnomalyStatus" }
+        detailJson: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    ResolveAnomalyRequest:
+      type: object
+      required: [status, resolution]
+      properties:
+        status: { $ref: "#/components/schemas/PaymentAnomalyStatus" }
+        resolution: { type: string }
+    RefundOrderRequest:
+      type: object
+      required: [refundedAmountMinor, note]
+      properties:
+        refundedAmountMinor: { type: integer, format: int64, minimum: 1 }
+        note: { type: string }
+    PaymentOrderAdminDto:
+      type: object
+      required: [id, orderNo, orgId, orderType, paymentChannel, payCurrency, payAmountMinor, creditMicros, status, refundedAmountMinor, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        orderNo: { type: string }
+        orgId: { type: string, format: uuid }
+        orderType: { $ref: "#/components/schemas/OrderType" }
+        paymentChannel: { $ref: "#/components/schemas/PaymentChannel" }
+        payCurrency: { type: string }
+        payAmountMinor: { type: integer, format: int64 }
+        creditMicros: { type: integer, format: int64 }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        externalTxId: { type: [string, "null"] }
+        fulfillmentEventId: { type: [string, "null"], format: uuid }
+        paidAt: { type: [string, "null"], format: date-time }
+        refundedAt: { type: [string, "null"], format: date-time }
+        refundedAmountMinor: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+
+    # Analytics, Alerts & Reconciliation DTOs
+    MarginRow:
+      type: object
+      required: [dimension, requests, cashMicros, bonusMicros, costMicros, upstreamCostMicros, contributionMicros, unknownCostRequests]
+      properties:
+        dimension: { type: string }
+        requests: { type: integer, format: int64 }
+        cashMicros: { type: integer, format: int64 }
+        bonusMicros: { type: integer, format: int64 }
+        costMicros: { type: integer, format: int64 }
+        upstreamCostMicros: { type: integer, format: int64 }
+        contributionMicros: { type: integer, format: int64 }
+        unknownCostRequests: { type: integer, format: int64 }
+    PackSalesRow:
+      type: object
+      required: [channel, currency, orders, amountMinor, creditMicros]
+      properties:
+        channel: { type: string }
+        currency: { type: string }
+        orders: { type: integer, format: int64 }
+        amountMinor: { type: integer, format: int64 }
+        creditMicros: { type: integer, format: int64 }
+    PackSalesReport:
+      type: object
+      required: [from, to, paid, refunded]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        paid:
+          type: array
+          items: { $ref: "#/components/schemas/PackSalesRow" }
+        refunded:
+          type: array
+          items: { $ref: "#/components/schemas/PackSalesRow" }
+    RejectRow:
+      type: object
+      required: [partition, offset, errorClass, createdAt]
+      properties:
+        partition: { type: integer }
+        offset: { type: integer, format: int64 }
+        requestId: { type: [string, "null"] }
+        errorClass: { type: string }
+        detail: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    AlertDeliveryDto:
+      type: object
+      required: [id, ruleId, orgId, endpointId, alertType, subject, status, attempts]
+      properties:
+        id: { type: string, format: uuid }
+        ruleId: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        endpointId: { type: string, format: uuid }
+        alertType: { type: string }
+        projectId: { type: [string, "null"], format: uuid }
+        subject: { type: string }
+        status: { type: string }
+        attempts: { type: integer }
+        nextAttemptAt: { type: [string, "null"], format: date-time }
+        lastErrorClass: { type: [string, "null"] }
+    ReconciliationFinding:
+      type: object
+      required: [id, orgId, checkKind, severity, state, detectedAt, lastSeenAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        checkKind: { type: string }
+        severity: { type: string, enum: [P1, P2, P3] }
+        expectedMicros: { type: [integer, "null"], format: int64 }
+        actualMicros: { type: [integer, "null"], format: int64 }
+        deltaMicros: { type: [integer, "null"], format: int64 }
+        detailJson: { type: [string, "null"] }
+        state: { type: string, enum: [OPEN, RESOLVED] }
+        detectedAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        resolutionNote: { type: [string, "null"] }
+    ResolveFindingRequest:
+      type: object
+      properties:
+        note: { type: [string, "null"] }
+    BudgetResolutionRequest:
+      type: object
+      required: [confirmedMicros]
+      properties:
+        confirmedMicros: { type: integer, format: int64, minimum: 0 }
+
+    # Paginated Wrappers
+    PageResponseChannelDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ChannelDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponseVirtualModelDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/VirtualModelDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponseAdminOrgDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminOrgDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponsePackSkuAdminDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/PackSkuAdminDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponseVoucherAdminDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/VoucherAdminDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponsePaymentAnomalyDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/PaymentAnomalyDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponsePaymentOrderAdminDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/PaymentOrderAdminDto" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }

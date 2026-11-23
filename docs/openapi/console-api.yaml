@@ -1,0 +1,1928 @@
+openapi: 3.1.0
+info:
+  title: HyperLLM Console Control Plane API
+  version: 1.0.0
+  summary: Developer workspace, RBAC, API keys, wallet, payments, usage analytics, and alerting API
+  description: |
+    Developer-facing control plane (`backend/console`, Spring MVC + Java 21 virtual threads, default port `8081`).
+
+    ### Authentication & Session Model
+    - Protected `/api/v1/**` routes require an `HS256` Bearer access JWT
+      (`iss = hyperllm-console`, `aud = console-api`, `type = CONSOLE_ACCESS`).
+    - `/api/v1/auth/register`, `/api/v1/auth/login`, and `/api/v1/auth/refresh` issue/rotate the
+      `HttpOnly` refresh cookie `hl_console_rt` scoped to `/api/v1/auth`.
+    - **Single-Flight Refresh**: Reusing a rotated refresh cookie triggers `401 AUTH_TOKEN_REUSE_DETECTED`
+      and revokes the entire token family.
+    - Payment channel webhooks (`/api/v1/payment-notifications/{channel}`) are unauthenticated at
+      the JWT layer and verify cryptographic signatures per channel.
+
+    ### Monetary Units & Concurrency
+    - Monetary balances, caps, and prices use integer `micro-USD` (`1 USD = 1_000_000 micros`).
+    - Payment order amounts use target currency minor units (`payAmountMinor`).
+    - Optimistic locking uses the resource `version` field (`409 CONFLICT_OPTIMISTIC_LOCK` on mismatch).
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8081
+    description: Local Console backend
+  - url: https://console.hyperllm.example.com
+    description: Production Console API (example)
+
+tags:
+  - name: Auth
+    description: Email OTP registration, login, token rotation, logout, and current profile
+  - name: Organizations
+    description: Organization workspaces, member RBAC, and invitations
+  - name: Projects
+    description: Project isolation, monthly budgets, and project-scoped membership
+  - name: API Keys
+    description: Customer API key lifecycle (`sk-...`), IP/model allowlists, and rate limits
+  - name: Catalog & Wallet
+    description: Model catalog with active pricing, live Redis wallet, ledger history, and Playground sandbox tokens
+  - name: Payments & Vouchers
+    description: Top-up orders, resource pack purchases, voucher redemption, and payment webhooks
+  - name: Usage
+    description: ClickHouse versioned hourly usage analytics
+  - name: Alerts
+    description: Notification endpoints (Email / signed Webhook) and low-balance / project budget alert rules
+
+security:
+  - consoleBearerAuth: []
+
+paths:
+  /api/v1/auth/email-codes:
+    post:
+      tags: [Auth]
+      operationId: consoleSendEmailCode
+      summary: Send a 6-digit email verification code (OTP)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendEmailCodeRequest"
+      responses:
+        "200":
+          description: Verification code issued (includes `debugCode` only when `HYPERLLM_OTP_DEBUG_ECHO=true`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendEmailCodeResponse"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "429":
+          $ref: "#/components/responses/ProblemTooManyRequests"
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      operationId: consoleRegister
+      summary: Register a developer account with email OTP
+      description: |
+        Atomically creates the user, password identity, default `Personal Workspace` organization,
+        `default` project, wallet, and optional signup bonus Outbox grant. Sets `hl_console_rt` cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Account registered and access token issued
+          headers:
+            Set-Cookie:
+              description: "`hl_console_rt` HttpOnly refresh cookie (`Path=/api/v1/auth; SameSite=Lax`)"
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: consoleLogin
+      summary: Sign in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated session and access token
+          headers:
+            Set-Cookie:
+              description: "`hl_console_rt` HttpOnly refresh cookie"
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: consoleRefresh
+      summary: Rotate refresh cookie and issue a fresh access token
+      security:
+        - consoleRefreshCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConsoleRefreshCookieParam"
+      responses:
+        "200":
+          description: Fresh access token with rotated `hl_console_rt` cookie
+          headers:
+            Set-Cookie:
+              description: Rotated `hl_console_rt` HttpOnly refresh cookie
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: consoleLogout
+      summary: Revoke current refresh token and clear session cookie
+      parameters:
+        - $ref: "#/components/parameters/ConsoleRefreshCookieParam"
+      responses:
+        "204":
+          description: Logged out and `hl_console_rt` cleared
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: consoleGetMe
+      summary: Get current authenticated user profile and organization memberships
+      responses:
+        "200":
+          description: Authenticated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileDto"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+
+  /api/v1/orgs:
+    get:
+      tags: [Organizations]
+      operationId: consoleListOrgs
+      summary: List organizations the current user belongs to
+      responses:
+        "200":
+          description: User's organizations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrgDto"
+        "401":
+          $ref: "#/components/responses/ProblemUnauthorized"
+    post:
+      tags: [Organizations]
+      operationId: consoleCreateOrg
+      summary: Create a new organization workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrgRequest"
+      responses:
+        "201":
+          description: Organization created with caller as `OWNER`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/orgs/{orgId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Organizations]
+      operationId: consoleGetOrg
+      summary: Get organization details
+      responses:
+        "200":
+          description: Organization details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+    patch:
+      tags: [Organizations]
+      operationId: consoleUpdateOrg
+      summary: Update organization name (requires OWNER or ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrgRequest"
+      responses:
+        "200":
+          description: Updated organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/orgs/{orgId}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Organizations]
+      operationId: consoleListOrgMembers
+      summary: List organization members
+      responses:
+        "200":
+          description: Organization member list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrgMemberDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/orgs/{orgId}/members/{memberId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+      - name: memberId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Organizations]
+      operationId: consoleUpdateOrgMemberRole
+      summary: Update a member's organization role (OWNER/ADMIN; cannot modify OWNER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrgMemberRoleRequest"
+      responses:
+        "200":
+          description: Updated organization member
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgMemberDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+    delete:
+      tags: [Organizations]
+      operationId: consoleRemoveOrgMember
+      summary: Remove a member from the organization
+      responses:
+        "204":
+          description: Member removed
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/orgs/{orgId}/invitations:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    post:
+      tags: [Organizations]
+      operationId: consoleCreateInvitation
+      summary: Create an organization member invitation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInvitationRequest"
+      responses:
+        "201":
+          description: Invitation created with bearer invitation token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationResponseDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/invitations/accept:
+    post:
+      tags: [Organizations]
+      operationId: consoleAcceptInvitation
+      summary: Accept a pending organization invitation token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInvitationRequest"
+      responses:
+        "200":
+          description: Joined organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+
+  /api/v1/orgs/{orgId}/projects:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Projects]
+      operationId: consoleListProjects
+      summary: List projects visible to the current user in an organization
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated project list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseProjectDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+    post:
+      tags: [Projects]
+      operationId: consoleCreateProject
+      summary: Create a new project in the organization (OWNER/ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/projects/{projectId}:
+    parameters:
+      - $ref: "#/components/parameters/ProjectIdPath"
+    get:
+      tags: [Projects]
+      operationId: consoleGetProject
+      summary: Get project details
+      responses:
+        "200":
+          description: Project details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+    patch:
+      tags: [Projects]
+      operationId: consoleUpdateProject
+      summary: Update project configuration, monthly budget caps, allowlists, or rate limits
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+    delete:
+      tags: [Projects]
+      operationId: consoleDeleteProject
+      summary: Soft-delete a project (requires optimistic lock `version`)
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: Project deleted
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/projects/{projectId}/budget:
+    parameters:
+      - $ref: "#/components/parameters/ProjectIdPath"
+    get:
+      tags: [Projects]
+      operationId: consoleGetProjectBudget
+      summary: Get the project's current UTC month budget status (`LIVE` from Redis or `CONFIRMED` from PG)
+      responses:
+        "200":
+          description: Current UTC month budget snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectBudgetDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+  /api/v1/projects/{projectId}/members:
+    parameters:
+      - $ref: "#/components/parameters/ProjectIdPath"
+    put:
+      tags: [Projects]
+      operationId: consoleReplaceProjectMembers
+      summary: Replace the list of organization users assigned to this project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplaceProjectMembersRequest"
+      responses:
+        "200":
+          description: Updated project member user IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  format: uuid
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/projects/{projectId}/api-keys:
+    parameters:
+      - $ref: "#/components/parameters/ProjectIdPath"
+    get:
+      tags: [API Keys]
+      operationId: consoleListApiKeys
+      summary: List masked API keys belonging to a project
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated API key list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseApiKeyDto"
+    post:
+      tags: [API Keys]
+      operationId: consoleCreateApiKey
+      summary: Issue a new customer API key (`rawKey` returned once)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "201":
+          description: API key created; save `rawKey` immediately as it cannot be retrieved again
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiKeyDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/api-keys/{keyId}:
+    parameters:
+      - name: keyId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [API Keys]
+      operationId: consoleUpdateApiKey
+      summary: Update API key limits, allowlists, expiration, or ACTIVE/DISABLED status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateApiKeyRequest"
+      responses:
+        "200":
+          description: Updated API key metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+    delete:
+      tags: [API Keys]
+      operationId: consoleRevokeApiKey
+      summary: Permanently revoke an API key (triggers Redis L2 eviction and CDC L1 invalidation)
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: API key revoked
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/models:
+    get:
+      tags: [Catalog & Wallet]
+      operationId: consoleListModels
+      summary: List active public virtual models and their current pricing rules
+      description: |
+        Returns the public virtual model catalog with capability flags and currently active pricing.
+        Note: `ConsoleAuthFilter` currently enforces a Bearer token on `/api/v1/**` paths.
+      responses:
+        "200":
+          description: Public model catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PublicModelCatalogDto"
+
+  /api/v1/orgs/{orgId}/wallet:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Catalog & Wallet]
+      operationId: consoleGetWallet
+      summary: Get real-time organization wallet balance (live Redis mirror with cold PG fallback)
+      responses:
+        "200":
+          description: Real-time wallet breakdown including `heldMicros` and `availableMicros`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletDto"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/orgs/{orgId}/wallet/ledger:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Catalog & Wallet]
+      operationId: consoleListWalletLedger
+      summary: List append-only wallet ledger transactions
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated ledger entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponseWalletLedgerDto"
+
+  /api/v1/playground/ephemeral-token:
+    post:
+      tags: [Catalog & Wallet]
+      operationId: consoleIssuePlaygroundToken
+      summary: Issue a 5-minute ephemeral sandbox token (`sk-hl-sb-...`) for Playground SSE calls to Gateway
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EphemeralTokenRequest"
+      responses:
+        "201":
+          description: Ephemeral token bound to the requested project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EphemeralTokenResponse"
+        "403":
+          $ref: "#/components/responses/ProblemForbidden"
+
+  /api/v1/orgs/{orgId}/payment-orders:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    post:
+      tags: [Payments & Vouchers]
+      operationId: consoleCreatePaymentOrder
+      summary: Create a wallet top-up or resource pack purchase order (OWNER/BILLING)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated idempotency key; same key + same terms returns the original order
+          schema:
+            type: string
+            example: 01935a8b-7c2d-7e00-9f12-3456789abcde
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentOrderRequest"
+      responses:
+        "201":
+          description: Order created with channel payment instruction (redirect URL, form fields, or QR `codeUrl`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentOrderDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+        "502":
+          $ref: "#/components/responses/ProblemBadGateway"
+    get:
+      tags: [Payments & Vouchers]
+      operationId: consoleListPaymentOrders
+      summary: List organization payment orders
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated payment orders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponsePaymentOrderDto"
+
+  /api/v1/orgs/{orgId}/payment-orders/{orderId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+      - name: orderId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Payments & Vouchers]
+      operationId: consoleGetPaymentOrder
+      summary: Get single payment order status including asynchronous `fulfillmentStatus`
+      responses:
+        "200":
+          description: Payment order details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentOrderDto"
+        "404":
+          $ref: "#/components/responses/ProblemNotFound"
+
+  /api/v1/orgs/{orgId}/resource-pack-skus:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Payments & Vouchers]
+      operationId: consoleListPackSkus
+      summary: List active purchasable resource pack SKUs
+      responses:
+        "200":
+          description: Active resource pack SKUs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PackSkuDto"
+
+  /api/v1/orgs/{orgId}/redemptions:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    post:
+      tags: [Payments & Vouchers]
+      operationId: consoleRedeemVoucher
+      summary: Redeem a promotional voucher code into an organization bonus grant (202 Accepted)
+      description: |
+        Validates the HMAC digest of the code and commits an outbox grant authorization in the same
+        PostgreSQL transaction. Returns `202 Accepted` with `grantEventId`; the consumer projects
+        the bonus batch to `wallet_ledger` and Redis asynchronously.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RedeemVoucherRequest"
+      responses:
+        "202":
+          description: Voucher redeemed and grant event accepted for ledger projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedemptionDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/payment-notifications/{channel}:
+    post:
+      tags: [Payments & Vouchers]
+      operationId: consolePaymentWebhook
+      summary: Receive signed asynchronous payment callbacks from Stripe, Alipay, or WeChat Pay
+      description: |
+        Public endpoint authenticated strictly by each payment channel's cryptographic signature
+        (`Stripe-Signature`, Alipay RSA2 signature, or WeChat Pay API v3 signature + AEAD decryption).
+      security: []
+      parameters:
+        - name: channel
+          in: path
+          required: true
+          description: Channel slug (`stripe`, `alipay`, or `wechat-pay`)
+          schema:
+            type: string
+            enum: [stripe, alipay, wechat-pay]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: string
+              description: Raw JSON webhook payload (Stripe / WeChat Pay)
+          application/x-www-form-urlencoded:
+            schema:
+              type: string
+              description: Raw form-encoded notification payload (Alipay)
+      responses:
+        "200":
+          description: Notification acknowledged (`{}` for Stripe, `success` text for Alipay, `{"code":"SUCCESS","message":"ok"}` for WeChat Pay)
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+                example: success
+        "400":
+          description: Signature verification or payload parsing failed
+        "404":
+          description: Unknown or disabled payment channel
+
+  /api/v1/orgs/{orgId}/usage:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Usage]
+      operationId: consoleQueryUsage
+      summary: Query ClickHouse versioned hourly usage metrics (ZDR metadata only)
+      description: |
+        Queries only published hour versions from `usage_hourly` + `usage_hourly_published`.
+        `DEVELOPER` members are automatically restricted to projects they are assigned to.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive ISO-8601 UTC start timestamp
+          schema:
+            type: string
+            format: date-time
+            example: "2026-11-01T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: Exclusive ISO-8601 UTC end timestamp
+          schema:
+            type: string
+            format: date-time
+            example: "2026-11-25T00:00:00Z"
+        - name: projectId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: apiKeyId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: groupBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PROJECT, API_KEY, MODEL, CHANNEL, HOUR]
+            default: PROJECT
+      responses:
+        "200":
+          description: Aggregated usage rows and totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageReport"
+        "503":
+          $ref: "#/components/responses/ProblemServiceUnavailable"
+
+  /api/v1/orgs/{orgId}/notification-endpoints:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Alerts]
+      operationId: consoleListNotificationEndpoints
+      summary: List configured email and webhook notification endpoints
+      responses:
+        "200":
+          description: Organization notification endpoints
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EndpointDto"
+    post:
+      tags: [Alerts]
+      operationId: consoleCreateNotificationEndpoint
+      summary: Register a notification endpoint (`WEBHOOK` returns one-time HMAC `signingSecret`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEndpointRequest"
+      responses:
+        "201":
+          description: Endpoint created (save `signingSecret` once for webhook verification)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedEndpointDto"
+        "400":
+          $ref: "#/components/responses/ProblemBadRequest"
+
+  /api/v1/orgs/{orgId}/notification-endpoints/{endpointId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+      - name: endpointId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Alerts]
+      operationId: consoleUpdateNotificationEndpoint
+      summary: Enable or disable a notification endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateEndpointRequest"
+      responses:
+        "200":
+          description: Updated endpoint
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EndpointDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+    delete:
+      tags: [Alerts]
+      operationId: consoleDeleteNotificationEndpoint
+      summary: Delete a notification endpoint (rejected if referenced by an active rule)
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: Endpoint deleted
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/orgs/{orgId}/alert-rules:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+    get:
+      tags: [Alerts]
+      operationId: consoleListAlertRules
+      summary: List organization low-balance and project budget alert rules
+      responses:
+        "200":
+          description: Active and disabled alert rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlertRuleDto"
+    post:
+      tags: [Alerts]
+      operationId: consoleCreateAlertRule
+      summary: Create a low-balance or project soft/hard cap alert rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAlertRuleRequest"
+      responses:
+        "201":
+          description: Alert rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertRuleDto"
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+  /api/v1/orgs/{orgId}/alert-rules/{ruleId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgIdPath"
+      - name: ruleId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [Alerts]
+      operationId: consoleDeleteAlertRule
+      summary: Delete an alert rule
+      parameters:
+        - $ref: "#/components/parameters/VersionQueryParam"
+      responses:
+        "204":
+          description: Alert rule deleted
+        "409":
+          $ref: "#/components/responses/ProblemConflict"
+
+components:
+  securitySchemes:
+    consoleBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Console HS256 Access JWT (`iss=hyperllm-console`, `aud=console-api`, `type=CONSOLE_ACCESS`)
+    consoleRefreshCookie:
+      type: apiKey
+      in: cookie
+      name: hl_console_rt
+      description: HttpOnly rotating refresh cookie scoped to `/api/v1/auth`
+
+  parameters:
+    OrgIdPath:
+      name: orgId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectIdPath:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PageParam:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSizeParam:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    VersionQueryParam:
+      name: version
+      in: query
+      required: true
+      description: Expected optimistic locking `version`
+      schema:
+        type: integer
+        format: int64
+    ConsoleRefreshCookieParam:
+      name: hl_console_rt
+      in: cookie
+      required: false
+      schema:
+        type: string
+
+  responses:
+    ProblemBadRequest:
+      description: Validation or malformed request error
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemUnauthorized:
+      description: Missing, invalid, expired, or reused authentication token
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemForbidden:
+      description: RBAC permission denied or organization suspended
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemNotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemConflict:
+      description: Duplicate resource, optimistic lock conflict, or state conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemTooManyRequests:
+      description: OTP cooldown or rate limit exceeded
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemBadGateway:
+      description: Downstream payment provider unavailable
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ProblemServiceUnavailable:
+      description: Analytics warehouse or dependency temporarily unavailable
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+
+  schemas:
+    FieldErrorItem:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+
+    ProblemDetail:
+      type: object
+      required: [type, title, status, detail, code, traceId, timestamp, fieldErrors]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://hyperllm.dev/errors/conflict-optimistic-lock
+        title:
+          type: string
+          example: Resource was modified concurrently
+        status:
+          type: integer
+          example: 409
+        detail:
+          type: string
+        instance:
+          type: [string, "null"]
+        code:
+          type: string
+          example: CONFLICT_OPTIMISTIC_LOCK
+        traceId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        fieldErrors:
+          type: array
+          items:
+            $ref: "#/components/schemas/FieldErrorItem"
+
+    # Enums
+    OrgRole:
+      type: string
+      enum: [OWNER, ADMIN, DEVELOPER, BILLING]
+    OrgStatus:
+      type: string
+      enum: [ACTIVE, SUSPENDED, CLOSED]
+    InvitationStatus:
+      type: string
+      enum: [PENDING, ACCEPTED, EXPIRED, REVOKED]
+    ProjectEnvironment:
+      type: string
+      enum: [PRODUCTION, STAGING, DEVELOPMENT]
+    ProjectStatus:
+      type: string
+      enum: [ACTIVE, PAUSED, ARCHIVED]
+    ApiKeyStatus:
+      type: string
+      enum: [ACTIVE, DISABLED, REVOKED]
+    ModelCapability:
+      type: string
+      enum: [CHAT, REASONING, EMBEDDING, IMAGE, AUDIO_TTS, AUDIO_STT, RERANK]
+    ProtocolFamily:
+      type: string
+      enum: [OPENAI, ANTHROPIC, GEMINI, COHERE_RERANK]
+    BillingMode:
+      type: string
+      enum: [TOKEN, PER_CALL, IMAGE, AUDIO_CHAR, AUDIO_DURATION]
+    LedgerType:
+      type: string
+      enum: [RECHARGE, CONSUME, BONUS_GRANT, PACK_GRANT, BONUS_EXPIRE, REFUND, ADJUST]
+    OrderType:
+      type: string
+      enum: [WALLET_TOPUP, RESOURCE_PACK_PURCHASE]
+    OrderStatus:
+      type: string
+      enum: [PENDING, PAID, FAILED, CLOSED, REFUNDED]
+    PaymentChannel:
+      type: string
+      enum: [STRIPE, ALIPAY, WECHAT_PAY]
+    PackUnitType:
+      type: string
+      enum: [TOKENS, CALLS]
+    PackSkuStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, RETIRED]
+    NotificationChannelType:
+      type: string
+      enum: [EMAIL, WEBHOOK]
+    ToggleStatus:
+      type: string
+      enum: [ACTIVE, DISABLED]
+    AlertType:
+      type: string
+      enum: [LOW_BALANCE, PROJECT_SOFT_CAP, PROJECT_HARD_CAP]
+
+    # Auth DTOs
+    SendEmailCodeRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: dev@acme.io
+        purpose:
+          type: [string, "null"]
+          example: REGISTER
+    SendEmailCodeResponse:
+      type: object
+      required: [sent, expiresInSeconds]
+      properties:
+        sent:
+          type: boolean
+        expiresInSeconds:
+          type: integer
+          example: 600
+        debugCode:
+          type: [string, "null"]
+          description: Only populated when `HYPERLLM_OTP_DEBUG_ECHO=true`
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName, emailCode]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        emailCode:
+          type: string
+          example: "123456"
+        locale:
+          type: [string, "null"]
+          example: en-US
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    OrgMembershipSummaryDto:
+      type: object
+      required: [orgId, orgName, slug, personal, role]
+      properties:
+        orgId:
+          type: string
+          format: uuid
+        orgName:
+          type: string
+        slug:
+          type: string
+        personal:
+          type: boolean
+        role:
+          $ref: "#/components/schemas/OrgRole"
+    UserProfileDto:
+      type: object
+      required: [id, email, displayName, locale, preferredCurrency, organizations]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        locale:
+          type: string
+        preferredCurrency:
+          type: string
+          example: USD
+        defaultOrgId:
+          type: [string, "null"]
+          format: uuid
+        organizations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgMembershipSummaryDto"
+    AuthTokenResponse:
+      type: object
+      required: [accessToken, tokenType, expiresInSeconds, user]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresInSeconds:
+          type: integer
+          format: int64
+          example: 900
+        user:
+          $ref: "#/components/schemas/UserProfileDto"
+
+    # Organization & Project & Key DTOs
+    CreateOrgRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        slug:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+    UpdateOrgRequest:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        version:
+          type: integer
+          format: int64
+    OrgDto:
+      type: object
+      required: [id, name, slug, ownerUserId, tierId, maxConcurrency, personal, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        ownerUserId: { type: string, format: uuid }
+        tierId: { type: string, format: uuid }
+        maxConcurrency: { type: integer }
+        personal: { type: boolean }
+        status: { $ref: "#/components/schemas/OrgStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    OrgMemberDto:
+      type: object
+      required: [memberId, orgId, userId, email, displayName, role, joinedAt]
+      properties:
+        memberId: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { $ref: "#/components/schemas/OrgRole" }
+        joinedAt: { type: string, format: date-time }
+    UpdateOrgMemberRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: "#/components/schemas/OrgRole" }
+    CreateInvitationRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/OrgRole" }
+        projectIds:
+          type: [array, "null"]
+          items: { type: string, format: uuid }
+    InvitationResponseDto:
+      type: object
+      required: [id, orgId, email, role, status, expiresAt, invitationToken]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/OrgRole" }
+        projectIds:
+          type: array
+          items: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/InvitationStatus" }
+        expiresAt: { type: string, format: date-time }
+        invitationToken: { type: string }
+    AcceptInvitationRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+
+    CreateProjectRequest:
+      type: object
+      required: [name, environment]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        environment: { $ref: "#/components/schemas/ProjectEnvironment" }
+        monthlyHardCapMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        monthlySoftCapMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+    UpdateProjectRequest:
+      type: object
+      required: [name, status, version]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        monthlyHardCapMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        monthlySoftCapMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+        status: { $ref: "#/components/schemas/ProjectStatus" }
+        version: { type: integer, format: int64 }
+    ProjectDto:
+      type: object
+      required: [id, orgId, name, environment, zdrDebugEnabled, zdrDebugTtlDays, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        name: { type: string }
+        environment: { $ref: "#/components/schemas/ProjectEnvironment" }
+        monthlyHardCapMicros: { type: [integer, "null"], format: int64 }
+        monthlySoftCapMicros: { type: [integer, "null"], format: int64 }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        rpmLimit: { type: [integer, "null"] }
+        tpmLimit: { type: [integer, "null"] }
+        maxConcurrency: { type: [integer, "null"] }
+        zdrDebugEnabled: { type: boolean }
+        zdrDebugTtlDays: { type: integer }
+        status: { $ref: "#/components/schemas/ProjectStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProjectBudgetDto:
+      type: object
+      required: [projectId, month, usedMicros, heldMicros, state, monthStart, source, observedAt]
+      properties:
+        projectId: { type: string, format: uuid }
+        month: { type: string, example: "2026-11" }
+        hardCapMicros: { type: [integer, "null"], format: int64 }
+        softCapMicros: { type: [integer, "null"], format: int64 }
+        usedMicros: { type: integer, format: int64 }
+        heldMicros: { type: integer, format: int64 }
+        availableMicros: { type: [integer, "null"], format: int64 }
+        state: { type: string, enum: [CONFIRMED, UNVERIFIED] }
+        monthStart: { type: string, format: date-time }
+        source: { type: string, enum: [LIVE, CONFIRMED] }
+        observedAt: { type: string, format: date-time }
+    ReplaceProjectMembersRequest:
+      type: object
+      required: [userIds]
+      properties:
+        userIds:
+          type: array
+          items: { type: string, format: uuid }
+
+    CreateApiKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        ipWhitelist:
+          type: [array, "null"]
+          description: CIDR blocks or exact IPs
+          items: { type: string, example: "203.0.113.0/24" }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+        quotaLimitMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        expiresAt: { type: [string, "null"], format: date-time }
+    UpdateApiKeyRequest:
+      type: object
+      required: [name, status, version]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        ipWhitelist:
+          type: [array, "null"]
+          items: { type: string }
+        rpmLimit: { type: [integer, "null"], minimum: 1 }
+        tpmLimit: { type: [integer, "null"], minimum: 1 }
+        maxConcurrency: { type: [integer, "null"], minimum: 1 }
+        quotaLimitMicros: { type: [integer, "null"], format: int64, minimum: 0 }
+        expiresAt: { type: [string, "null"], format: date-time }
+        status: { $ref: "#/components/schemas/ApiKeyStatus" }
+        version: { type: integer, format: int64 }
+    ApiKeyDto:
+      type: object
+      required: [id, projectId, orgId, name, keyPrefix, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        name: { type: string }
+        keyPrefix: { type: string, example: "sk-ab12cdef" }
+        allowedModels:
+          type: [array, "null"]
+          items: { type: string }
+        ipWhitelist:
+          type: [array, "null"]
+          items: { type: string }
+        rpmLimit: { type: [integer, "null"] }
+        tpmLimit: { type: [integer, "null"] }
+        maxConcurrency: { type: [integer, "null"] }
+        quotaLimitMicros: { type: [integer, "null"], format: int64 }
+        expiresAt: { type: [string, "null"], format: date-time }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        status: { $ref: "#/components/schemas/ApiKeyStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreatedApiKeyDto:
+      type: object
+      required: [apiKey, rawKey]
+      properties:
+        apiKey: { $ref: "#/components/schemas/ApiKeyDto" }
+        rawKey:
+          type: string
+          description: Plaintext API key shown once at creation time
+          example: sk-ab12cdef9876543210zyxwvutsrqponmlkjihgfedcba
+
+    # Catalog & Wallet DTOs
+    ActivePricingDto:
+      type: object
+      required:
+        - billingMode
+        - inputPriceMicros1m
+        - outputPriceMicros1m
+        - cacheReadPriceMicros1m
+        - cacheWritePriceMicros1m
+        - reasoningPriceMicros1m
+        - perCallMicros
+        - effectiveFrom
+      properties:
+        billingMode: { $ref: "#/components/schemas/BillingMode" }
+        inputPriceMicros1m: { type: integer, format: int64 }
+        outputPriceMicros1m: { type: integer, format: int64 }
+        cacheReadPriceMicros1m: { type: integer, format: int64 }
+        cacheWritePriceMicros1m: { type: integer, format: int64 }
+        reasoningPriceMicros1m: { type: integer, format: int64 }
+        perCallMicros: { type: integer, format: int64 }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: [string, "null"], format: date-time }
+    PublicModelCatalogDto:
+      type: object
+      required:
+        - id
+        - modelCode
+        - displayName
+        - capabilityType
+        - nativeProtocol
+        - contextWindow
+        - supportsTools
+        - supportsVision
+        - supportsThinking
+        - supportsPromptCache
+      properties:
+        id: { type: string, format: uuid }
+        modelCode: { type: string, example: claude-sonnet-4-5 }
+        displayName: { type: string }
+        providerBadge: { type: [string, "null"] }
+        capabilityType: { $ref: "#/components/schemas/ModelCapability" }
+        nativeProtocol: { $ref: "#/components/schemas/ProtocolFamily" }
+        contextWindow: { type: integer }
+        maxOutputTokens: { type: [integer, "null"] }
+        supportsTools: { type: boolean }
+        supportsVision: { type: boolean }
+        supportsThinking: { type: boolean }
+        supportsPromptCache: { type: boolean }
+        pricing:
+          oneOf:
+            - $ref: "#/components/schemas/ActivePricingDto"
+            - type: "null"
+    WalletDto:
+      type: object
+      required:
+        - orgId
+        - cashBalanceMicros
+        - bonusBalanceMicros
+        - heldMicros
+        - availableMicros
+        - ledgerConfirmed
+        - totalRechargedMicros
+        - totalBonusGrantedMicros
+        - totalConsumedCashMicros
+        - totalConsumedBonusMicros
+        - version
+        - updatedAt
+      properties:
+        orgId: { type: string, format: uuid }
+        cashBalanceMicros: { type: integer, format: int64 }
+        bonusBalanceMicros: { type: integer, format: int64 }
+        heldMicros: { type: integer, format: int64 }
+        availableMicros: { type: integer, format: int64 }
+        ledgerConfirmed: { type: boolean }
+        totalRechargedMicros: { type: integer, format: int64 }
+        totalBonusGrantedMicros: { type: integer, format: int64 }
+        totalConsumedCashMicros: { type: integer, format: int64 }
+        totalConsumedBonusMicros: { type: integer, format: int64 }
+        lowBalanceThresholdMicros: { type: [integer, "null"], format: int64 }
+        version: { type: integer, format: int64 }
+        updatedAt: { type: string, format: date-time }
+    WalletLedgerDto:
+      type: object
+      required: [id, orgId, ledgerType, cashDeltaMicros, bonusDeltaMicros, packDeltaUnits, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        projectId: { type: [string, "null"], format: uuid }
+        apiKeyId: { type: [string, "null"], format: uuid }
+        ledgerType: { $ref: "#/components/schemas/LedgerType" }
+        cashDeltaMicros: { type: integer, format: int64 }
+        bonusDeltaMicros: { type: integer, format: int64 }
+        packDeltaUnits: { type: integer, format: int64 }
+        cashBalanceAfterMicros: { type: [integer, "null"], format: int64 }
+        bonusBalanceAfterMicros: { type: [integer, "null"], format: int64 }
+        refRequestId: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    EphemeralTokenRequest:
+      type: object
+      required: [projectId]
+      properties:
+        projectId: { type: string, format: uuid }
+    EphemeralTokenResponse:
+      type: object
+      required: [token, ttlSeconds, expiresAt]
+      properties:
+        token: { type: string, example: sk-hl-sb-7f9a1c2d3e4f5a6b }
+        ttlSeconds: { type: integer, example: 300 }
+        expiresAt: { type: string, format: date-time }
+
+    # Payments & Vouchers DTOs
+    CreatePaymentOrderRequest:
+      type: object
+      required: [orderType, paymentChannel]
+      properties:
+        orderType: { $ref: "#/components/schemas/OrderType" }
+        paymentChannel: { $ref: "#/components/schemas/PaymentChannel" }
+        payAmountMinor:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+          description: Required for `WALLET_TOPUP`, expressed in minor currency units (e.g. cents)
+        packSkuId:
+          type: [string, "null"]
+          format: uuid
+          description: Required for `RESOURCE_PACK_PURCHASE`
+    PaymentInstructionDto:
+      type: object
+      properties:
+        action: { type: [string, "null"] }
+        method: { type: [string, "null"] }
+        fields:
+          type: [object, "null"]
+          additionalProperties: { type: string }
+        redirectUrl: { type: [string, "null"], format: uri }
+        codeUrl: { type: [string, "null"] }
+    PaymentOrderDto:
+      type: object
+      required: [id, orderNo, orderType, paymentChannel, payCurrency, payAmountMinor, fxRate, creditMicros, paymentStatus, fulfillmentStatus, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        orderNo: { type: string }
+        orderType: { $ref: "#/components/schemas/OrderType" }
+        paymentChannel: { $ref: "#/components/schemas/PaymentChannel" }
+        payCurrency: { type: string, example: USD }
+        payAmountMinor: { type: integer, format: int64 }
+        fxRate: { type: string, example: "1.000000" }
+        creditMicros: { type: integer, format: int64 }
+        packSpec: { type: [object, "null"], additionalProperties: true }
+        paymentStatus: { $ref: "#/components/schemas/OrderStatus" }
+        fulfillmentStatus: { type: string, enum: [NONE, PENDING, APPLIED] }
+        fulfillmentEventId: { type: [string, "null"], format: uuid }
+        instruction:
+          oneOf:
+            - $ref: "#/components/schemas/PaymentInstructionDto"
+            - type: "null"
+        paidAt: { type: [string, "null"], format: date-time }
+        expiresAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+    PackSkuDto:
+      type: object
+      required: [id, code, name, unitType, applicableModels, totalUnits, priceMicros, validDays, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        unitType: { $ref: "#/components/schemas/PackUnitType" }
+        applicableModels:
+          type: array
+          items: { type: string }
+        totalUnits: { type: integer, format: int64 }
+        priceMicros: { type: integer, format: int64 }
+        validDays: { type: integer }
+        status: { $ref: "#/components/schemas/PackSkuStatus" }
+        version: { type: integer, format: int64 }
+    RedeemVoucherRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, example: HL-ABCD-EFGH-IJKL }
+    RedemptionDto:
+      type: object
+      required: [grantEventId, amountMicros]
+      properties:
+        grantEventId: { type: string, format: uuid }
+        amountMicros: { type: integer, format: int64 }
+        applicableModels:
+          type: [array, "null"]
+          items: { type: string }
+        expiresAt: { type: [string, "null"], format: date-time }
+
+    # Usage DTOs
+    UsageRow:
+      type: object
+      required:
+        - dimension
+        - requests
+        - successes
+        - promptTokens
+        - cachedReadTokens
+        - completionTokens
+        - reasoningTokens
+        - costMicros
+        - cashMicros
+        - bonusMicros
+        - upstreamCostMicros
+        - packUnits
+        - ttftP50Ms
+        - ttftP90Ms
+        - ttftP99Ms
+        - durationP50Ms
+        - durationP90Ms
+        - durationP99Ms
+      properties:
+        dimension: { type: string }
+        requests: { type: integer, format: int64 }
+        successes: { type: integer, format: int64 }
+        promptTokens: { type: integer, format: int64 }
+        cachedReadTokens: { type: integer, format: int64 }
+        completionTokens: { type: integer, format: int64 }
+        reasoningTokens: { type: integer, format: int64 }
+        costMicros: { type: integer, format: int64 }
+        cashMicros: { type: integer, format: int64 }
+        bonusMicros: { type: integer, format: int64 }
+        upstreamCostMicros: { type: integer, format: int64 }
+        packUnits: { type: integer, format: int64 }
+        ttftP50Ms: { type: number, format: double }
+        ttftP90Ms: { type: number, format: double }
+        ttftP99Ms: { type: number, format: double }
+        durationP50Ms: { type: number, format: double }
+        durationP90Ms: { type: number, format: double }
+        durationP99Ms: { type: number, format: double }
+    UsageTotals:
+      type: object
+      required: [requests, successes, promptTokens, cachedReadTokens, completionTokens, reasoningTokens, costMicros, cashMicros, bonusMicros, upstreamCostMicros, packUnits]
+      properties:
+        requests: { type: integer, format: int64 }
+        successes: { type: integer, format: int64 }
+        promptTokens: { type: integer, format: int64 }
+        cachedReadTokens: { type: integer, format: int64 }
+        completionTokens: { type: integer, format: int64 }
+        reasoningTokens: { type: integer, format: int64 }
+        costMicros: { type: integer, format: int64 }
+        cashMicros: { type: integer, format: int64 }
+        bonusMicros: { type: integer, format: int64 }
+        upstreamCostMicros: { type: integer, format: int64 }
+        packUnits: { type: integer, format: int64 }
+    UsageReport:
+      type: object
+      required: [from, to, groupBy, rows, totals]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { type: string, enum: [PROJECT, API_KEY, MODEL, CHANNEL, HOUR] }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/UsageRow" }
+        totals: { $ref: "#/components/schemas/UsageTotals" }
+
+    # Alert DTOs
+    CreateEndpointRequest:
+      type: object
+      required: [channelType, target]
+      properties:
+        channelType: { $ref: "#/components/schemas/NotificationChannelType" }
+        target:
+          type: string
+          maxLength: 512
+          description: Email address or HTTPS webhook URL (SSRF-checked, no redirects)
+    UpdateEndpointRequest:
+      type: object
+      required: [status, version]
+      properties:
+        status: { $ref: "#/components/schemas/ToggleStatus" }
+        version: { type: integer, format: int64 }
+    EndpointDto:
+      type: object
+      required: [id, orgId, channelType, target, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        channelType: { $ref: "#/components/schemas/NotificationChannelType" }
+        target: { type: string }
+        status: { $ref: "#/components/schemas/ToggleStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreatedEndpointDto:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint: { $ref: "#/components/schemas/EndpointDto" }
+        signingSecret:
+          type: [string, "null"]
+          description: HMAC webhook signing secret shown once at creation (`null` for `EMAIL`)
+    CreateAlertRuleRequest:
+      type: object
+      required: [alertType, thresholdMicros, endpointIds]
+      properties:
+        alertType: { $ref: "#/components/schemas/AlertType" }
+        projectId:
+          type: [string, "null"]
+          format: uuid
+          description: Required for `PROJECT_SOFT_CAP` and `PROJECT_HARD_CAP`
+        thresholdMicros: { type: integer, format: int64, minimum: 0 }
+        endpointIds:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+        cooldownMinutes: { type: [integer, "null"], minimum: 1, maximum: 1440 }
+    AlertRuleDto:
+      type: object
+      required: [id, orgId, alertType, thresholdMicros, endpointIds, cooldownMinutes, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        projectId: { type: [string, "null"], format: uuid }
+        alertType: { $ref: "#/components/schemas/AlertType" }
+        thresholdMicros: { type: integer, format: int64 }
+        endpointIds:
+          type: array
+          items: { type: string, format: uuid }
+        cooldownMinutes: { type: integer }
+        lastTriggeredAt: { type: [string, "null"], format: date-time }
+        status: { $ref: "#/components/schemas/ToggleStatus" }
+        version: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    # Paginated Wrappers
+    PageResponseProjectDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ProjectDto" }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponseApiKeyDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ApiKeyDto" }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponseWalletLedgerDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/WalletLedgerDto" }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }
+    PageResponsePaymentOrderDto:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PaymentOrderDto" }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer, format: int64 }

@@ -1,0 +1,721 @@
+openapi: 3.1.0
+info:
+  title: HyperLLM Gateway Data Plane API
+  version: 1.0.0
+  summary: Multi-protocol commercial LLM API gateway data plane
+  description: |
+    High-throughput reactive data plane (`backend/gateway`, Spring WebFlux + Netty) exposing
+    OpenAI-compatible and Anthropic-compatible LLM inference endpoints backed by:
+
+    - **Zero-Overhead Homomorphic Passthrough** (with automatic `stream_options.include_usage`
+      injection/stripping on OpenAI SSE and native event inspection on Anthropic SSE)
+    - **Four-Tier Distributed Rate Limiting** (API Key, Project, Organization, Upstream Channel)
+    - **Project Monthly Soft/Hard Budget Enforcement**
+    - **Redis Authoritative Pre-hold & Streaming Settle** (`Resource Pack -> Bonus Grant -> Cash`)
+    - **Priority-Weighted Multi-Channel Routing & Pre-First-Byte Automatic Failover Retry**
+    - **Zero Data Retention (ZDR) by Default**
+
+    ### Authentication
+    - OpenAI routes accept `Authorization: Bearer sk-...` (or Playground ephemeral token `sk-hl-sb-...`).
+    - Anthropic routes accept `x-api-key: sk-...` or `Authorization: Bearer sk-...`.
+
+    ### Error Envelopes
+    Gateway pre-stream errors strictly conform to the caller's native protocol format
+    (`OpenAiErrorEnvelope` on `/v1/chat/completions` and `/v1/models`, `AnthropicErrorEnvelope`
+    on `/v1/messages`). Backpressure rejections (`503 LEDGER_BACKLOG`, `OUTBOX_UNAVAILABLE`,
+    `PROJECT_BUDGET_UNAVAILABLE`) include a `Retry-After` response header.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local Gateway instance
+  - url: https://api.hyperllm.example.com
+    description: Production Gateway endpoint (example)
+
+tags:
+  - name: OpenAI Compatible
+    description: OpenAI-compatible inference and model listing endpoints
+  - name: Anthropic Compatible
+    description: Anthropic native Messages API endpoints
+
+security:
+  - apiKeyBearer: []
+  - anthropicApiKey: []
+
+paths:
+  /v1/models:
+    get:
+      tags:
+        - OpenAI Compatible
+      operationId: gatewayListModels
+      summary: List models authorized for the current API key or sandbox token
+      description: |
+        Returns all active public virtual models permitted by both the caller's Project
+        `allowedModels` allowlist and API Key `allowedModels` allowlist.
+      responses:
+        "200":
+          description: OpenAI-compatible model list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiModelListResponse"
+        "401":
+          $ref: "#/components/responses/OpenAiUnauthorized"
+        "403":
+          $ref: "#/components/responses/OpenAiForbidden"
+
+  /v1/chat/completions:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: gatewayChatCompletions
+      summary: Create a chat completion (streaming or non-streaming)
+      description: |
+        Proxies OpenAI Chat Completions requests to a healthy upstream channel selected by the
+        virtual model's routing policy (`priority_tier` + `weight`).
+
+        - When `stream: true`, the gateway automatically injects
+          `stream_options: { "include_usage": true }` upstream if absent so billing settles on
+          authoritative token counts, and strips the synthetic usage-only final chunk if the client
+          did not request it.
+        - Before the first upstream byte is delivered to the client, transient upstream errors
+          (`429`, `5xx`, timeouts) trigger automatic failover retries against alternate healthy
+          channels (up to 2 retries).
+        - If the upstream omits usage or disconnects mid-stream, `jtokkit` token estimation is used
+          as a deterministic fallback for settlement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenAiChatCompletionRequest"
+            examples:
+              nonStreaming:
+                summary: Standard non-streaming request
+                value:
+                  model: gpt-4o-mini
+                  messages:
+                    - role: system
+                      content: You are a concise engineering assistant.
+                    - role: user
+                      content: Explain micro-USD accounting in two sentences.
+                  temperature: 0.2
+                  max_tokens: 256
+                  stream: false
+              streaming:
+                summary: Streaming SSE request with usage reporting
+                value:
+                  model: gpt-4o-mini
+                  messages:
+                    - role: user
+                      content: Write a haiku about distributed ledgers.
+                  stream: true
+                  stream_options:
+                    include_usage: true
+      responses:
+        "200":
+          description: |
+            Completion payload (`application/json` when `stream=false`) or Server-Sent Events stream
+            (`text/event-stream` when `stream=true`, terminating with `data: [DONE]`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiChatCompletionResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: 'OpenAI SSE frames (`data: {"id":...,"choices":[...]}\n\n` ... `data: [DONE]\n\n`)'
+        "400":
+          $ref: "#/components/responses/OpenAiBadRequest"
+        "401":
+          $ref: "#/components/responses/OpenAiUnauthorized"
+        "402":
+          $ref: "#/components/responses/OpenAiInsufficientBalance"
+        "403":
+          $ref: "#/components/responses/OpenAiForbidden"
+        "404":
+          $ref: "#/components/responses/OpenAiModelNotFound"
+        "429":
+          $ref: "#/components/responses/OpenAiRateOrBudgetLimited"
+        "502":
+          $ref: "#/components/responses/OpenAiUpstreamError"
+        "503":
+          $ref: "#/components/responses/OpenAiServiceUnavailable"
+
+  /v1/messages:
+    post:
+      tags:
+        - Anthropic Compatible
+      operationId: gatewayAnthropicMessages
+      summary: Create an Anthropic message (streaming or non-streaming)
+      description: |
+        Native Anthropic Messages API endpoint supporting extended thinking blocks, tool use,
+        prompt caching (`cache_control`), and native Anthropic SSE events
+        (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`,
+        `message_delta`, `message_stop`).
+
+        Accepts either `x-api-key` or `Authorization: Bearer` authentication headers and optional
+        `anthropic-version` / `anthropic-beta` pass-through headers.
+      parameters:
+        - name: anthropic-version
+          in: header
+          required: false
+          description: Anthropic API version header forwarded to upstream (defaults to `2023-06-01` if omitted).
+          schema:
+            type: string
+            example: "2023-06-01"
+        - name: anthropic-beta
+          in: header
+          required: false
+          description: Optional Anthropic beta feature flags forwarded upstream.
+          schema:
+            type: string
+            example: prompt-caching-2024-07-31
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessageRequest"
+            examples:
+              claudeBasic:
+                summary: Basic Anthropic Messages request
+                value:
+                  model: claude-sonnet-4-5
+                  max_tokens: 1024
+                  system: You are a senior Java 21 architect.
+                  messages:
+                    - role: user
+                      content: Summarize how Redis sliding TTL prevents half-built hash keys.
+                  stream: false
+              claudeStreaming:
+                summary: Streaming Anthropic Messages request
+                value:
+                  model: claude-sonnet-4-5
+                  max_tokens: 2048
+                  messages:
+                    - role: user
+                      content: Walk through a three-tier billing allocation example.
+                  stream: true
+      responses:
+        "200":
+          description: |
+            Anthropic Message JSON (`application/json` when `stream=false`) or native Anthropic SSE
+            stream (`text/event-stream` when `stream=true`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicMessageResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: 'Native Anthropic SSE stream (`event: message_start`, `event: content_block_delta`, `event: message_delta`, `event: message_stop`).'
+        "400":
+          $ref: "#/components/responses/AnthropicBadRequest"
+        "401":
+          $ref: "#/components/responses/AnthropicUnauthorized"
+        "402":
+          $ref: "#/components/responses/AnthropicInsufficientBalance"
+        "403":
+          $ref: "#/components/responses/AnthropicForbidden"
+        "404":
+          $ref: "#/components/responses/AnthropicModelNotFound"
+        "429":
+          $ref: "#/components/responses/AnthropicRateOrBudgetLimited"
+        "502":
+          $ref: "#/components/responses/AnthropicUpstreamError"
+        "503":
+          $ref: "#/components/responses/AnthropicServiceUnavailable"
+
+components:
+  securitySchemes:
+    apiKeyBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+      description: Customer API key (`sk-...`) or Console Playground ephemeral sandbox token (`sk-hl-sb-...`).
+    anthropicApiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Anthropic-style API key header accepting customer API key (`sk-...`) or sandbox token (`sk-hl-sb-...`).
+
+  responses:
+    OpenAiBadRequest:
+      description: Malformed or invalid request payload (`PROTOCOL_INVALID_REQUEST`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiUnauthorized:
+      description: Missing, invalid, or expired API key / sandbox token (`AUTH_INVALID_KEY`, `KEY_EXPIRED`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiInsufficientBalance:
+      description: Insufficient cash, bonus, and resource pack balance (`BILLING_INSUFFICIENT_BALANCE`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiForbidden:
+      description: Key revoked, IP blocked, organization suspended, quota exceeded, or model not allowed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiModelNotFound:
+      description: Requested virtual model does not exist or is inactive (`MODEL_NOT_FOUND`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiRateOrBudgetLimited:
+      description: Rate limit, concurrency limit, channel capacity, or project monthly hard budget exceeded (`RATE_LIMITED`, `CHANNEL_CAPACITY_EXCEEDED`, `PROJECT_BUDGET_EXCEEDED`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiUpstreamError:
+      description: Upstream provider failure after retry exhaustion (`UPSTREAM_ERROR`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+    OpenAiServiceUnavailable:
+      description: |
+        No healthy channel, missing active pricing rule, or admission backpressure gate active
+        (`CHANNEL_UNAVAILABLE`, `MODEL_PRICING_MISSING`, `LEDGER_BACKLOG`, `OUTBOX_UNAVAILABLE`,
+        `PROJECT_BUDGET_UNAVAILABLE`). Retryable admission gates include `Retry-After`.
+      headers:
+        Retry-After:
+          description: Suggested wait duration in seconds before retrying
+          schema:
+            type: integer
+            example: 5
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAiErrorEnvelope"
+
+    AnthropicBadRequest:
+      description: Malformed or invalid request payload
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicUnauthorized:
+      description: Missing, invalid, or expired API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicInsufficientBalance:
+      description: Insufficient wallet balance or entitlements (`billing_error`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicForbidden:
+      description: Permission denied (`permission_error`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicModelNotFound:
+      description: Virtual model not found (`not_found_error`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicRateOrBudgetLimited:
+      description: Rate limit, channel capacity, or monthly project budget exceeded (`rate_limit_error`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicUpstreamError:
+      description: Upstream provider error (`api_error`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+    AnthropicServiceUnavailable:
+      description: Channel unavailable, missing pricing rule, or backpressure admission gate active
+      headers:
+        Retry-After:
+          description: Suggested wait duration in seconds before retrying
+          schema:
+            type: integer
+            example: 5
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorEnvelope"
+
+  schemas:
+    OpenAiModelObject:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - owned_by
+        - context_window
+      properties:
+        id:
+          type: string
+          description: Virtual model code
+          example: gpt-4o-mini
+        object:
+          type: string
+          const: model
+        created:
+          type: integer
+          format: int64
+          description: Unix epoch seconds when the virtual model was created
+          example: 1732400000
+        owned_by:
+          type: string
+          description: Provider badge or `hyperllm`
+          example: openai
+        context_window:
+          type: integer
+          description: Maximum context window size in tokens
+          example: 128000
+
+    OpenAiModelListResponse:
+      type: object
+      required:
+        - object
+        - data
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAiModelObject"
+
+    OpenAiChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, developer, user, assistant, tool]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+            - type: "null"
+        name:
+          type: string
+        tool_call_id:
+          type: string
+        tool_calls:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    OpenAiStreamOptions:
+      type: object
+      properties:
+        include_usage:
+          type: boolean
+          description: Include a final usage chunk in the SSE stream
+
+    OpenAiChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      additionalProperties: true
+      properties:
+        model:
+          type: string
+          description: Virtual model code registered in HyperLLM
+          example: gpt-4o-mini
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/OpenAiChatMessage"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Maximum output tokens (used in Pre-hold worst-case cost estimation)
+        max_completion_tokens:
+          type: integer
+          minimum: 1
+        stream:
+          type: boolean
+          default: false
+        stream_options:
+          $ref: "#/components/schemas/OpenAiStreamOptions"
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+        response_format:
+          type: object
+          additionalProperties: true
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+
+    OpenAiUsage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+          example: 42
+        completion_tokens:
+          type: integer
+          example: 128
+        total_tokens:
+          type: integer
+          example: 170
+        prompt_tokens_details:
+          type: object
+          properties:
+            cached_tokens:
+              type: integer
+              example: 0
+        completion_tokens_details:
+          type: object
+          properties:
+            reasoning_tokens:
+              type: integer
+              example: 0
+
+    OpenAiChatCompletionResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: chatcmpl-9f8e7d6c5b4a
+        object:
+          type: string
+          example: chat.completion
+        created:
+          type: integer
+          format: int64
+        model:
+          type: string
+          example: gpt-4o-mini
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: "#/components/schemas/OpenAiChatMessage"
+              finish_reason:
+                type: [string, "null"]
+                example: stop
+        usage:
+          $ref: "#/components/schemas/OpenAiUsage"
+
+    AnthropicMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+
+    AnthropicMessageRequest:
+      type: object
+      required:
+        - model
+        - max_tokens
+        - messages
+      additionalProperties: true
+      properties:
+        model:
+          type: string
+          description: Virtual model code registered in HyperLLM
+          example: claude-sonnet-4-5
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Maximum tokens to generate (used in Pre-hold estimation)
+          example: 1024
+        system:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AnthropicMessage"
+        stream:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 1
+        top_p:
+          type: number
+        top_k:
+          type: integer
+        stop_sequences:
+          type: array
+          items:
+            type: string
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        thinking:
+          type: object
+          description: Extended thinking configuration (passed through natively)
+          additionalProperties: true
+
+    AnthropicUsage:
+      type: object
+      properties:
+        input_tokens:
+          type: integer
+          example: 54
+        output_tokens:
+          type: integer
+          example: 210
+        cache_creation_input_tokens:
+          type: integer
+          example: 0
+        cache_read_input_tokens:
+          type: integer
+          example: 0
+
+    AnthropicMessageResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: msg_01XFDUDYJgAACzvnptvVoYEL
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        model:
+          type: string
+          example: claude-sonnet-4-5
+        content:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        stop_reason:
+          type: [string, "null"]
+          example: end_turn
+        usage:
+          $ref: "#/components/schemas/AnthropicUsage"
+
+    OpenAiErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - type
+            - code
+          properties:
+            message:
+              type: string
+              example: Insufficient wallet balance
+            type:
+              type: string
+              enum:
+                - insufficient_quota
+                - rate_limit_error
+                - authentication_error
+                - invalid_request_error
+                - server_error
+            param:
+              type: [string, "null"]
+            code:
+              type: string
+              description: HyperLLM `ErrorCode` identifier
+              example: BILLING_INSUFFICIENT_BALANCE
+
+    AnthropicErrorEnvelope:
+      type: object
+      required:
+        - type
+        - error
+      properties:
+        type:
+          type: string
+          const: error
+        error:
+          type: object
+          required:
+            - type
+            - message
+          properties:
+            type:
+              type: string
+              enum:
+                - billing_error
+                - rate_limit_error
+                - authentication_error
+                - permission_error
+                - not_found_error
+                - invalid_request_error
+                - api_error
+            message:
+              type: string
+              example: Insufficient wallet balance
