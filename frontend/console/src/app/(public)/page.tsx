@@ -34,12 +34,13 @@ import {
   formatPerMillionUsd,
 } from "@/lib/format/micro-usd";
 import { PROTOCOL_LABEL } from "@/lib/format/labels";
+import { GATEWAY_PUBLIC_BASE_URL } from "@/lib/config";
 
 const SNIPPETS = {
   openai: `import OpenAI from "openai";
 
 const client = new OpenAI({
-  baseURL: "https://api.hyperllm.dev/v1",
+  baseURL: "${GATEWAY_PUBLIC_BASE_URL}/v1",
   apiKey: process.env.HYPERLLM_API_KEY,
 });
 
@@ -48,10 +49,22 @@ const res = await client.chat.completions.create({
   messages: [{ role: "user", content: "你好" }],
   stream: true,
 });`,
+  responses: `import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "${GATEWAY_PUBLIC_BASE_URL}/v1",
+  apiKey: process.env.HYPERLLM_API_KEY,
+});
+
+const res = await client.responses.create({
+  model: "claude-sonnet-4-5",
+  input: "用三句话总结分布式事务 Outbox 模式",
+  stream: true,
+});`,
   anthropic: `import Anthropic from "@anthropic-ai/sdk";
 
 const client = new Anthropic({
-  baseURL: "https://api.hyperllm.dev",
+  baseURL: "${GATEWAY_PUBLIC_BASE_URL}",
   apiKey: process.env.HYPERLLM_API_KEY,
 });
 
@@ -60,13 +73,11 @@ const msg = await client.messages.create({
   max_tokens: 1024,
   messages: [{ role: "user", content: "你好" }],
 });`,
-  curl: `curl https://api.hyperllm.dev/v1/chat/completions \\
-  -H "Authorization: Bearer $HYPERLLM_API_KEY" \\
+  gemini: `curl "${GATEWAY_PUBLIC_BASE_URL}/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \\
+  -H "x-goog-api-key: $HYPERLLM_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "claude-sonnet-4-5",
-    "messages": [{"role": "user", "content": "你好"}],
-    "stream": true
+    "contents": [{"role": "user", "parts": [{"text": "你好"}]}]
   }'`,
 } as const;
 
@@ -96,7 +107,7 @@ export default function LandingPage() {
         <div className="flex flex-col gap-5 lg:col-span-6">
           <Badge variant="secondary" className="w-fit gap-1.5 px-2.5 py-1">
             <Sparkles className="size-3" />
-            <span>OpenAI · Anthropic 原生兼容</span>
+            <span>OpenAI · Responses · Anthropic · Gemini 四协议互通</span>
           </Badge>
 
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
@@ -104,7 +115,7 @@ export default function LandingPage() {
           </h1>
 
           <p className="max-w-lg text-sm leading-relaxed text-muted-foreground sm:text-base">
-            同构零开销透传、微美元级实时预占与多渠道容灾重试，默认零数据留存。
+            同构零开销透传、四协议双向实时转译、微美元级预占与多渠道容灾重试，默认零数据留存。
           </p>
 
           <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -126,27 +137,33 @@ export default function LandingPage() {
             <div className="flex items-center justify-between border-b border-border bg-muted/40 px-3 py-2">
               <TabsList className="h-7 bg-transparent p-0">
                 <TabsTrigger value="openai" className="px-2.5 text-xs">
-                  OpenAI SDK
+                  Chat
+                </TabsTrigger>
+                <TabsTrigger value="responses" className="px-2.5 text-xs">
+                  Responses
                 </TabsTrigger>
                 <TabsTrigger value="anthropic" className="px-2.5 text-xs">
-                  Anthropic SDK
+                  Anthropic
                 </TabsTrigger>
-                <TabsTrigger value="curl" className="px-2.5 text-xs">
-                  cURL
+                <TabsTrigger value="gemini" className="px-2.5 text-xs">
+                  Gemini
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="openai" className="flex-none">
                 <CopyButton value={SNIPPETS.openai} label="复制" />
               </TabsContent>
+              <TabsContent value="responses" className="flex-none">
+                <CopyButton value={SNIPPETS.responses} label="复制" />
+              </TabsContent>
               <TabsContent value="anthropic" className="flex-none">
                 <CopyButton value={SNIPPETS.anthropic} label="复制" />
               </TabsContent>
-              <TabsContent value="curl" className="flex-none">
-                <CopyButton value={SNIPPETS.curl} label="复制" />
+              <TabsContent value="gemini" className="flex-none">
+                <CopyButton value={SNIPPETS.gemini} label="复制" />
               </TabsContent>
             </div>
 
-            {(["openai", "anthropic", "curl"] as const).map((key) => (
+            {(["openai", "responses", "anthropic", "gemini"] as const).map((key) => (
               <TabsContent key={key} value={key} className="m-0">
                 <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed text-foreground">
                   <code>{SNIPPETS[key]}</code>
@@ -284,9 +301,9 @@ export default function LandingPage() {
       <section className="squircle-md grid divide-y divide-border overflow-hidden rounded-xl border border-border bg-card sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         <div className="flex flex-col gap-2 p-5">
           <Zap className="size-4 text-foreground" />
-          <h3 className="text-sm font-medium">同构零开销透传</h3>
+          <h3 className="text-sm font-medium">同构优先 · 四协议双向转译</h3>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            原生支持 OpenAI 与 Anthropic 流式协议，首字节前故障自动切换备用渠道。
+            原生支持 OpenAI Chat / Responses、Anthropic 与 Gemini 协议，首字节前可跨协议容灾切换备用渠道。
           </p>
         </div>
         <div className="flex flex-col gap-2 p-5">

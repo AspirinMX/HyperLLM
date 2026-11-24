@@ -74,6 +74,7 @@ type CapabilityFilter = "tools" | "vision" | "thinking" | "cache";
 const COST_CHART_CONFIG: ChartConfig = {
   input: { label: "常规输入", color: "var(--chart-1)" },
   cacheRead: { label: "缓存读取", color: "var(--chart-2)" },
+  cacheWrite: { label: "缓存写入", color: "var(--chart-5)" },
   output: { label: "输出", color: "var(--chart-3)" },
   reasoning: { label: "思考链", color: "var(--chart-4)" },
 };
@@ -96,6 +97,7 @@ export default function ModelsPage() {
   const [calcModelCode, setCalcModelCode] = useState<string>("");
   const [inputK, setInputK] = useState(50);
   const [cacheK, setCacheK] = useState(20);
+  const [cacheWriteK, setCacheWriteK] = useState(0);
   const [outputK, setOutputK] = useState(10);
   const [reasoningK, setReasoningK] = useState(5);
 
@@ -145,6 +147,7 @@ export default function ModelsPage() {
       return {
         inputMicros: 0,
         cacheMicros: 0,
+        cacheWriteMicros: 0,
         outputMicros: 0,
         reasoningMicros: 0,
         totalMicros: 0,
@@ -153,6 +156,10 @@ export default function ModelsPage() {
     }
     const inputMicros = ceilTokenCostMicros(inputK * 1000, p.inputPriceMicros1m);
     const cacheMicros = ceilTokenCostMicros(cacheK * 1000, p.cacheReadPriceMicros1m);
+    const cacheWriteMicros = ceilTokenCostMicros(
+      cacheWriteK * 1000,
+      p.cacheWritePriceMicros1m,
+    );
     const outputMicros = ceilTokenCostMicros(outputK * 1000, p.outputPriceMicros1m);
     const reasoningMicros = ceilTokenCostMicros(
       reasoningK * 1000,
@@ -163,12 +170,18 @@ export default function ModelsPage() {
     return {
       inputMicros,
       cacheMicros,
+      cacheWriteMicros,
       outputMicros,
       reasoningMicros,
-      totalMicros: inputMicros + cacheMicros + outputMicros + reasoningMicros,
+      totalMicros:
+        inputMicros +
+        cacheMicros +
+        cacheWriteMicros +
+        outputMicros +
+        reasoningMicros,
       savedMicros,
     };
-  }, [selectedModel, inputK, cacheK, outputK, reasoningK]);
+  }, [selectedModel, inputK, cacheK, cacheWriteK, outputK, reasoningK]);
 
   const chartData = useMemo(
     () => [
@@ -176,6 +189,7 @@ export default function ModelsPage() {
         name: "成本构成",
         input: estimate.inputMicros / 1_000_000,
         cacheRead: estimate.cacheMicros / 1_000_000,
+        cacheWrite: estimate.cacheWriteMicros / 1_000_000,
         output: estimate.outputMicros / 1_000_000,
         reasoning: estimate.reasoningMicros / 1_000_000,
       },
@@ -234,6 +248,7 @@ export default function ModelsPage() {
             <TabsTrigger value="ALL">全部</TabsTrigger>
             <TabsTrigger value="OPENAI">OpenAI</TabsTrigger>
             <TabsTrigger value="ANTHROPIC">Anthropic</TabsTrigger>
+            <TabsTrigger value="GEMINI">Gemini</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -527,6 +542,22 @@ export default function ModelsPage() {
 
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">缓存创建写入 Token</span>
+                  <span className="font-mono tabular-nums">{cacheWriteK}K</span>
+                </div>
+                <Slider
+                  value={[cacheWriteK]}
+                  min={0}
+                  max={200}
+                  step={5}
+                  onValueChange={(v) =>
+                    setCacheWriteK(Array.isArray(v) ? v[0] : v)
+                  }
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">输出 Token</span>
                   <span className="font-mono tabular-nums">{outputK}K</span>
                 </div>
@@ -590,6 +621,7 @@ export default function ModelsPage() {
                   />
                   <Bar dataKey="input" stackId="a" fill="var(--color-input)" radius={[4, 0, 0, 4]} />
                   <Bar dataKey="cacheRead" stackId="a" fill="var(--color-cacheRead)" />
+                  <Bar dataKey="cacheWrite" stackId="a" fill="var(--color-cacheWrite)" />
                   <Bar dataKey="output" stackId="a" fill="var(--color-output)" />
                   <Bar dataKey="reasoning" stackId="a" fill="var(--color-reasoning)" radius={[0, 4, 4, 0]} />
                 </BarChart>
@@ -612,6 +644,15 @@ export default function ModelsPage() {
                   </span>
                   <span className="font-mono tabular-nums">
                     {formatMicroUsd(estimate.cacheMicros)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between rounded-lg bg-muted/45 px-2.5 py-1.5">
+                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                    <span className="size-2 rounded-full bg-[var(--chart-5)]" />
+                    缓存写
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    {formatMicroUsd(estimate.cacheWriteMicros)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between rounded-lg bg-muted/45 px-2.5 py-1.5">
