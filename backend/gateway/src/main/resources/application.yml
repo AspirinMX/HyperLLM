@@ -6,6 +6,8 @@ spring:
     name: hyperllm-gateway
   main:
     web-application-type: reactive
+  codec:
+    max-in-memory-size: ${GATEWAY_MAX_IN_MEMORY_SIZE:16MB}
   flyway:
     enabled: false
   datasource:

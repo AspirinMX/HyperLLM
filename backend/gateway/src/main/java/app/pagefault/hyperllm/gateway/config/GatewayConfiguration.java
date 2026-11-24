@@ -6,6 +6,10 @@ import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.channel.epoll.Epoll;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,6 +23,26 @@ import java.util.concurrent.Executors;
 @Configuration
 @EnableConfigurationProperties(GatewayProperties.class)
 public class GatewayConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(GatewayConfiguration.class);
+
+    @Bean
+    public ApplicationRunner gatewayRuntimeDiagnostics(GatewayProperties properties) {
+        return args -> {
+            boolean epollAvailable = Epoll.isAvailable();
+            Throwable cause = epollAvailable ? null : Epoll.unavailabilityCause();
+            log.info(
+                    "HyperLLM Gateway runtime: os={} arch={} cpus={} maxHeapMB={} nettyEpoll={} epollCause={} upstreamMaxConnPerProvider={}",
+                    System.getProperty("os.name"),
+                    System.getProperty("os.arch"),
+                    Runtime.getRuntime().availableProcessors(),
+                    Runtime.getRuntime().maxMemory() / (1024 * 1024),
+                    epollAvailable,
+                    cause != null ? cause.getClass().getSimpleName() + ": " + cause.getMessage() : "none",
+                    properties.getUpstream().getMaxConnectionsPerProvider()
+            );
+        };
+    }
 
     @Bean
     public AesGcmCipher aesGcmCipher(GatewayProperties properties) {
