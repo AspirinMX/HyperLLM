@@ -47,7 +47,7 @@
 
 ### 🔀 多协议原生兼容与 `Canonical IR` 双向转译
 - **主流协议一站兼容**：完整承接 **OpenAI**（Chat、Responses、Embeddings、Images、Audio TTS/STT）、**Anthropic 原生 Messages**（Extended Thinking、Tool Use、Prompt Caching、`count_tokens` —— 原生支持 Claude Code、Cursor、Cline）、**Google Gemini** 与 **Cohere/Jina Rerank**。
-- **同构零损耗透传**：客户端与上游协议一致时直接流式透传字节，自动按需注入并无痕剥离 OpenAI `stream_options.include_usage` 以捕获权威 Usage，并在非标上游或流中断时由内置 `jtokkit` 估算兜底。
+- **同构零损耗透传**：客户端与上游协议一致时直接流式透传字节，自动按需注入并无痕剥离 OpenAI `stream_options.include_usage` 以捕获权威 Usage，并在非标上游或流中断时按 UTF-8 字节数和 Unicode 码点数估算 token。
 - **异构高保真转译**：经由统一 `Canonical IR` 管道，将 OpenAI 请求路由至 Anthropic/Gemini，或将 Claude Code / Anthropic 请求无缝转译至 OpenAI、DeepSeek 及自建 vLLM/SGLang 集群。
 
 ### 🎯 智能多策略路由、容灾重试与 Prompt Cache 粘性亲和
@@ -250,7 +250,7 @@ curl http://localhost:8080/v1/messages \
 | :--- | :---: | :--- |
 | `backend/common` | — | `micro-USD` 整型计算、`UuidV7`、`AesGcmCipher`、`HmacSha256`、`ApiKeyGenerator`、`ErrorCode`、跨服务 Kafka/Redis 契约与 12 个原子 Lua 脚本 |
 | `backend/domain` | — | Flyway `V1`–`V8` 迁移脚本、按月分区账本/审计表、`-Pjooq` 生成 SQL 层、35 组 jOOQ 仓储、`PricingResolver` 与 `EntitlementAllocator` |
-| `backend/protocol` | — | `Canonical IR`、OpenAI/Anthropic 协议适配、流式 SSE Usage 提取、`jtokkit` 估算兜底、原生协议错误格式化 |
+| `backend/protocol` | — | `Canonical IR`、OpenAI/Anthropic 协议适配、流式 SSE Usage 提取、基于长度的 token 估算、原生协议错误格式化 |
 | `backend/gateway` | `8080` | WebFlux 响应式数据面（Caffeine L1 + Redis L2）、Debezium 广播 L1 失效、多策略路由、Lua Pre-hold/Settle、四层限流与批量 Outbox |
 | `backend/console` | `8081` | 开发者控制面（MVC + 虚拟线程）、双层 RBAC、API Key、实时钱包、Stripe/支付宝/微信支付、兑换码核销、ClickHouse 用量、告警与 OpenAPI 3.1 |
 | `backend/admin` | `8082` | 运营控制面（MVC + 虚拟线程）、TOTP MFA、加密渠道池与探针、虚拟模型与定价编排、毛利分析、账本消费折叠、小时聚合、告警投递与自动对账 |

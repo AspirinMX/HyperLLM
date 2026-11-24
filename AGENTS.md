@@ -5,7 +5,7 @@
 - `backend/` — Maven multi-module Java 21 LTS / Spring Boot 3.5.16 workspace (`app.pagefault.hyperllm`)
   - `common/` (`hyperllm-common`): pure primitives (`UuidV7`, `MicroUsd`, `PageQuery`/`PageResponse`, `ErrorCode`/`HyperLlmException`, `AesGcmCipher`, `HmacSha256`, `ApiKeyGenerator`)
   - `domain/` (`hyperllm-domain`): Flyway SQL migrations (`V*.sql`), jOOQ generated sources (`src/main/generated`), immutable `record` entities, repository interfaces, and jOOQ implementations
-  - `protocol/` (`hyperllm-protocol`): Canonical IR & OpenAI/Anthropic protocol adapters + `jtokkit` fallback estimation
+  - `protocol/` (`hyperllm-protocol`): Canonical IR & OpenAI/Anthropic protocol adapters + length-based token estimation
   - `gateway/` (`hyperllm-gateway`): WebFlux reactive data plane (`:8080`, Caffeine L1 + Redis L2, Debezium CDC invalidation, Lua rate-limit/billing)
   - `console/` (`hyperllm-console`): Spring MVC developer control plane (`:8081`, virtual threads, OpenAPI 3.1)
   - `admin/` (`hyperllm-admin`): Spring MVC operator control plane (`:8082`, virtual threads, TOTP MFA, settlement consumer)

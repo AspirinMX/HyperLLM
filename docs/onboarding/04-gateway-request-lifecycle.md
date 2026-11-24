@@ -17,7 +17,7 @@
 | `DebeziumConfigCdcConsumer` | `gateway/cache/` | 消费 `cdc.gateway.config`，亚秒级驱逐本机 Caffeine L1 |
 | `ChannelSelector` & `UpstreamWebClientPool` | `gateway/routing/` | 按 `priority_tier` + `weight` 选择健康渠道；按 Provider 隔离 Reactor Netty 连接池 |
 | `PreHoldService` / `ProjectBudgetService` / `ChannelCapacityService` | `gateway/billing/` | Redis Lua 预占/续期/结算/释放、项目月度预算检查、上游渠道容量保护 |
-| `ProtocolRegistry` & 适配器 | `backend/protocol/` | `CanonicalChatRequest` 解析、OpenAI/Anthropic 预处理、SSE 拆帧与 Usage 嗅探、`jtokkit` 兜底 |
+| `ProtocolRegistry` & 适配器 | `backend/protocol/` | `CanonicalChatRequest` 解析、OpenAI/Anthropic 预处理、SSE 拆帧与 Usage 嗅探、本地 token 估算 |
 
 ---
 
@@ -49,7 +49,7 @@ sequenceDiagram
         Up-->>Proxy: "9. 收到首字节 → prehold_mark_served.lua 标记已交付; 周期心跳 prehold_renew.lua; 嗅探 Usage"
         Proxy-->>Client: "透传/还原 SSE Chunk"
     end
-    Proxy->>Redis: "10. 流结束/断连 → prehold_settle.lua 按实测或 jtokkit 估算多退少补"
+    Proxy->>Redis: "10. 流结束/断连 → prehold_settle.lua 按实测或本地估算多退少补"
     Proxy-->>Outbox: "异步入队 OutboxWriter (消费事件) + 直发 llm.request.events (ZDR 遥测)"
 ```
 
@@ -87,8 +87,8 @@ sequenceDiagram
   - `OpenAiChatProtocolAdapter.prepareUpstreamRequest()` 会自动检测并在发往上游的 JSON 中注入 `stream_options: {"include_usage": true}`，同时记下 `injectedIncludeUsage = true`；在流式下发给客户端时，`StreamUsageTracker` 嗅探到末帧 Usage 供计费后，若客户端原本没要求，则**无痕剥离**该纯 Usage 尾帧，保持 100% 协议兼容！
 - **Anthropic 原生 SSE 嗅探**：
   - `AnthropicMessagesProtocolAdapter` 通过 `SseEventSplitter` 安全处理跨 TCP `DataBuffer` 边界的残缺行，从 `message_start` 抓取 `input_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens`，从 `message_delta` 抓取 `output_tokens`。
-- **`jtokkit` 估算兜底**：
-  - 若上游未返回 Usage 或客户端中途断开连接，`TokenEstimator` 用已发出的文本与输入文本估算 Token 数完成结算，绝不因缺 Usage 而漏计费或卡死预占。
+- **本地 token 估算**：
+  - `TokenEstimator` 对 UTF-8 字节数除以 4、Unicode 码点数除以 3，取较大值后向上取整。网关在请求预占、`/v1/messages/count_tokens` 和缺失上游计量的结算路径复用这一估算。
 
 ### 环节 4：路由选择、上游容量保护与首字节前重试
 1. **渠道选择（`ChannelSelector`）**：把所有活跃且协议族匹配的 `GatewayChannelCandidate` 按 `priority_tier` 升序分组（Tier 1 优先于 Tier 2），同组内按 `weight` 做加权随机抽样。

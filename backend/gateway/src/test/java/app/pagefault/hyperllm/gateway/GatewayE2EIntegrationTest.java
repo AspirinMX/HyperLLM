@@ -364,6 +364,18 @@ class GatewayE2EIntegrationTest {
         // table's write-ahead log, so the row itself is the message.
         assertThat(pollOutboxForOrg(orgId)).isTrue();
 
+        // Four CJK code points use 12 UTF-8 bytes: 3 estimated text tokens plus 8 for message framing and role.
+        webTestClient.post()
+                .uri("/v1/messages/count_tokens")
+                .header("x-api-key", generated.rawKey())
+                .header("anthropic-version", "2023-06-01")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"model\":\"claude-gw-test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好世界\"}]}")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.input_tokens").isEqualTo(11);
+
         // 2. Anthropic non-streaming /v1/messages using x-api-key -> second request within RPM=2 succeeds
         webTestClient.post()
                 .uri("/v1/messages")

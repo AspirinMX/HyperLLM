@@ -95,8 +95,8 @@ paths:
         - Before the first upstream byte is delivered to the client, transient upstream errors
           (`429`, `5xx`, timeouts) trigger automatic failover retries against alternate healthy
           channels (up to 2 retries).
-        - If the upstream omits usage or disconnects mid-stream, `jtokkit` token estimation is used
-          as a deterministic fallback for settlement.
+        - If the upstream omits usage or disconnects mid-stream, the gateway can estimate tokens
+          from UTF-8 byte length and Unicode code point count for settlement.
       requestBody:
         required: true
         content:

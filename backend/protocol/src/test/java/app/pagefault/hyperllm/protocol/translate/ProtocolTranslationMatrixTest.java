@@ -489,9 +489,9 @@ class ProtocolTranslationMatrixTest {
         assertThat(start1).isGreaterThan(stop0);
     }
 
-    @ParameterizedTest(name = "Premature stream disconnect falls back to jtokkit: {0} -> {1}")
+    @ParameterizedTest(name = "Premature stream disconnect estimates token usage: {0} -> {1}")
     @MethodSource("twelveHeterogeneousPairs")
-    void prematureDisconnectEstimatesTokensViaJtokkit(ProtocolKind inbound, ProtocolKind outbound) {
+    void prematureDisconnectEstimatesTokenUsage(ProtocolKind inbound, ProtocolKind outbound) {
         byte[] rawReq = sampleMultimodalToolRequest(inbound, true);
         CanonicalRequest decoded = translator.parseRequest(inbound, rawReq, inboundContextFor(inbound, "virtual-omni", true, true));
         StreamBridge bridge = translator.newStreamBridge(decoded, outbound);

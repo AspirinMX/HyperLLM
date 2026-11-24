@@ -2,7 +2,7 @@ package app.pagefault.hyperllm.protocol.ir;
 
 /**
  * Five-dimensional strictly disjoint token usage record captured from upstream telemetry
- * or estimated via jtokkit.
+ * or estimated from content.
  *
  * <p>Disjoint billing invariant:
  * <ul>

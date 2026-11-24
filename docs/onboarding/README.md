@@ -42,7 +42,7 @@ flowchart TB
     subgraph Shared["共享底座 (Maven 库)"]
         CM["common (micro-USD / 加解密 / 12 Lua)"]
         DM["domain (Flyway V1-V8 / jOOQ / 35 Repo)"]
-        PR["protocol (Canonical IR / OpenAI & Anthropic / jtokkit)"]
+        PR["protocol (Canonical IR / OpenAI & Anthropic / token 估算)"]
     end
 
     subgraph Infra["基础设施"]

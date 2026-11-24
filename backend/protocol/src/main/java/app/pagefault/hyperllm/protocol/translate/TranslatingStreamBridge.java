@@ -13,7 +13,7 @@ import java.util.List;
 
 /**
  * Cross-protocol streaming pipeline composing {@link UpstreamStreamDecoder} -> usage sniffing ->
- * {@link DownstreamStreamEncoder} with bounded text accumulation for jtokkit fallback on abrupt abort.
+ * {@link DownstreamStreamEncoder} with bounded text accumulation for token estimation on abrupt abort.
  */
 public final class TranslatingStreamBridge implements StreamBridge {
 

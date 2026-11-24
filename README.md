@@ -47,7 +47,7 @@ Most LLM proxies start as thin reverse proxies and break down the moment you try
 
 ### 🔀 Multi-Protocol Unified Gateway & Canonical IR Translation
 - **Drop-In Native Protocols**: Full compatibility with **OpenAI** (Chat, Responses, Embeddings, Images, Audio TTS/STT), **Anthropic Native Messages** (Extended Thinking, Tool Use, Prompt Caching, `count_tokens` — ready for Claude Code, Cursor, and Cline), **Google Gemini**, and **Cohere/Jina Rerank**.
-- **Zero-Overhead Homomorphic Passthrough**: When client and upstream protocols match, HyperLLM streams bytes directly with minimal overhead while transparently extracting authoritative SSE usage (auto-injecting and stripping OpenAI `stream_options.include_usage` as needed) with `jtokkit` fallback estimation on mid-stream disconnects.
+- **Zero-Overhead Homomorphic Passthrough**: When client and upstream protocols match, HyperLLM streams bytes directly with minimal overhead while transparently extracting authoritative SSE usage (auto-injecting and stripping OpenAI `stream_options.include_usage` as needed) with length-based token estimation on mid-stream disconnects.
 - **High-Fidelity Bidirectional Translation**: Seamlessly route OpenAI requests to Anthropic/Gemini or Anthropic Messages requests to OpenAI/DeepSeek/self-hosted vLLM via the unified `Canonical IR` pipeline.
 
 ### 🎯 Intelligent Routing, Resilience & Prompt Cache Affinity
@@ -250,7 +250,7 @@ curl http://localhost:8080/v1/messages \
 | :--- | :---: | :--- |
 | `backend/common` | — | Integer `micro-USD` math, `UuidV7`, `AesGcmCipher`, `HmacSha256`, `ApiKeyGenerator`, `ErrorCode`, shared Kafka/Redis contracts & 12 atomic Lua scripts |
 | `backend/domain` | — | Flyway `V1`–`V8` DDL migrations, monthly partitioned ledger/audit tables, `-Pjooq` generated SQL layer, 35 jOOQ repositories, `PricingResolver` & `EntitlementAllocator` |
-| `backend/protocol` | — | `Canonical IR`, OpenAI/Anthropic protocol adapters, streaming SSE usage extraction, `jtokkit` fallback estimation, native protocol error formatter |
+| `backend/protocol` | — | `Canonical IR`, OpenAI/Anthropic protocol adapters, streaming SSE usage extraction, length-based token estimation, native protocol error formatter |
 | `backend/gateway` | `8080` | Reactive WebFlux data plane (`Caffeine L1 + Redis L2`), Debezium broadcast L1 invalidation, multi-strategy routing, Lua Pre-hold/Settle, 4-tier limits & batched Outbox |
 | `backend/console` | `8081` | Developer control plane (MVC + virtual threads), dual-layer RBAC, API keys, live wallet, Stripe/Alipay/WeChat payments, voucher redemption, ClickHouse usage, alerts & OpenAPI 3.1 |
 | `backend/admin` | `8082` | Operator control plane (MVC + virtual threads), TOTP MFA, encrypted channel pools & probes, model/pricing orchestration, margin analytics, ledger consumer, rollup, alerts & reconciliation |

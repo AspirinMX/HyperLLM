@@ -21,7 +21,7 @@ public interface StreamUsageTracker {
     List<byte[]> complete();
 
     /**
-     * Computes final five-dimensional token usage using upstream telemetry or jtokkit fallback.
+     * Computes final five-dimensional token usage using upstream telemetry or a length-based estimate.
      *
      * @param cleanCompletion true if the upstream response finished without abrupt disconnect/error
      */

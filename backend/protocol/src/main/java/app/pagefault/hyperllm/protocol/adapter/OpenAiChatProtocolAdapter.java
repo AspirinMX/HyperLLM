@@ -18,7 +18,7 @@ import java.util.Optional;
 
 /**
  * OpenAI {@code /v1/chat/completions} protocol adapter with streaming {@code include_usage} injection,
- * trailing chunk stripping when the caller did not request usage, and jtokkit fallback estimation.
+ * trailing chunk stripping when the caller did not request usage, and length-based token estimation.
  */
 public final class OpenAiChatProtocolAdapter implements ProtocolAdapter {
 

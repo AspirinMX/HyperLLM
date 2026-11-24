@@ -19,7 +19,7 @@ import java.util.Optional;
 /**
  * Anthropic {@code /v1/messages} protocol adapter supporting request validation, native passthrough,
  * {@code message_start}/{@code content_block_delta}/{@code message_delta} SSE usage sniffing,
- * and jtokkit estimation fallback on premature termination.
+ * and length-based token estimation on premature termination.
  */
 public final class AnthropicMessagesProtocolAdapter implements ProtocolAdapter {
 

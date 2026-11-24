@@ -26,7 +26,7 @@ public interface StreamBridge {
 
     /**
      * Finalizes strictly disjoint five-dimensional {@link TokenUsage}, falling back to
-     * {@code jtokkit} estimation on missing upstream telemetry or premature disconnection.
+     * length-based token estimation on missing upstream telemetry or premature disconnection.
      */
     TokenUsage finalizeUsage(boolean cleanCompletion);
 }

@@ -23,6 +23,19 @@ class ImageDimensionProbeAndEstimatorTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
+    void estimatesTextFromUtf8BytesAndUnicodeCodePoints() {
+        assertThat(estimator.countText(null, null)).isZero();
+        assertThat(estimator.countText(null, "")).isZero();
+        assertThat(estimator.countText("gpt-4o", "abcdefghij")).isEqualTo(4);
+        assertThat(estimator.countText("claude", "abcdefghij")).isEqualTo(4);
+        assertThat(estimator.countText(null, "éééé")).isEqualTo(2);
+        assertThat(estimator.countText(null, "你好世界")).isEqualTo(3);
+        assertThat(estimator.estimateCompletionTokens("gpt-4o", new StringBuilder("😀😀😀"))).isEqualTo(3);
+        assertThat(estimator.countText(null, "😀abcdefghijk")).isEqualTo(4);
+        assertThat(estimator.countText(null, "\uD800".repeat(3))).isEqualTo(1);
+    }
+
+    @Test
     void probesPngAndGifDimensionsWithoutPixelDecoding() {
         // Minimal PNG header (1024 x 768)
         ByteBuffer png = ByteBuffer.allocate(24);

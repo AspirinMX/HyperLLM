@@ -16,7 +16,7 @@ HyperLLM/
 │   ├── pom.xml                    # 父 POM：统一版本锁定、Surefire/Failsafe 测试分组
 │   ├── common/                    # [库] 纯原语、加解密、错误码、事件契约、12 个 Redis Lua 脚本
 │   ├── domain/                    # [库] Flyway V1–V8 SQL、jOOQ 生成代码、领域 Record、35 组仓储、定价与分摊引擎
-│   ├── protocol/                  # [库] Canonical IR、OpenAI/Anthropic 协议适配器、SSE Usage 嗅探、jtokkit 兜底
+│   ├── protocol/                  # [库] Canonical IR、OpenAI/Anthropic 协议适配器、SSE Usage 嗅探、基于长度的 token 估算
 │   ├── gateway/                   # [应用 :8080] WebFlux 响应式数据面网关
 │   ├── console/                   # [应用 :8081] Spring MVC 开发者控制台 + 支付下单/回调
 │   └── admin/                     # [应用 :8082] Spring MVC 运营后台 + 异步账本/分析/告警/对账引擎
@@ -82,7 +82,7 @@ flowchart BT
    - 解耦客户端入站协议与上游出站协议：
      - `CanonicalChatRequest` / `CanonicalMessage` / `TokenUsage` / `PreparedUpstreamRequest`
      - `OpenAiChatProtocolAdapter`、`AnthropicMessagesProtocolAdapter`、`ProtocolRegistry`
-     - `SseEventSplitter`（容错跨 TCP 分片拆帧）、`StreamUsageTracker`、`TokenEstimator`（`jtokkit` 估算兜底）
+     - `SseEventSplitter`（容错跨 TCP 分片拆帧）、`StreamUsageTracker`、`TokenEstimator`（本地 token 估算）
      - `ProtocolErrorFormatter`（把内部 `ErrorCode` 翻译为原生 OpenAI / Anthropic JSON 错误体）。
 
 4. **`backend/gateway`（`:8080`，WebFlux + Reactor Netty）**

@@ -9,15 +9,11 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalToolDefinition;
 import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
-import com.knuddels.jtokkit.Encodings;
-import com.knuddels.jtokkit.api.Encoding;
-import com.knuddels.jtokkit.api.EncodingRegistry;
-import com.knuddels.jtokkit.api.EncodingType;
 
 import java.util.Locale;
 
 /**
- * Local multimodal token estimator powered by jtokkit and lightweight image header probing.
+ * Local multimodal token estimator based on text length and lightweight image header probing.
  * Used for Pre-hold estimation and usage fallback when upstream omits telemetry or disconnects mid-stream.
  */
 public final class TokenEstimator {
@@ -29,13 +25,43 @@ public final class TokenEstimator {
     private static final int ORIGINAL_IMAGE_TOKENS = 1_105;
     private static final int TOKENS_PER_512_TILE = 170;
 
-    private final EncodingRegistry registry = Encodings.newLazyEncodingRegistry();
-
+    /** Estimates text tokens independently of the model. */
     public int countText(String model, CharSequence text) {
+        return estimateTextTokens(text);
+    }
+
+    private static int estimateTextTokens(CharSequence text) {
         if (text == null || text.isEmpty()) {
             return 0;
         }
-        return resolveEncoding(model).countTokensOrdinary(text.toString());
+
+        int codePoints = 0;
+        long utf8Bytes = 0;
+        for (int offset = 0; offset < text.length(); ) {
+            int codePoint = Character.codePointAt(text, offset);
+            offset += Character.charCount(codePoint);
+            codePoints++;
+            utf8Bytes += utf8Width(codePoint);
+        }
+
+        // Keep the larger estimate so the byte count gives multibyte text more weight.
+        long byBytes = (utf8Bytes + 3) / 4;
+        long byCharacters = (codePoints + 2L) / 3;
+        return (int) Math.max(byBytes, byCharacters);
+    }
+
+    private static int utf8Width(int codePoint) {
+        if (codePoint < 0x80) {
+            return 1;
+        }
+        if (codePoint < 0x800) {
+            return 2;
+        }
+        if (Character.isSupplementaryCodePoint(codePoint)) {
+            return 4;
+        }
+        // Java's UTF-8 encoder replaces an unpaired surrogate with a single byte.
+        return Character.isSurrogate((char) codePoint) ? 1 : 3;
     }
 
     /**
@@ -46,36 +72,35 @@ public final class TokenEstimator {
         if (request == null) {
             return 0;
         }
-        Encoding encoding = resolveEncoding(request.model());
         int total = REPLY_PRIMING_TOKENS;
 
         for (CanonicalSystemPart sys : request.systemInstructions()) {
             total += TOKENS_PER_MESSAGE_OVERHEAD;
             if (!sys.text().isEmpty()) {
-                total += encoding.countTokensOrdinary(sys.text());
+                total += estimateTextTokens(sys.text());
             }
         }
 
         for (CanonicalTurn turn : request.turns()) {
             total += TOKENS_PER_MESSAGE_OVERHEAD;
             if (turn.role() != null) {
-                total += encoding.countTokensOrdinary(turn.role().name().toLowerCase(Locale.ROOT));
+                total += estimateTextTokens(turn.role().name().toLowerCase(Locale.ROOT));
             }
             for (CanonicalContentPart part : turn.parts()) {
-                total += estimatePartTokens(encoding, part);
+                total += estimatePartTokens(part);
             }
         }
 
         for (CanonicalToolDefinition tool : request.tools()) {
             total += 8; // structural tool overhead
             if (tool.name() != null && !tool.name().isEmpty()) {
-                total += encoding.countTokensOrdinary(tool.name());
+                total += estimateTextTokens(tool.name());
             }
             if (tool.description() != null && !tool.description().isEmpty()) {
-                total += encoding.countTokensOrdinary(tool.description());
+                total += estimateTextTokens(tool.description());
             }
             if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
-                total += encoding.countTokensOrdinary(tool.parametersSchema().toString());
+                total += estimateTextTokens(tool.parametersSchema().toString());
             }
         }
 
@@ -87,54 +112,53 @@ public final class TokenEstimator {
         if (request == null) {
             return 0;
         }
-        Encoding encoding = resolveEncoding(request.model());
         if (request.messages() != null && !request.messages().isEmpty()) {
             int total = REPLY_PRIMING_TOKENS;
             for (CanonicalMessage msg : request.messages()) {
                 total += TOKENS_PER_MESSAGE_OVERHEAD;
                 if (msg.role() != null && !msg.role().isEmpty()) {
-                    total += encoding.countTokensOrdinary(msg.role());
+                    total += estimateTextTokens(msg.role());
                 }
                 if (msg.content() != null && !msg.content().isEmpty()) {
-                    total += encoding.countTokensOrdinary(msg.content());
+                    total += estimateTextTokens(msg.content());
                 }
             }
             return total;
         }
-        return countText(request.model(), request.rawPromptText());
+        return estimateTextTokens(request.rawPromptText());
     }
 
     public int estimateCompletionTokens(String model, CharSequence streamedText) {
-        return countText(model, streamedText);
+        return estimateTextTokens(streamedText);
     }
 
-    private int estimatePartTokens(Encoding encoding, CanonicalContentPart part) {
+    private static int estimatePartTokens(CanonicalContentPart part) {
         return switch (part) {
             case CanonicalContentPart.TextPart t ->
-                    t.text().isEmpty() ? 0 : encoding.countTokensOrdinary(t.text());
+                    t.text().isEmpty() ? 0 : estimateTextTokens(t.text());
             case CanonicalContentPart.ImagePart img -> estimateImageTokens(img);
             case CanonicalContentPart.ThinkingPart th ->
-                    th.text().isEmpty() ? 0 : encoding.countTokensOrdinary(th.text());
+                    th.text().isEmpty() ? 0 : estimateTextTokens(th.text());
             case CanonicalContentPart.RedactedThinkingPart ignored -> 64;
             case CanonicalContentPart.RefusalPart ref ->
-                    ref.refusal().isEmpty() ? 0 : encoding.countTokensOrdinary(ref.refusal());
+                    ref.refusal().isEmpty() ? 0 : estimateTextTokens(ref.refusal());
             case CanonicalContentPart.ToolCallPart tc -> {
                 int sum = 6;
                 if (tc.name() != null && !tc.name().isEmpty()) {
-                    sum += encoding.countTokensOrdinary(tc.name());
+                    sum += estimateTextTokens(tc.name());
                 }
                 String args = tc.rawArgumentsJson() != null
                         ? tc.rawArgumentsJson()
                         : (tc.argumentsJson() != null ? tc.argumentsJson().toString() : "");
                 if (!args.isEmpty()) {
-                    sum += encoding.countTokensOrdinary(args);
+                    sum += estimateTextTokens(args);
                 }
                 yield sum;
             }
             case CanonicalContentPart.ToolResultPart tr -> {
                 int sum = 4;
                 for (CanonicalContentPart child : tr.content()) {
-                    sum += estimatePartTokens(encoding, child);
+                    sum += estimatePartTokens(child);
                 }
                 yield sum;
             }
@@ -161,16 +185,5 @@ public final class TokenEstimator {
                     .orElse(detail == ImageDetail.ORIGINAL ? ORIGINAL_IMAGE_TOKENS : DEFAULT_IMAGE_TOKENS);
         }
         return detail == ImageDetail.ORIGINAL ? ORIGINAL_IMAGE_TOKENS : DEFAULT_IMAGE_TOKENS;
-    }
-
-    Encoding resolveEncoding(String model) {
-        if (model != null && !model.isBlank()) {
-            String normalized = model.trim().toLowerCase(Locale.ROOT);
-            var matched = registry.getEncodingForModel(normalized);
-            if (matched.isPresent()) {
-                return matched.get();
-            }
-        }
-        return registry.getEncoding(EncodingType.O200K_BASE);
     }
 }
