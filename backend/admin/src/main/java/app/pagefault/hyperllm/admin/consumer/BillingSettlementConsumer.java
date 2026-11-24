@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.admin.maintenance.SettlementWorklist;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import app.pagefault.hyperllm.common.messaging.KafkaTopics;
 import app.pagefault.hyperllm.domain.repository.OutboxEventRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,7 +36,7 @@ public class BillingSettlementConsumer {
     public void onMessage(String payload, Acknowledgment acknowledgment) {
         BillingMoneyEvent event;
         try {
-            event = objectMapper.readValue(payload, BillingMoneyEvent.class);
+            event = parseEvent(payload);
         } catch (Exception ex) {
             // A payload that cannot be parsed will never parse; acknowledging would drop money, so
             // the failure is surfaced and the partition stops until it is dealt with.
@@ -62,5 +63,30 @@ public class BillingSettlementConsumer {
             log.error("Failed processing money event eventId={}", event.eventId(), ex);
             throw new IllegalStateException("Billing event cannot be folded", ex);
         }
+    }
+
+    /**
+     * Accepts both raw {@link BillingMoneyEvent} JSON (replayed directly or emitted with
+     * {@code schemas.enable=false}) and Debezium Kafka Connect envelopes ({@code {"schema":..., "payload":...}}).
+     */
+    private BillingMoneyEvent parseEvent(String rawPayload) throws Exception {
+        if (rawPayload == null || rawPayload.isBlank()) {
+            throw new IllegalArgumentException("Empty billing event payload");
+        }
+        JsonNode root = objectMapper.readTree(rawPayload);
+        JsonNode body = root;
+        if (root != null && root.isObject() && root.has("payload") && !root.has("eventId")) {
+            JsonNode inner = root.get("payload");
+            if (inner.isObject()) {
+                body = inner;
+            } else if (inner.isTextual()) {
+                body = objectMapper.readTree(inner.asText());
+            }
+        }
+        BillingMoneyEvent event = objectMapper.treeToValue(body, BillingMoneyEvent.class);
+        if (event == null || event.eventId() == null || event.orgId() == null || event.eventType() == null) {
+            throw new IllegalArgumentException("Billing event missing required fields (eventId/orgId/eventType)");
+        }
+        return event;
     }
 }
