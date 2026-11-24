@@ -64,7 +64,7 @@
    - 默认 `hyperllm.upstream.max-connections-per-provider=200` 在高并发 SSE 下会触发 `PoolAcquirePendingLimitException`，压测时通过环境变量调至 **`5000`**。
    - 压测未启动 `otel-collector`，将 `OTEL_TRACES_SAMPLING_PROBABILITY=0` 关闭无效追踪上报。
 
-### 2.2 Linux KVM 内核与网络调优（`bench/scripts/sysctl-bench.sh`）
+### 2.2 Linux KVM 内核与网络调优（`benchmark/scripts/sysctl-bench.sh`）
 
 ```bash
 sysctl -w net.core.somaxconn=65535
@@ -79,11 +79,11 @@ ulimit -n 65535
 
 ### 2.3 精简基础设施栈与零依赖 Go 压测套件
 
-- **基础设施（`bench/infra/docker-compose.bench.yml` + `docker-compose.bench.tmpfs.yml`）**：
+- **基础设施（`benchmark/infra/docker-compose.bench.yml` + `docker-compose.bench.tmpfs.yml`）**：
   - 仅启动网关热路径必需的 3 个容器：`postgres:16-alpine`、`redis:7-alpine`、`apache/kafka:3.9.0`（不启 Debezium、ClickHouse、Kafka-UI）。
   - 全部使用 `network_mode: host` 走 Linux loopback，规避 Docker bridge NAT / `nf_conntrack` 表瓶颈。
   - 本次基线启用 `BENCH_TMPFS=1`（Redis 关闭 AOF `--appendonly no --save ""`，Postgres / Kafka 数据挂 `tmpfs` 内存盘，关闭 `fsync`），专门剥离 KVM 虚拟块存储抖动，测出纯计算/网络/协议栈天花板。
-- **Go 压测工具（`bench/cmd/`，纯标准库零外部依赖）**：
+- **Go 压测工具（`benchmark/cmd/`，纯标准库零外部依赖）**：
   - `mock-upstream`：支持 OpenAI Chat、OpenAI Responses、Anthropic Messages、Google Gemini 四套协议（非流式 + SSE），响应体与 SSE 帧在启动时预序列化为静态 `[]byte`，请求体使用 `sync.Pool` 8KB 缓冲零分配流式消费，支持 `POST /_mock/config` 运行时热切 TTFT / chunks / interval。
   - `loadgen`：支持四协议请求构造、大包 Agent 多轮对话 + JSON Schema tools 生成（`-payload-kb` / `-tools`）、JIT 预热（`-warmup`）、精确无锁纳秒分位统计（Min/Mean/P50/P90/P95/P99/P99.9/Max，含 TTFT 与 TPOT）及中途断流模拟（`-abort-after-chunks`）。
   - `bench-seed`：幂等生成压测租户、\$100M 余额钱包、无流控限制的 Live API Key（精确 `HmacSha256` 摘要）、3 条 AES-256-GCM 加密上游渠道与 4 个虚拟模型。
@@ -329,14 +329,14 @@ org/springframework/data/redis/core/script/DefaultReactiveScriptExecutor.eval
 ./backend/mvnw -B -f backend/pom.xml package -pl common,domain,protocol,gateway -am -DskipTests
 
 # 2. 初始化精简基础设施（tmpfs 零盘抖动模式，绑定 Core 2-4）、迁移 V1..V9、写入种子数据
-BENCH_TMPFS=1 BENCH_INFRA_CPUS=2-4 ./bench/scripts/setup-server.sh
+BENCH_TMPFS=1 BENCH_INFRA_CPUS=2-4 ./benchmark/scripts/setup-server.sh
 
 # 3. 启动 Phase A（2C 独占核 Core 0-1，端口 18081）
-GATEWAY_PORT=18081 GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./bench/scripts/run-gateway.sh
+GATEWAY_PORT=18081 GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./benchmark/scripts/run-gateway.sh
 
 # 4. 执行全套 S1~S4 压测（含 mpstat 分核监控与 JSON/Prometheus 输出）
-TAG=2c-tmpfs TARGET=http://127.0.0.1:18081 MOCK_CPUS=5 LOADGEN_CPUS=6-7 WARMUP=5s DURATION=15s ./bench/scripts/run-suite.sh
+TAG=2c-tmpfs TARGET=http://127.0.0.1:18081 MOCK_CPUS=5 LOADGEN_CPUS=6-7 WARMUP=5s DURATION=15s ./benchmark/scripts/run-suite.sh
 
 # 5. 压测期间采集 KVM/ARM64 安全火焰图（ctimer / alloc / lock）
-./bench/scripts/profile.sh all 10 /tmp/profiles-2c
+./benchmark/scripts/profile.sh all 10 /tmp/profiles-2c
 ```

@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BIN_DIR="${REPO_ROOT}/bench/bin"
+BIN_DIR="${REPO_ROOT}/benchmark/bin"
 
 TARGET="${TARGET:-http://127.0.0.1:8080}"
 MOCK_URL="${MOCK_URL:-http://127.0.0.1:18080}"

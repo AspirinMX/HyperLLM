@@ -1,6 +1,6 @@
 # Override for zero-disk-jitter pure-gateway ceiling benchmarks on KVM.
 # Usage:
-#   docker compose -f bench/infra/docker-compose.bench.yml -f bench/infra/docker-compose.bench.tmpfs.yml up -d
+#   docker compose -f benchmark/infra/docker-compose.bench.yml -f benchmark/infra/docker-compose.bench.tmpfs.yml up -d
 
 services:
   postgres:

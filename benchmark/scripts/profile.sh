@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Captures KVM/ARM64-safe async-profiler flamegraphs against the running hyperllm-gateway JVM.
 # Usage:
-#   ./bench/scripts/profile.sh [event=ctimer|alloc|lock|all] [duration_sec=15] [output_dir=/tmp/hyperllm-profiles]
+#   ./benchmark/scripts/profile.sh [event=ctimer|alloc|lock|all] [duration_sec=15] [output_dir=/tmp/hyperllm-profiles]
 
 EVENT="${1:-ctimer}"
 DURATION="${2:-15}"
@@ -17,7 +17,7 @@ if [[ ! -x "${ASPROF}" ]]; then
   exit 1
 fi
 
-PID="$(pgrep -f 'hyperllm-gateway-.*\.jar' | head -n 1 || true)"
+PID="$(jps -l | awk '/hyperllm-gateway/{print $1; exit}' || true)"
 if [[ -z "${PID}" ]]; then
   echo "ERROR: hyperllm-gateway process not running." >&2
   exit 1

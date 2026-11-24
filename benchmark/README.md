@@ -24,16 +24,16 @@ Zero-dependency Go benchmark tooling and CPU-pinned KVM/ARM64 harness for `hyper
 ./backend/mvnw -f backend/pom.xml package -pl common,domain,protocol,gateway -am -DskipTests
 
 # 2. Setup infra, apply V1..V9 migrations, seed bench tenant/channels/models
-BENCH_TMPFS=1 BENCH_INFRA_CPUS=2-4 ./bench/scripts/setup-server.sh
+BENCH_TMPFS=1 BENCH_INFRA_CPUS=2-4 ./benchmark/scripts/setup-server.sh
 
 # 3. Start gateway pinned to 2 vCPUs (in tmux or background)
-GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./bench/scripts/run-gateway.sh
+GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./benchmark/scripts/run-gateway.sh
 
 # 4. Run full S1..S4 benchmark suite
-TAG=2c-tmpfs MOCK_CPUS=5 LOADGEN_CPUS=6-7 ./bench/scripts/run-suite.sh
+TAG=2c-tmpfs MOCK_CPUS=5 LOADGEN_CPUS=6-7 ./benchmark/scripts/run-suite.sh
 
 # 5. Optional: capture KVM/ARM64 flamegraphs during a steady-state run
-./bench/scripts/profile.sh ctimer 15
-./bench/scripts/profile.sh alloc 15
-./bench/scripts/profile.sh lock 15
+./benchmark/scripts/profile.sh ctimer 15
+./benchmark/scripts/profile.sh alloc 15
+./benchmark/scripts/profile.sh lock 15
 ```

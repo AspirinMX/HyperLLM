@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Starts hyperllm-gateway pinned to dedicated vCPUs via taskset and explicit ActiveProcessorCount.
 # Usage:
-#   GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./bench/scripts/run-gateway.sh
-#   GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g ./bench/scripts/run-gateway.sh
+#   GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./benchmark/scripts/run-gateway.sh
+#   GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g ./benchmark/scripts/run-gateway.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"

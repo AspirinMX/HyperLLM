@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BENCH_DIR="${REPO_ROOT}/bench"
+BENCH_DIR="${REPO_ROOT}/benchmark"
 BIN_DIR="${BENCH_DIR}/bin"
 
 BENCH_TMPFS="${BENCH_TMPFS:-1}"
