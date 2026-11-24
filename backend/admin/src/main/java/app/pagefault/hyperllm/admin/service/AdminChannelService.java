@@ -15,13 +15,14 @@ import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.ChannelStatus;
-import app.pagefault.hyperllm.domain.model.enums.ProtocolFamily;
 import app.pagefault.hyperllm.domain.model.routing.Channel;
 import app.pagefault.hyperllm.domain.model.routing.Provider;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import app.pagefault.hyperllm.domain.repository.ChannelRepository;
 import app.pagefault.hyperllm.domain.repository.ModelChannelBindingRepository;
 import app.pagefault.hyperllm.domain.repository.ProviderRepository;
+import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.translate.UpstreamEndpointResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -152,9 +153,19 @@ public class AdminChannelService {
         long startNanos = System.nanoTime();
         String endpointUrl = "";
         try {
+            ProtocolKind probeProtocol = ProtocolKind.parseOrNull(provider.defaultWireProtocol());
+            if (probeProtocol == null) {
+                probeProtocol = switch (provider.protocolFamily()) {
+                    case ANTHROPIC -> ProtocolKind.ANTHROPIC_MESSAGES;
+                    case GEMINI -> ProtocolKind.GEMINI_GENERATE_CONTENT;
+                    default -> ProtocolKind.OPENAI_CHAT;
+                };
+            }
+            endpointUrl = UpstreamEndpointResolver.buildProbeUrl(baseUrl, probeProtocol);
+            Map<String, String> authHeaders = UpstreamEndpointResolver.buildAuthHeaders(
+                    provider.authScheme().name(), probeProtocol, apiKey, null, null);
             ResponseEntity<String> response;
-            if (provider.protocolFamily() == ProtocolFamily.ANTHROPIC) {
-                endpointUrl = baseUrl + "/messages";
+            if (probeProtocol == ProtocolKind.ANTHROPIC_MESSAGES) {
                 String probeModel = channel.healthCheckModel() != null ? channel.healthCheckModel() : "claude-3-5-haiku-latest";
                 String body = objectMapper.writeValueAsString(Map.of(
                         "model", probeModel,
@@ -164,16 +175,14 @@ public class AdminChannelService {
                 response = probeRestClient.post()
                         .uri(endpointUrl)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .header("x-api-key", apiKey)
-                        .header("anthropic-version", "2023-06-01")
+                        .headers(h -> authHeaders.forEach(h::set))
                         .body(body)
                         .retrieve()
                         .toEntity(String.class);
             } else {
-                endpointUrl = baseUrl + "/models";
                 response = probeRestClient.get()
                         .uri(endpointUrl)
-                        .header("Authorization", "Bearer " + apiKey)
+                        .headers(h -> authHeaders.forEach(h::set))
                         .retrieve()
                         .toEntity(String.class);
             }

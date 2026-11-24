@@ -13,7 +13,7 @@
 | **Phase 1（设计）** | 数据库实体、工程依赖与基建、后端运行契约 | ✅ 已完成 | [01](./design/01-database-design.md) / [02](./design/02-dependencies-and-infra.md) / [03](./design/03-phase1-backend-contracts.md) |
 | **Phase 1（编码）** | MVP 基础代理、控制面 API 与过渡记账闭环（纯后端） | ✅ 已完成（1.1 至 1.6 全部落地；活栈联调入口为 `scripts/e2e/phase1-smoke.sh`） | [03-phase1-backend-contracts.md](./design/03-phase1-backend-contracts.md) |
 | **Phase 2** | Redis 权威层、商业化计费、Outbox 与 OLAP 闭环（12 个子阶段） | ✅ 已完成（2.0a–2.10；2.7 真实渠道沙箱联调待凭据） | [04-phase2-design.md](./design/04-phase2-design.md) / [04-04](./design/04-04-settlement-pipeline.md) |
-| **Phase 3** | 四类文本生成协议双向转译、智能路由、SSO/风控与运营治理 | ⏳ 待开始（协议 IR 设计已完成） | [05-01-protocol-ir-and-translation.md](./design/05-01-protocol-ir-and-translation.md) / [PROPOSAL.md](./PROPOSAL.md) |
+| **Phase 3** | 四类文本生成协议双向转译、智能路由、SSO/风控与运营治理 | 🚧 进行中（四类协议双向转译已完成，智能路由与企业治理待开始） | [05-01-protocol-ir-and-translation.md](./design/05-01-protocol-ir-and-translation.md) / [PROPOSAL.md](./PROPOSAL.md) |
 | **Phase 4** | 高并发压测调优、可观测性大盘与 K8s 生产交付 | ⏳ 待开始 | [PROPOSAL.md](./PROPOSAL.md) |
 | **Frontend Track** | `frontend/console` 与 `frontend/admin` 前端选型与页面开发 | ⏸️ 暂缓（后端先行） | [PROPOSAL.md](./PROPOSAL.md#16-双端应用功能清单nextjs-16--react-19) |
 
@@ -287,10 +287,11 @@
 
 > **协议范围说明**：本阶段聚焦四类「文本/图片输入 → 文本输出（含工具调用、结构化输出、思维链推理、提示词缓存、流式 SSE）」协议的双向互转，详见 [05-01-protocol-ir-and-translation.md](./design/05-01-protocol-ir-and-translation.md)（`embeddings`、`images/generations`、`audio/*`、`rerank` 与 `count_tokens` 暂不纳入本阶段）。
 
-- [ ] 编写并迁移 Flyway `V9__protocol_wire_capabilities.sql`（`providers` 支持线协议列表与 `X_GOOG_API_KEY`、`model_channel_bindings.upstream_protocol`、`virtual_models` 转译策略）及后续治理表迁移，并刷新 `-Pjooq`
-- [ ] 补全 `protocol` Canonical IR 双向异构转译引擎（`OPENAI_CHAT` ⇄ `OPENAI_RESPONSES` ⇄ `ANTHROPIC_MESSAGES` ⇄ `GEMINI_GENERATE_CONTENT`，同构透传优先 + `BEST_EFFORT` 默认策略 + 互斥 `TokenUsage` 归一化与 `reasoningPrice == 0` 按 `outputPrice` 计费兜底 + 多模态 `TokenEstimator`）
-- [ ] 扩展网关对外协议端点与同 Tier 同构优先跨协议路由：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1beta/models/{model}:generateContent` / `:streamGenerateContent`（含 4 协议错误体、上游端点/鉴权统一解析与首字节前跨协议故障重试）
+- [x] 编写并迁移 Flyway `V9__protocol_wire_capabilities.sql`（`providers` 支持线协议列表与 `X_GOOG_API_KEY`、`model_channel_bindings.upstream_protocol`、`virtual_models` 转译策略）并刷新 `-Pjooq`
+- [x] 补全 `protocol` Canonical IR 双向异构转译引擎（`OPENAI_CHAT` ⇄ `OPENAI_RESPONSES` ⇄ `ANTHROPIC_MESSAGES` ⇄ `GEMINI_GENERATE_CONTENT`，同构透传优先 + `BEST_EFFORT` 默认策略 + 互斥 `TokenUsage` 归一化与 `reasoningPrice == 0` 按 `outputPrice` 计费兜底 + 多模态 `TokenEstimator`）
+- [x] 扩展网关对外协议端点与同 Tier 同构优先跨协议路由：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1beta/models/{model}:generateContent` / `:streamGenerateContent`（含 4 协议错误体、上游端点/鉴权统一解析与首字节前跨协议故障重试）
 - [ ] 升级 `gateway` 智能路由：`LOWEST_COST` 策略、`TTFT_AWARE`（近 1m Redis 滑动窗口 P90 TTFT + EWMA）、Prompt Cache Sticky Session（`gw:sticky:{hash}`）与三态分布式熔断器（`CLOSED`/`OPEN`/`HALF_OPEN`）
+- [ ] 编写后续治理表 Flyway 迁移（SSO / 调账 / 账单 / 发票）并刷新 `-Pjooq`
 - [ ] 接入企业级能力：OIDC / SAML 企业 SSO 登录与 JIT 入组、`RESTRICTED` 私有模型定向授权、GitHub / Google OAuth 完善
 - [ ] 落地内容安全与调试合规：`GuardrailProvider` SPI（AC 自动机敏感词、PII 脱敏、注入拦截、外部审核）与 Opt-in 项目加密调试日志写 ClickHouse `llm_debug_payloads`（1~7 天 TTL 自动清除）
 - [ ] 落地财务与合规后台接口：运营人工调账二次审批流（四眼约束）、月度 `billing_statements` 结账任务、双轨 `invoices` 开具与 `audit_logs` 审计查询 API

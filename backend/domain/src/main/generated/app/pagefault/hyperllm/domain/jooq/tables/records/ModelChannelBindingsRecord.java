@@ -238,6 +238,21 @@ public class ModelChannelBindingsRecord extends UpdatableRecordImpl<ModelChannel
         return (OffsetDateTime) get(13);
     }
 
+    /**
+     * Setter for <code>public.model_channel_bindings.upstream_protocol</code>.
+     */
+    public ModelChannelBindingsRecord setUpstreamProtocol(String value) {
+        set(14, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.model_channel_bindings.upstream_protocol</code>.
+     */
+    public String getUpstreamProtocol() {
+        return (String) get(14);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -261,7 +276,7 @@ public class ModelChannelBindingsRecord extends UpdatableRecordImpl<ModelChannel
     /**
      * Create a detached, initialised ModelChannelBindingsRecord
      */
-    public ModelChannelBindingsRecord(UUID id, UUID virtualModelId, UUID channelId, String upstreamModelName, Short priorityTier, Integer weight, Integer costDiscountBpsOverride, JSONB upstreamPricingOverrideJson, JSONB extraHeadersJson, String status, OffsetDateTime deletedAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public ModelChannelBindingsRecord(UUID id, UUID virtualModelId, UUID channelId, String upstreamModelName, Short priorityTier, Integer weight, Integer costDiscountBpsOverride, JSONB upstreamPricingOverrideJson, JSONB extraHeadersJson, String status, OffsetDateTime deletedAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt, String upstreamProtocol) {
         super(ModelChannelBindings.MODEL_CHANNEL_BINDINGS);
 
         setId(id);
@@ -278,6 +293,7 @@ public class ModelChannelBindingsRecord extends UpdatableRecordImpl<ModelChannel
         setVersion(version);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setUpstreamProtocol(upstreamProtocol);
         resetChangedOnNotNull();
     }
 }

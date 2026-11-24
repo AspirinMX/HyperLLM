@@ -44,9 +44,10 @@ public final class PricingResolver {
 
         if (override != null && override.overrideMode() == OverrideMode.FIXED_PRICING) {
             long[] prices = parseFixedPricing(override.fixedPricingJson());
+            long effectiveReasoning = effectiveReasoningPrice(prices[4], prices[1]);
             return new ResolvedPricing(
                     PricingSource.OVERRIDE_FIXED, rule.billingMode(), FULL_DISCOUNT_BPS, null, override.id(),
-                    prices[0], prices[1], prices[2], prices[3], prices[4]
+                    prices[0], prices[1], prices[2], prices[3], effectiveReasoning
             );
         }
 
@@ -68,11 +69,12 @@ public final class PricingResolver {
             reasoning = tier.reasoningPriceMicros1m();
             tierIndex = tiers.indexOf(tier);
         }
+        long effectiveReasoning = effectiveReasoningPrice(reasoning, output);
 
         if (override != null) {
             return new ResolvedPricing(
                     PricingSource.OVERRIDE_DISCOUNT, rule.billingMode(), override.discountRatioBps(), tierIndex,
-                    override.id(), input, output, cacheRead, cacheWrite, reasoning
+                    override.id(), input, output, cacheRead, cacheWrite, effectiveReasoning
             );
         }
 
@@ -80,8 +82,18 @@ public final class PricingResolver {
         PricingSource source = orgDiscountRatioBps == null ? PricingSource.TIER : PricingSource.ORG;
         return new ResolvedPricing(
                 source, rule.billingMode(), discountBps, tierIndex, null,
-                input, output, cacheRead, cacheWrite, reasoning
+                input, output, cacheRead, cacheWrite, effectiveReasoning
         );
+    }
+
+    /**
+     * When a rule leaves {@code reasoningPriceMicros1m} at zero while charging for regular output,
+     * reasoning tokens inherit the output unit price so disjoint accounting never bills them as free.
+     */
+    public static long effectiveReasoningPrice(long reasoningPriceMicros1m, long outputPriceMicros1m) {
+        return (reasoningPriceMicros1m == 0L && outputPriceMicros1m > 0L)
+                ? outputPriceMicros1m
+                : reasoningPriceMicros1m;
     }
 
     /**

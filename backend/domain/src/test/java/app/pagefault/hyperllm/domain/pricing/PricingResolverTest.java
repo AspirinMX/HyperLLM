@@ -110,6 +110,28 @@ class PricingResolverTest {
                 .anySatisfy(error -> assertThat(error).contains("must start at 0"));
     }
 
+    @Test
+    void fallsBackToOutputPriceWhenReasoningPriceIsZero() {
+        PricingRule zeroReasoningRule = new PricingRule(
+                UUID.randomUUID(), UUID.randomUUID(), BillingMode.TOKEN,
+                2_000_000L, 12_000_000L, 200_000L, 2_500_000L, 0L, 0L,
+                "[]", "{}", NOW.minusDays(1), null, null, NOW
+        );
+        ResolvedPricing base = PricingResolver.resolve(null, 10_000, zeroReasoningRule, null, 500);
+        assertThat(base.reasoningPriceMicros1m()).isEqualTo(12_000_000L);
+
+        String tiered = "[{\"minInputTokens\":0,\"maxInputTokens\":null,"
+                + "\"inputPriceMicros1m\":100,\"outputPriceMicros1m\":400,"
+                + "\"cacheReadPriceMicros1m\":10,\"cacheWritePriceMicros1m\":20,\"reasoningPriceMicros1m\":0}]";
+        ResolvedPricing tieredResolved = PricingResolver.resolve(null, 10_000, rule(tiered), null, 500);
+        assertThat(tieredResolved.reasoningPriceMicros1m()).isEqualTo(400L);
+
+        OrgModelPricingOverride fixed = override(OverrideMode.FIXED_PRICING, null,
+                "{\"inputPriceMicros1m\":11,\"outputPriceMicros1m\":22,\"reasoningPriceMicros1m\":0}");
+        ResolvedPricing fixedResolved = PricingResolver.resolve(null, 10_000, zeroReasoningRule, fixed, 500);
+        assertThat(fixedResolved.reasoningPriceMicros1m()).isEqualTo(22L);
+    }
+
     private static PricingRule rule(String tieredJson) {
         return new PricingRule(
                 UUID.randomUUID(), UUID.randomUUID(), BillingMode.TOKEN,

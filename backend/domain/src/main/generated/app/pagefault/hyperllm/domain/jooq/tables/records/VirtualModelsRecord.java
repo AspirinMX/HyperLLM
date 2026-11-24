@@ -367,6 +367,36 @@ public class VirtualModelsRecord extends UpdatableRecordImpl<VirtualModelsRecord
         return (OffsetDateTime) get(22);
     }
 
+    /**
+     * Setter for <code>public.virtual_models.allow_protocol_translation</code>.
+     */
+    public VirtualModelsRecord setAllowProtocolTranslation(Boolean value) {
+        set(23, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.virtual_models.allow_protocol_translation</code>.
+     */
+    public Boolean getAllowProtocolTranslation() {
+        return (Boolean) get(23);
+    }
+
+    /**
+     * Setter for <code>public.virtual_models.translation_policy</code>.
+     */
+    public VirtualModelsRecord setTranslationPolicy(String value) {
+        set(24, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.virtual_models.translation_policy</code>.
+     */
+    public String getTranslationPolicy() {
+        return (String) get(24);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -390,7 +420,7 @@ public class VirtualModelsRecord extends UpdatableRecordImpl<VirtualModelsRecord
     /**
      * Create a detached, initialised VirtualModelsRecord
      */
-    public VirtualModelsRecord(UUID id, String modelCode, String displayName, String providerBadge, String capabilityType, String nativeProtocol, Integer contextWindow, Integer maxOutputTokens, Boolean supportsTools, Boolean supportsVision, Boolean supportsThinking, Boolean supportsPromptCache, String routingStrategy, Boolean stickyCacheEnabled, Integer stickyTtlSeconds, String visibility, String fallbackModelCode, String status, JSONB metadataJson, OffsetDateTime deletedAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public VirtualModelsRecord(UUID id, String modelCode, String displayName, String providerBadge, String capabilityType, String nativeProtocol, Integer contextWindow, Integer maxOutputTokens, Boolean supportsTools, Boolean supportsVision, Boolean supportsThinking, Boolean supportsPromptCache, String routingStrategy, Boolean stickyCacheEnabled, Integer stickyTtlSeconds, String visibility, String fallbackModelCode, String status, JSONB metadataJson, OffsetDateTime deletedAt, Long version, OffsetDateTime createdAt, OffsetDateTime updatedAt, Boolean allowProtocolTranslation, String translationPolicy) {
         super(VirtualModels.VIRTUAL_MODELS);
 
         setId(id);
@@ -416,6 +446,8 @@ public class VirtualModelsRecord extends UpdatableRecordImpl<VirtualModelsRecord
         setVersion(version);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setAllowProtocolTranslation(allowProtocolTranslation);
+        setTranslationPolicy(translationPolicy);
         resetChangedOnNotNull();
     }
 }

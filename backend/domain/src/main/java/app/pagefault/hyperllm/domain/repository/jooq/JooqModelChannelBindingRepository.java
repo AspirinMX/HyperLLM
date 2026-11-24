@@ -29,6 +29,7 @@ public class JooqModelChannelBindingRepository implements ModelChannelBindingRep
                 .set(MODEL_CHANNEL_BINDINGS.VIRTUAL_MODEL_ID, b.virtualModelId())
                 .set(MODEL_CHANNEL_BINDINGS.CHANNEL_ID, b.channelId())
                 .set(MODEL_CHANNEL_BINDINGS.UPSTREAM_MODEL_NAME, b.upstreamModelName())
+                .set(MODEL_CHANNEL_BINDINGS.UPSTREAM_PROTOCOL, b.upstreamProtocol())
                 .set(MODEL_CHANNEL_BINDINGS.PRIORITY_TIER, b.priorityTier())
                 .set(MODEL_CHANNEL_BINDINGS.WEIGHT, b.weight())
                 .set(MODEL_CHANNEL_BINDINGS.COST_DISCOUNT_BPS_OVERRIDE, b.costDiscountBpsOverride())
@@ -88,6 +89,7 @@ public class JooqModelChannelBindingRepository implements ModelChannelBindingRep
                 r.getVirtualModelId(),
                 r.getChannelId(),
                 r.getUpstreamModelName(),
+                r.getUpstreamProtocol(),
                 r.getPriorityTier(),
                 r.getWeight(),
                 r.getCostDiscountBpsOverride(),

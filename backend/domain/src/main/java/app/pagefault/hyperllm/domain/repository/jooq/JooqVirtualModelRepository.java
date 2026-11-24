@@ -50,6 +50,8 @@ public class JooqVirtualModelRepository implements VirtualModelRepository {
                 .set(VIRTUAL_MODELS.FALLBACK_MODEL_CODE, model.fallbackModelCode())
                 .set(VIRTUAL_MODELS.STATUS, model.status().name())
                 .set(VIRTUAL_MODELS.METADATA_JSON, PgJooqSupport.toJsonb(model.metadataJson()))
+                .set(VIRTUAL_MODELS.ALLOW_PROTOCOL_TRANSLATION, model.allowProtocolTranslation())
+                .set(VIRTUAL_MODELS.TRANSLATION_POLICY, model.translationPolicy())
                 .set(VIRTUAL_MODELS.DELETED_AT, model.deletedAt())
                 .set(VIRTUAL_MODELS.VERSION, model.version())
                 .set(VIRTUAL_MODELS.CREATED_AT, model.createdAt())
@@ -170,6 +172,8 @@ public class JooqVirtualModelRepository implements VirtualModelRepository {
                 r.getFallbackModelCode(),
                 PgJooqSupport.toEnum(ModelStatus.class, r.getStatus()),
                 PgJooqSupport.fromJsonb(r.getMetadataJson()),
+                !Boolean.FALSE.equals(r.getAllowProtocolTranslation()),
+                r.getTranslationPolicy(),
                 r.getDeletedAt(),
                 r.getVersion(),
                 r.getCreatedAt(),

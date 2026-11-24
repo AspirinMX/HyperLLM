@@ -1,6 +1,7 @@
 package app.pagefault.hyperllm.gateway.controller;
 
 import app.pagefault.hyperllm.gateway.proxy.GatewayProxyService;
+import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.buffer.DataBuffer;
@@ -29,7 +30,15 @@ public class GatewayController {
             ServerWebExchange exchange,
             @RequestBody(required = false) byte[] body
     ) {
-        return proxyService.proxyChatOrMessages(exchange, ProtocolKind.OPENAI_CHAT, body);
+        return proxyService.proxy(exchange, ProtocolKind.OPENAI_CHAT, InboundRequestContext.empty(), body);
+    }
+
+    @PostMapping(value = "/responses", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<ResponseEntity<Flux<DataBuffer>>> openAiResponses(
+            ServerWebExchange exchange,
+            @RequestBody(required = false) byte[] body
+    ) {
+        return proxyService.proxy(exchange, ProtocolKind.OPENAI_RESPONSES, InboundRequestContext.empty(), body);
     }
 
     @PostMapping(value = "/messages", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -37,7 +46,14 @@ public class GatewayController {
             ServerWebExchange exchange,
             @RequestBody(required = false) byte[] body
     ) {
-        return proxyService.proxyChatOrMessages(exchange, ProtocolKind.ANTHROPIC_MESSAGES, body);
+        String version = exchange.getRequest().getHeaders().getFirst("anthropic-version");
+        String beta = exchange.getRequest().getHeaders().getFirst("anthropic-beta");
+        return proxyService.proxy(
+                exchange,
+                ProtocolKind.ANTHROPIC_MESSAGES,
+                InboundRequestContext.forAnthropic(version, beta),
+                body
+        );
     }
 
     @GetMapping("/models")

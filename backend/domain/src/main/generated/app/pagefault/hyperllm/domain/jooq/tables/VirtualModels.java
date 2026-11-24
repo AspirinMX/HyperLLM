@@ -180,6 +180,16 @@ public class VirtualModels extends TableImpl<VirtualModelsRecord> {
      */
     public final TableField<VirtualModelsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.virtual_models.allow_protocol_translation</code>.
+     */
+    public final TableField<VirtualModelsRecord, Boolean> ALLOW_PROTOCOL_TRANSLATION = createField(DSL.name("allow_protocol_translation"), SQLDataType.BOOLEAN.nullable(false).defaultValue(DSL.field(DSL.raw("true"), SQLDataType.BOOLEAN)), this, "");
+
+    /**
+     * The column <code>public.virtual_models.translation_policy</code>.
+     */
+    public final TableField<VirtualModelsRecord, String> TRANSLATION_POLICY = createField(DSL.name("translation_policy"), SQLDataType.VARCHAR(16).nullable(false).defaultValue(DSL.field(DSL.raw("'BEST_EFFORT'::character varying"), SQLDataType.VARCHAR)), this, "");
+
     private VirtualModels(Name alias, Table<VirtualModelsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -306,6 +316,7 @@ public class VirtualModels extends TableImpl<VirtualModelsRecord> {
             Internal.createCheck(this, DSL.name("virtual_models_routing_strategy_check"), "(((routing_strategy)::text = ANY ((ARRAY['PRIORITY_WEIGHTED'::character varying, 'LOWEST_COST'::character varying, 'TTFT_AWARE'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("virtual_models_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DEPRECATED'::character varying, 'DISABLED'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("virtual_models_sticky_ttl_seconds_check"), "((sticky_ttl_seconds > 0))", true),
+            Internal.createCheck(this, DSL.name("virtual_models_translation_policy_check"), "(((translation_policy)::text = ANY ((ARRAY['BEST_EFFORT'::character varying, 'STRICT'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("virtual_models_visibility_check"), "(((visibility)::text = ANY ((ARRAY['PUBLIC'::character varying, 'RESTRICTED'::character varying])::text[])))", true)
         );
     }

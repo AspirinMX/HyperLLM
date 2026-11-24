@@ -121,7 +121,7 @@ public final class OpenAiChatProtocolAdapter implements ProtocolAdapter {
         int cachedRead = Math.max(0, usage.path("prompt_tokens_details").path("cached_tokens").asInt(0));
         int cachedWrite = Math.max(0, usage.path("prompt_tokens_details").path("cache_write_tokens").asInt(0));
         int reasoning = Math.max(0, usage.path("completion_tokens_details").path("reasoning_tokens").asInt(0));
-        return new TokenUsage(prompt, cachedRead, cachedWrite, completion, reasoning, false);
+        return TokenUsage.fromOpenAiInclusive(prompt, cachedRead, cachedWrite, completion, reasoning);
     }
 
     private final class OpenAiStreamTracker implements StreamUsageTracker {

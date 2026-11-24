@@ -105,6 +105,16 @@ public class Providers extends TableImpl<ProvidersRecord> {
      */
     public final TableField<ProvidersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.providers.supported_protocols</code>.
+     */
+    public final TableField<ProvidersRecord, String[]> SUPPORTED_PROTOCOLS = createField(DSL.name("supported_protocols"), SQLDataType.VARCHAR(32).array().nullable(false).defaultValue(DSL.field(DSL.raw("ARRAY['OPENAI_CHAT'::character varying(32)]"), SQLDataType.VARCHAR.array())), this, "");
+
+    /**
+     * The column <code>public.providers.default_wire_protocol</code>.
+     */
+    public final TableField<ProvidersRecord, String> DEFAULT_WIRE_PROTOCOL = createField(DSL.name("default_wire_protocol"), SQLDataType.VARCHAR(32).nullable(false).defaultValue(DSL.field(DSL.raw("'OPENAI_CHAT'::character varying"), SQLDataType.VARCHAR)), this, "");
+
     private Providers(Name alias, Table<ProvidersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -198,7 +208,9 @@ public class Providers extends TableImpl<ProvidersRecord> {
     @Override
     public List<Check<ProvidersRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("providers_auth_scheme_check"), "(((auth_scheme)::text = ANY ((ARRAY['BEARER'::character varying, 'X_API_KEY'::character varying, 'AZURE_API_KEY'::character varying, 'AWS_SIGV4'::character varying, 'GCP_OAUTH'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("chk_providers_supported_protocols"), "(((cardinality(supported_protocols) > 0) AND (supported_protocols <@ ARRAY['OPENAI_CHAT'::character varying(32), 'OPENAI_RESPONSES'::character varying(32), 'ANTHROPIC_MESSAGES'::character varying(32), 'GEMINI_GENERATE_CONTENT'::character varying(32)])))", true),
+            Internal.createCheck(this, DSL.name("providers_auth_scheme_check"), "(((auth_scheme)::text = ANY ((ARRAY['BEARER'::character varying, 'X_API_KEY'::character varying, 'X_GOOG_API_KEY'::character varying, 'AZURE_API_KEY'::character varying, 'AWS_SIGV4'::character varying, 'GCP_OAUTH'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("providers_default_wire_protocol_check"), "(((default_wire_protocol)::text = ANY ((ARRAY['OPENAI_CHAT'::character varying, 'OPENAI_RESPONSES'::character varying, 'ANTHROPIC_MESSAGES'::character varying, 'GEMINI_GENERATE_CONTENT'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("providers_protocol_family_check"), "(((protocol_family)::text = ANY ((ARRAY['OPENAI'::character varying, 'ANTHROPIC'::character varying, 'GEMINI'::character varying, 'COHERE_RERANK'::character varying])::text[])))", true),
             Internal.createCheck(this, DSL.name("providers_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DISABLED'::character varying])::text[])))", true)
         );

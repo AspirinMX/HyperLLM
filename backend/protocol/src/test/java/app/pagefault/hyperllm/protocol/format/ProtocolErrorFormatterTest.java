@@ -42,5 +42,36 @@ class ProtocolErrorFormatterTest {
                   }
                 }
                 """, anthropicJson, true);
+
+        String geminiJson = formatter.formatErrorJson(
+                ProtocolKind.GEMINI_GENERATE_CONTENT,
+                ErrorCode.PROTOCOL_UNSUPPORTED_FEATURE,
+                "previous_response_id is unsupported"
+        );
+        JSONAssert.assertEquals("""
+                {
+                  "error": {
+                    "code": 400,
+                    "message": "previous_response_id is unsupported",
+                    "status": "INVALID_ARGUMENT"
+                  }
+                }
+                """, geminiJson, true);
+
+        byte[] translated = formatter.translateUpstreamError(
+                ProtocolKind.ANTHROPIC_MESSAGES,
+                ProtocolKind.GEMINI_GENERATE_CONTENT,
+                400,
+                "{\"error\":{\"code\":400,\"message\":\"Invalid argument in contents\",\"status\":\"INVALID_ARGUMENT\"}}".getBytes()
+        );
+        JSONAssert.assertEquals("""
+                {
+                  "type": "error",
+                  "error": {
+                    "type": "invalid_request_error",
+                    "message": "Invalid argument in contents"
+                  }
+                }
+                """, new String(translated), true);
     }
 }

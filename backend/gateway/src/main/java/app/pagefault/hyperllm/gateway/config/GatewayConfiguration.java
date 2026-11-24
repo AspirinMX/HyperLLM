@@ -3,6 +3,8 @@ package app.pagefault.hyperllm.gateway.config;
 import app.pagefault.hyperllm.common.crypto.AesGcmCipher;
 import app.pagefault.hyperllm.protocol.adapter.ProtocolRegistry;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
+import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -24,13 +26,27 @@ public class GatewayConfiguration {
     }
 
     @Bean
-    public ProtocolRegistry protocolRegistry(ObjectMapper objectMapper) {
-        return new ProtocolRegistry(objectMapper);
+    public TokenEstimator tokenEstimator() {
+        return new TokenEstimator();
+    }
+
+    @Bean
+    public ProtocolRegistry protocolRegistry(ObjectMapper objectMapper, TokenEstimator tokenEstimator) {
+        return new ProtocolRegistry(objectMapper, tokenEstimator);
     }
 
     @Bean
     public ProtocolErrorFormatter protocolErrorFormatter(ObjectMapper objectMapper) {
         return new ProtocolErrorFormatter(objectMapper);
+    }
+
+    @Bean
+    public ProtocolTranslator protocolTranslator(
+            ObjectMapper objectMapper,
+            TokenEstimator tokenEstimator,
+            ProtocolErrorFormatter protocolErrorFormatter
+    ) {
+        return new ProtocolTranslator(objectMapper, tokenEstimator, protocolErrorFormatter);
     }
 
     @Bean(name = "domainFallbackScheduler", destroyMethod = "dispose")

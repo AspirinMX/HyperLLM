@@ -156,6 +156,36 @@ public class ProvidersRecord extends UpdatableRecordImpl<ProvidersRecord> {
         return (OffsetDateTime) get(8);
     }
 
+    /**
+     * Setter for <code>public.providers.supported_protocols</code>.
+     */
+    public ProvidersRecord setSupportedProtocols(String[] value) {
+        set(9, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.providers.supported_protocols</code>.
+     */
+    public String[] getSupportedProtocols() {
+        return (String[]) get(9);
+    }
+
+    /**
+     * Setter for <code>public.providers.default_wire_protocol</code>.
+     */
+    public ProvidersRecord setDefaultWireProtocol(String value) {
+        set(10, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>public.providers.default_wire_protocol</code>.
+     */
+    public String getDefaultWireProtocol() {
+        return (String) get(10);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -179,7 +209,7 @@ public class ProvidersRecord extends UpdatableRecordImpl<ProvidersRecord> {
     /**
      * Create a detached, initialised ProvidersRecord
      */
-    public ProvidersRecord(UUID id, String code, String displayName, String protocolFamily, String defaultBaseUrl, String authScheme, String status, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public ProvidersRecord(UUID id, String code, String displayName, String protocolFamily, String defaultBaseUrl, String authScheme, String status, OffsetDateTime createdAt, OffsetDateTime updatedAt, String[] supportedProtocols, String defaultWireProtocol) {
         super(Providers.PROVIDERS);
 
         setId(id);
@@ -191,6 +221,8 @@ public class ProvidersRecord extends UpdatableRecordImpl<ProvidersRecord> {
         setStatus(status);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setSupportedProtocols(supportedProtocols);
+        setDefaultWireProtocol(defaultWireProtocol);
         resetChangedOnNotNull();
     }
 }

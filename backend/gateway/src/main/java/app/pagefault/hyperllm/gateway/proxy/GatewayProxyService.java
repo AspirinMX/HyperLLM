@@ -17,11 +17,9 @@ import app.pagefault.hyperllm.domain.pricing.ResolvedPricing;
 import app.pagefault.hyperllm.common.messaging.LlmRequestEvent;
 import app.pagefault.hyperllm.common.net.CidrMatcher;
 import app.pagefault.hyperllm.domain.model.enums.ApiKeyStatus;
-import app.pagefault.hyperllm.domain.model.enums.AuthScheme;
 import app.pagefault.hyperllm.domain.model.enums.ModelStatus;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import app.pagefault.hyperllm.domain.model.enums.ProjectStatus;
-import app.pagefault.hyperllm.domain.model.enums.ProtocolFamily;
 import app.pagefault.hyperllm.domain.model.routing.GatewayChannelCandidate;
 import app.pagefault.hyperllm.domain.model.routing.GatewayModelRoute;
 import app.pagefault.hyperllm.domain.model.routing.PricingRule;
@@ -38,14 +36,17 @@ import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import app.pagefault.hyperllm.gateway.outbox.OutboxAdmissionGate;
 import app.pagefault.hyperllm.gateway.routing.ChannelSelector;
 import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
-import app.pagefault.hyperllm.protocol.adapter.ProtocolAdapter;
-import app.pagefault.hyperllm.protocol.adapter.ProtocolRegistry;
-import app.pagefault.hyperllm.protocol.adapter.StreamUsageTracker;
-import app.pagefault.hyperllm.protocol.ir.CanonicalChatRequest;
+import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
+import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamRequest;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
+import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
+import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
+import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
+import app.pagefault.hyperllm.protocol.translate.StreamBridge;
+import app.pagefault.hyperllm.protocol.translate.UpstreamEndpointResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -131,16 +132,16 @@ public class GatewayProxyService {
     private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
     private final GatewayProperties properties;
-    private final ProtocolRegistry protocolRegistry;
+    private final ProtocolTranslator protocolTranslator;
     private final AesGcmCipher aesGcmCipher;
     private final ChannelSelector channelSelector;
     private final UpstreamWebClientPool webClientPool;
     private final app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService;
     private final ObjectMapper objectMapper;
-    private final TokenEstimator tokenEstimator = new TokenEstimator();
+    private final TokenEstimator tokenEstimator;
 
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
-        String rawToken = extractToken(exchange.getRequest());
+        String rawToken = extractToken(exchange.getRequest(), ProtocolKind.OPENAI_CHAT);
         String clientIp = extractClientIp(exchange.getRequest());
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> cacheService.listPublicModels()
@@ -164,17 +165,22 @@ public class GatewayProxyService {
             ProtocolKind protocolKind,
             byte[] rawBody
     ) {
+        return proxy(exchange, protocolKind, InboundRequestContext.empty(), rawBody);
+    }
+
+    public Mono<ResponseEntity<Flux<DataBuffer>>> proxy(
+            ServerWebExchange exchange,
+            ProtocolKind protocolKind,
+            InboundRequestContext inboundContext,
+            byte[] rawBody
+    ) {
         long requestStartNanos = System.nanoTime();
         String requestId = UuidV7.next().toString();
         String traceId = requestId.replace("-", "");
-        String rawToken = extractToken(exchange.getRequest());
+        String rawToken = extractToken(exchange.getRequest(), protocolKind);
         String clientIp = extractClientIp(exchange.getRequest());
 
-        ProtocolAdapter adapter = protocolRegistry.adapterFor(protocolKind);
-        var canonical = adapter.parseRequest(rawBody);
-        ProtocolFamily requiredFamily = (protocolKind == ProtocolKind.ANTHROPIC_MESSAGES)
-                ? ProtocolFamily.ANTHROPIC
-                : ProtocolFamily.OPENAI;
+        CanonicalRequest canonical = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
 
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
@@ -193,18 +199,20 @@ public class GatewayProxyService {
                                             ErrorCode.MODEL_PRICING_MISSING,
                                             "Model " + vm.modelCode() + " has no active pricing rule"));
                                 }
-                                List<GatewayChannelCandidate> candidates = route.candidates().stream()
-                                        .filter(c -> c.protocolFamily() == requiredFamily)
-                                        .toList();
+                                List<GatewayChannelCandidate> candidates = vm.allowProtocolTranslation()
+                                        ? route.candidates()
+                                        : route.candidates().stream()
+                                                .filter(c -> c.isHomomorphicFor(protocolKind.name()))
+                                                .toList();
                                 if (candidates.isEmpty()) {
                                     return Mono.error(new HyperLlmException(
                                             ErrorCode.CHANNEL_UNAVAILABLE,
-                                            "No active channel matches protocol " + requiredFamily
+                                            "No active channel available for protocol " + protocolKind
                                     ));
                                 }
                                 return preparePreHold(caller, route, canonical, requestId)
                                         .flatMap(lease -> dispatchWithRetry(
-                                                exchange, adapter, protocolKind, rawBody, canonical.stream(),
+                                                exchange, canonical, protocolKind, rawBody,
                                                 caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
                                         ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
                             });
@@ -213,10 +221,9 @@ public class GatewayProxyService {
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> dispatchWithRetry(
             ServerWebExchange exchange,
-            ProtocolAdapter adapter,
+            CanonicalRequest canonical,
             ProtocolKind protocolKind,
             byte[] rawBody,
-            boolean isStream,
             CallerContext caller,
             GatewayModelRoute route,
             List<GatewayChannelCandidate> candidates,
@@ -228,9 +235,12 @@ public class GatewayProxyService {
     ) {
         Set<UUID> excludedChannels = ConcurrentHashMap.newKeySet();
         AtomicInteger attemptCounter = new AtomicInteger(0);
+        TranslationPolicy policy = TranslationPolicy.parseOrDefault(
+                route.model().translationPolicy(), TranslationPolicy.BEST_EFFORT);
+        String thinkingStyle = extractThinkingStyle(route.model().metadataJson());
 
         return Mono.defer(() -> {
-            GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels);
+            GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels, protocolKind);
             if (candidate == null) {
                 return Mono.error(new HyperLlmException(ErrorCode.CHANNEL_UNAVAILABLE, "All upstream channels exhausted"));
             }
@@ -238,9 +248,18 @@ public class GatewayProxyService {
             int retryCount = Math.max(0, attemptIndex - 1);
             String attemptId = lease.holdId() + ":" + attemptIndex;
 
-            PreparedUpstreamRequest prepared = adapter.prepareUpstreamRequest(rawBody, candidate.upstreamModelName());
+            ProtocolKind outboundProtocol = resolveOutboundProtocol(candidate, protocolKind);
+            UpstreamEncodingContext encodingContext = new UpstreamEncodingContext(
+                    candidate.upstreamModelName(),
+                    route.model().maxOutputTokens(),
+                    policy,
+                    thinkingStyle
+            );
+            PreparedUpstreamRequest prepared = protocolTranslator.prepareUpstreamRequest(
+                    rawBody, canonical, outboundProtocol, encodingContext);
             String upstreamApiKey = decryptChannelApiKey(candidate);
-            String targetUrl = buildTargetUrl(candidate, protocolKind);
+            String targetUrl = UpstreamEndpointResolver.buildInferenceUrl(
+                    candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), canonical.stream());
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
             return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
@@ -252,7 +271,7 @@ public class GatewayProxyService {
                         }
                         return executeSingleAttempt(
                                 exchange, client, targetUrl, candidate, upstreamApiKey,
-                                adapter, prepared, protocolKind, isStream,
+                                canonical, prepared, protocolKind, outboundProtocol,
                                 caller, route, lease, excludedChannels,
                                 requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
                         );
@@ -268,10 +287,10 @@ public class GatewayProxyService {
             String targetUrl,
             GatewayChannelCandidate candidate,
             String upstreamApiKey,
-            ProtocolAdapter adapter,
+            CanonicalRequest canonical,
             PreparedUpstreamRequest prepared,
             ProtocolKind protocolKind,
-            boolean isStream,
+            ProtocolKind outboundProtocol,
             CallerContext caller,
             GatewayModelRoute route,
             PreHoldService.Lease lease,
@@ -295,7 +314,7 @@ public class GatewayProxyService {
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
                 .contentType(MediaType.APPLICATION_JSON)
-                .headers(headers -> applyUpstreamAuth(headers, candidate, upstreamApiKey))
+                .headers(headers -> applyUpstreamHeaders(headers, candidate, outboundProtocol, upstreamApiKey, canonical))
                 .bodyValue(prepared.upstreamBody())
                 .exchangeToFlux(clientResponse -> {
                     int status = clientResponse.statusCode().value();
@@ -305,11 +324,11 @@ public class GatewayProxyService {
                                 .thenMany(Flux.error(new RetryableUpstreamException(
                                         status, "Upstream returned retryable status " + status)));
                     }
-                    if (!isStream || !clientResponse.statusCode().is2xxSuccessful()) {
+                    if (!canonical.stream() || !clientResponse.statusCode().is2xxSuccessful()) {
                         return clientResponse.bodyToMono(byte[].class)
                                 .defaultIfEmpty(new byte[0])
                                 .flatMapMany(bodyBytes -> handleNonStreamingResponse(
-                                        exchange, adapter, prepared, protocolKind, status, bodyBytes,
+                                        exchange, canonical, protocolKind, outboundProtocol, status, bodyBytes,
                                         caller, route, candidate, lease, requestStartNanos,
                                         requestId, traceId, clientIp, retryCount
                                 ).doFinally(signal -> releaseCapacity.run())
@@ -318,7 +337,7 @@ public class GatewayProxyService {
                                         .thenMany(Flux.empty()));
                     }
                     return bridgeStreamingResponse(
-                            exchange, clientResponse, adapter, prepared, protocolKind,
+                            exchange, clientResponse, canonical, protocolKind, outboundProtocol,
                             caller, route, candidate, lease, requestStartNanos,
                             requestId, traceId, clientIp, retryCount,
                             responseSink, upstreamSubRef, releaseCapacity
@@ -352,9 +371,9 @@ public class GatewayProxyService {
     private Flux<Void> bridgeStreamingResponse(
             ServerWebExchange exchange,
             org.springframework.web.reactive.function.client.ClientResponse clientResponse,
-            ProtocolAdapter adapter,
-            PreparedUpstreamRequest prepared,
+            CanonicalRequest canonical,
             ProtocolKind protocolKind,
+            ProtocolKind outboundProtocol,
             CallerContext caller,
             GatewayModelRoute route,
             GatewayChannelCandidate candidate,
@@ -368,7 +387,7 @@ public class GatewayProxyService {
             AtomicReference<Subscription> upstreamSubRef,
             Runnable releaseCapacity
     ) {
-        StreamUsageTracker tracker = adapter.newStreamTracker(prepared.canonicalRequest());
+        StreamBridge bridge = protocolTranslator.newStreamBridge(canonical, outboundProtocol);
         AtomicBoolean settled = new AtomicBoolean(false);
         AtomicLong firstByteNanos = new AtomicLong(0L);
         DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();
@@ -387,7 +406,7 @@ public class GatewayProxyService {
                     if (settled.get()) {
                         return;
                     }
-                    TokenUsage fallback = tracker.finalizeUsage(false);
+                    TokenUsage fallback = bridge.finalizeUsage(false);
                     settleReactive(
                             settled, false, fallback,
                             requestStartNanos, firstByteNanos.get(),
@@ -398,7 +417,7 @@ public class GatewayProxyService {
                 });
 
         responseSink.tryEmitValue(ResponseEntity.status(clientResponse.statusCode())
-                .contentType(MediaType.TEXT_EVENT_STREAM)
+                .contentType(MediaType.parseMediaType(bridge.contentType()))
                 .body(clientFrames));
 
         return Flux.using(() -> startHeartbeat(lease), heartbeat -> clientResponse.bodyToFlux(DataBuffer.class)
@@ -406,12 +425,12 @@ public class GatewayProxyService {
                     try {
                         byte[] bytes = new byte[dataBuffer.readableByteCount()];
                         dataBuffer.read(bytes);
-                        return tracker.feed(bytes);
+                        return bridge.feed(bytes);
                     } finally {
                         DataBufferUtils.release(dataBuffer);
                     }
                 })
-                .concatWith(Flux.defer(() -> Flux.fromIterable(tracker.complete())))
+                .concatWith(Flux.defer(() -> Flux.fromIterable(bridge.complete())))
                 .concatMap(frame -> firstByteNanos.get() == 0L
                         ? preHoldService.markServed(lease)
                                 .onErrorResume(ex -> {
@@ -425,7 +444,7 @@ public class GatewayProxyService {
                     frameSink.tryEmitNext(frame);
                 })
                 .then(Mono.defer(() -> settleReactive(
-                        settled, true, tracker.finalizeUsage(true),
+                        settled, true, bridge.finalizeUsage(true),
                         requestStartNanos, firstByteNanos.get(),
                         requestId, traceId, caller, route, candidate,
                         candidate.upstreamModelName(),
@@ -433,7 +452,7 @@ public class GatewayProxyService {
                 )))
                 .then(Mono.fromRunnable(frameSink::tryEmitComplete))
                 .onErrorResume(ex -> settleReactive(
-                        settled, false, tracker.finalizeUsage(false),
+                        settled, false, bridge.finalizeUsage(false),
                         requestStartNanos, firstByteNanos.get(),
                         requestId, traceId, caller, route, candidate,
                         candidate.upstreamModelName(),
@@ -444,9 +463,9 @@ public class GatewayProxyService {
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> handleNonStreamingResponse(
             ServerWebExchange exchange,
-            ProtocolAdapter adapter,
-            PreparedUpstreamRequest prepared,
+            CanonicalRequest canonical,
             ProtocolKind protocolKind,
+            ProtocolKind outboundProtocol,
             int status,
             byte[] bodyBytes,
             CallerContext caller,
@@ -461,14 +480,14 @@ public class GatewayProxyService {
     ) {
         AtomicBoolean settled = new AtomicBoolean(false);
         TokenUsage usage = TokenUsage.empty();
+        byte[] clientBody;
         if (status >= 200 && status < 300) {
-            usage = adapter.extractNonStreamingUsage(bodyBytes)
-                    .orElseGet(() -> new TokenUsage(
-                            tokenEstimator.estimatePromptTokens(prepared.canonicalRequest()),
-                            0, 0,
-                            tokenEstimator.countText(prepared.canonicalRequest().model(), new String(bodyBytes)),
-                            0, true
-                    ));
+            ProtocolTranslator.TranslatedResponse translated =
+                    protocolTranslator.translateNonStreamingResponse(canonical, outboundProtocol, bodyBytes);
+            usage = translated.usage();
+            clientBody = translated.clientBody();
+        } else {
+            clientBody = protocolTranslator.translateUpstreamError(protocolKind, outboundProtocol, status, bodyBytes);
         }
         long nowNanos = System.nanoTime();
         String errorCode = status >= 400 ? "UPSTREAM_HTTP_" + status : null;
@@ -479,7 +498,7 @@ public class GatewayProxyService {
                 candidate.upstreamModelName(), protocolKind, false, status, errorCode, retryCount, clientIp, lease
         ).thenReturn(ResponseEntity.status(status)
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Flux.just(exchange.getResponse().bufferFactory().wrap(bodyBytes))));
+                .body(Flux.just(exchange.getResponse().bufferFactory().wrap(clientBody))));
     }
 
     private Mono<Void> settleReactive(
@@ -576,7 +595,8 @@ public class GatewayProxyService {
                         billable.cacheWriteTokens(), billable.reasoningTokens(),
                         pricing.inputPriceMicros1m(), pricing.outputPriceMicros1m(),
                         pricing.cacheReadPriceMicros1m(), pricing.cacheWritePriceMicros1m(),
-                        pricing.reasoningPriceMicros1m()),
+                        PricingResolver.effectiveReasoningPrice(
+                                pricing.reasoningPriceMicros1m(), pricing.outputPriceMicros1m())),
                 candidate.effectiveCostDiscountBps());
 
         return mirrorService.heldLegs(lease.holdId())
@@ -627,7 +647,7 @@ public class GatewayProxyService {
 
     private static long actualTokens(BillableUsage usage) {
         return usage.promptTokens() + usage.cacheReadTokens() + usage.cacheWriteTokens()
-                + usage.completionTokens();
+                + usage.completionTokens() + usage.reasoningTokens();
     }
 
     private Disposable startHeartbeat(PreHoldService.Lease lease) {
@@ -649,15 +669,15 @@ public class GatewayProxyService {
     private Mono<PreHoldService.Lease> preparePreHold(
             CallerContext caller,
             GatewayModelRoute route,
-            CanonicalChatRequest canonical,
+            CanonicalRequest canonical,
             String requestId
     ) {
         outboxAdmissionGate.check();
         GatewayProperties.Billing billing = properties.getBilling();
         String modelCode = route.model().modelCode();
         long promptEstimate = Math.max(0L, tokenEstimator.estimatePromptTokens(canonical));
-        int outputCap = canonical.maxTokens() != null && canonical.maxTokens() > 0
-                ? canonical.maxTokens()
+        int outputCap = canonical.maxOutputTokens() != null && canonical.maxOutputTokens() > 0
+                ? canonical.maxOutputTokens()
                 : billing.getDefaultOutputTokens();
 
         return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())
@@ -857,24 +877,54 @@ public class GatewayProxyService {
         }
     }
 
-    private static String buildTargetUrl(GatewayChannelCandidate candidate, ProtocolKind protocolKind) {
-        String base = candidate.resolvedBaseUrl();
-        while (base.endsWith("/")) {
-            base = base.substring(0, base.length() - 1);
-        }
-        return switch (protocolKind) {
-            case OPENAI_CHAT -> base + "/chat/completions";
-            case ANTHROPIC_MESSAGES -> base + "/messages";
-        };
+    private static ProtocolKind resolveOutboundProtocol(GatewayChannelCandidate candidate, ProtocolKind inboundProtocol) {
+        ProtocolKind resolved = ProtocolKind.parseOrNull(candidate.resolveOutboundProtocolName(inboundProtocol.name()));
+        return resolved != null ? resolved : ProtocolKind.OPENAI_CHAT;
     }
 
-    private static void applyUpstreamAuth(HttpHeaders headers, GatewayChannelCandidate candidate, String apiKey) {
-        if (candidate.authScheme() == AuthScheme.X_API_KEY) {
-            headers.set("x-api-key", apiKey);
-            headers.set("anthropic-version", "2023-06-01");
-        } else {
-            headers.setBearerAuth(apiKey);
+    private void applyUpstreamHeaders(
+            HttpHeaders headers,
+            GatewayChannelCandidate candidate,
+            ProtocolKind outboundProtocol,
+            String apiKey,
+            CanonicalRequest canonical
+    ) {
+        Map<String, String> authHeaders = UpstreamEndpointResolver.buildAuthHeaders(
+                candidate.authScheme().name(),
+                outboundProtocol,
+                apiKey,
+                canonical.options().anthropicVersion(),
+                canonical.options().anthropicBeta()
+        );
+        authHeaders.forEach(headers::set);
+        if (candidate.extraHeadersJson() != null && !candidate.extraHeadersJson().isBlank()
+                && !"{}".equals(candidate.extraHeadersJson().trim())) {
+            try {
+                JsonNode extra = objectMapper.readTree(candidate.extraHeadersJson());
+                if (extra != null && extra.isObject()) {
+                    extra.fields().forEachRemaining(e -> {
+                        if (e.getValue().isTextual()) {
+                            headers.set(e.getKey(), e.getValue().asText());
+                        }
+                    });
+                }
+            } catch (Exception ignored) {
+            }
         }
+    }
+
+    private String extractThinkingStyle(String metadataJson) {
+        if (metadataJson == null || metadataJson.isBlank() || "{}".equals(metadataJson.trim())) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(metadataJson);
+            if (root != null && root.isObject() && root.hasNonNull("thinkingStyle")) {
+                return root.get("thinkingStyle").asText();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private static Throwable unwrapRetryError(Throwable ex) {
@@ -892,13 +942,26 @@ public class GatewayProxyService {
         return ex;
     }
 
-    private static String extractToken(ServerHttpRequest request) {
+    private static String extractToken(ServerHttpRequest request, ProtocolKind protocolKind) {
         String auth = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
         if (auth != null && auth.startsWith("Bearer ")) {
             return auth.substring("Bearer ".length()).trim();
         }
         String xApiKey = request.getHeaders().getFirst("x-api-key");
-        return xApiKey != null ? xApiKey.trim() : null;
+        if (xApiKey != null && !xApiKey.isBlank()) {
+            return xApiKey.trim();
+        }
+        String googKey = request.getHeaders().getFirst("x-goog-api-key");
+        if (googKey != null && !googKey.isBlank()) {
+            return googKey.trim();
+        }
+        if (protocolKind == ProtocolKind.GEMINI_GENERATE_CONTENT) {
+            String queryKey = request.getQueryParams().getFirst("key");
+            if (queryKey != null && !queryKey.isBlank()) {
+                return queryKey.trim();
+            }
+        }
+        return null;
     }
 
     private static String extractClientIp(ServerHttpRequest request) {

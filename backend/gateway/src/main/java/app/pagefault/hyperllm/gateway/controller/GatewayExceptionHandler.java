@@ -45,8 +45,18 @@ public class GatewayExceptionHandler {
 
     private static ProtocolKind resolveProtocol(ServerWebExchange exchange) {
         String path = exchange.getRequest().getURI().getPath();
-        return path != null && path.startsWith("/v1/messages")
-                ? ProtocolKind.ANTHROPIC_MESSAGES
-                : ProtocolKind.OPENAI_CHAT;
+        if (path == null) {
+            return ProtocolKind.OPENAI_CHAT;
+        }
+        if (path.startsWith("/v1/messages")) {
+            return ProtocolKind.ANTHROPIC_MESSAGES;
+        }
+        if (path.startsWith("/v1/responses")) {
+            return ProtocolKind.OPENAI_RESPONSES;
+        }
+        if (path.startsWith("/v1beta/models")) {
+            return ProtocolKind.GEMINI_GENERATE_CONTENT;
+        }
+        return ProtocolKind.OPENAI_CHAT;
     }
 }

@@ -77,7 +77,10 @@ class OpenAiChatProtocolAdapterTest {
         assertThat(emitted).doesNotContain("\"usage\"");
 
         TokenUsage usage = tracker.finalizeUsage(true);
-        assertThat(usage).isEqualTo(new TokenUsage(14, 6, 0, 4, 1, false));
+        // Disjoint normalization: prompt=14-6=8, cachedRead=6, completion=4-1=3, reasoning=1
+        assertThat(usage).isEqualTo(new TokenUsage(8, 6, 0, 3, 1, false));
+        assertThat(usage.totalInputTokens()).isEqualTo(14);
+        assertThat(usage.totalOutputTokens()).isEqualTo(4);
     }
 
     @Test
@@ -129,6 +132,6 @@ class OpenAiChatProtocolAdapterTest {
                 """.getBytes(StandardCharsets.UTF_8);
 
         assertThat(adapter.extractNonStreamingUsage(response))
-                .contains(new TokenUsage(120, 40, 10, 45, 15, false));
+                .contains(new TokenUsage(70, 40, 10, 30, 15, false));
     }
 }

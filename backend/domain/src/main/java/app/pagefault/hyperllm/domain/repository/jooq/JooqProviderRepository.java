@@ -49,6 +49,8 @@ public class JooqProviderRepository implements ProviderRepository {
                 r.getCode(),
                 r.getDisplayName(),
                 PgJooqSupport.toEnum(ProtocolFamily.class, r.getProtocolFamily()),
+                PgJooqSupport.fromTextArray(r.getSupportedProtocols()),
+                r.getDefaultWireProtocol(),
                 r.getDefaultBaseUrl(),
                 PgJooqSupport.toEnum(AuthScheme.class, r.getAuthScheme()),
                 r.getStatus(),

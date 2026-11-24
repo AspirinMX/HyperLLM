@@ -528,6 +528,215 @@ class GatewayE2EIntegrationTest {
                 .expectBody().jsonPath("$.error.code").isEqualTo("PROJECT_BUDGET_UNAVAILABLE");
     }
 
+    @Test
+    void supportsAllFourProtocolsCrossProtocolTranslationFailoverAndReasoningPricingFallback() throws Exception {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        CustomerTier standard = tierRepository.findActiveByCode("STANDARD").orElseThrow();
+        UUID ownerId = UuidV7.next();
+        UUID orgId = UuidV7.next();
+        UUID projectId = UuidV7.next();
+        userRepository.insert(new User(
+                ownerId, "xproto-" + ownerId + "@example.com", now, "XProto Owner",
+                null, "en-US", "USD", orgId, UserStatus.ACTIVE, now, null, 0L, now, now
+        ));
+        organizationRepository.insert(new Organization(
+                orgId, "XProto Org", "xproto-" + orgId.toString().substring(0, 8),
+                ownerId, standard.id(), 10_000, 50, false, OrgStatus.ACTIVE, null, 0L, now, now
+        ));
+        projectRepository.insert(new Project(
+                projectId, orgId, "default", ProjectEnvironment.PRODUCTION, null, null,
+                List.of("omni-xproto", "gem-to-oai"), 100, null, null, false, (short) 7,
+                null, ProjectStatus.ACTIVE, null, 0L, now, now
+        ));
+        walletRepository.insert(new Wallet(orgId, 100_000L, 0L, 100_000L, 0L, 0L, 0L, null, 0L, now));
+
+        var generated = ApiKeyGenerator.generateLiveKey();
+        String keyHash = HmacSha256.hmacHex(generated.rawKey(), "gateway-test-pepper-v1");
+        apiKeyRepository.insert(new ApiKey(
+                UuidV7.next(), projectId, orgId, ownerId, "XProto Key", generated.keyPrefix(), keyHash, (short) 1,
+                List.of("omni-xproto", "gem-to-oai"), null, 100, null, null, null, null, null,
+                ApiKeyStatus.ACTIVE, null, 0L, now, now
+        ));
+
+        Provider anthropic = providerRepository.findByCode("ANTHROPIC").orElseThrow();
+        Provider gemini = providerRepository.findByCode("GOOGLE_GEMINI").orElseThrow();
+        Provider deepseek = providerRepository.findByCode("DEEPSEEK").orElseThrow();
+
+        UUID failingAntChannel = UuidV7.next();
+        UUID geminiChannel = UuidV7.next();
+        UUID deepseekChannel = UuidV7.next();
+        channelRepository.insert(new Channel(
+                failingAntChannel, anthropic.id(), "ant-529-" + failingAntChannel, "us-east",
+                "http://127.0.0.1:" + WIREMOCK.port() + "/xant",
+                aesGcmCipher.encryptUtf8("{\"apiKey\":\"sk-ant-529\"}", failingAntChannel.toString()),
+                (short) 1, 10_000, null, null, null, null, ChannelStatus.ACTIVE, null, 0L, now, now
+        ));
+        channelRepository.insert(new Channel(
+                geminiChannel, gemini.id(), "gem-ok-" + geminiChannel, "us-central1",
+                "http://127.0.0.1:" + WIREMOCK.port() + "/xgem",
+                aesGcmCipher.encryptUtf8("{\"apiKey\":\"AIza-test-key\"}", geminiChannel.toString()),
+                (short) 1, 10_000, null, null, null, null, ChannelStatus.ACTIVE, null, 0L, now, now
+        ));
+        channelRepository.insert(new Channel(
+                deepseekChannel, deepseek.id(), "ds-ok-" + deepseekChannel, "ap-east",
+                "http://127.0.0.1:" + WIREMOCK.port() + "/xds/v1",
+                aesGcmCipher.encryptUtf8("{\"apiKey\":\"sk-ds-ok\"}", deepseekChannel.toString()),
+                (short) 1, 10_000, null, null, null, null, ChannelStatus.ACTIVE, null, 0L, now, now
+        ));
+
+        // Model 1: omni-xproto (Tier 1: Anthropic 529 homomorphic; Tier 1: Gemini heterogeneous fallback)
+        // Pricing intentionally sets reasoningPriceMicros1m = 0 to verify confirmed rule: fallback to outputPriceMicros1m (2_000_000)
+        UUID omniModelId = UuidV7.next();
+        modelRepository.insert(new VirtualModel(
+                omniModelId, "omni-xproto", "Omni Cross-Protocol", "HyperLLM",
+                ModelCapability.CHAT, ProtocolFamily.ANTHROPIC, 200_000, 8192,
+                true, true, true, true, RoutingStrategy.PRIORITY_WEIGHTED,
+                false, 300, ModelVisibility.PUBLIC, null, ModelStatus.ACTIVE, "{}",
+                true, "BEST_EFFORT", null, 0L, now, now
+        ));
+        bindingRepository.insert(new ModelChannelBinding(
+                UuidV7.next(), omniModelId, failingAntChannel, "claude-sonnet-4-5", null, (short) 1, 10,
+                null, null, "{}", BindingStatus.ACTIVE, null, 0L, now, now
+        ));
+        bindingRepository.insert(new ModelChannelBinding(
+                UuidV7.next(), omniModelId, geminiChannel, "gemini-2.5-flash", null, (short) 1, 900,
+                null, null, "{}", BindingStatus.ACTIVE, null, 0L, now, now
+        ));
+        pricingRuleRepository.insert(new PricingRule(
+                UuidV7.next(), omniModelId, BillingMode.TOKEN,
+                1_000_000L, 2_000_000L, 250_000L, 0L, 0L, 0L, "[]", "{}",
+                now.minusDays(1), null, null, now
+        ));
+
+        // Model 2: gem-to-oai (only OPENAI_CHAT channel; called via Gemini endpoint with ?key= and OpenAI Responses)
+        UUID gemToOaiId = UuidV7.next();
+        modelRepository.insert(new VirtualModel(
+                gemToOaiId, "gem-to-oai", "Gemini To OpenAI", "DeepSeek",
+                ModelCapability.CHAT, ProtocolFamily.OPENAI, 128_000, 4096,
+                true, false, false, false, RoutingStrategy.PRIORITY_WEIGHTED,
+                false, 300, ModelVisibility.PUBLIC, null, ModelStatus.ACTIVE, "{}",
+                true, "BEST_EFFORT", null, 0L, now, now
+        ));
+        bindingRepository.insert(new ModelChannelBinding(
+                UuidV7.next(), gemToOaiId, deepseekChannel, "deepseek-chat", null, (short) 1, 100,
+                null, null, "{}", BindingStatus.ACTIVE, null, 0L, now, now
+        ));
+        pricingRuleRepository.insert(new PricingRule(
+                UuidV7.next(), gemToOaiId, BillingMode.TOKEN,
+                1_000_000L, 1_000_000L, 0L, 0L, 0L, 0L, "[]", "{}",
+                now.minusDays(1), null, null, now
+        ));
+
+        // Stubs: Tier-1 Anthropic returns 529 overloaded; Gemini streams SSE with thoughts + tool call
+        WIREMOCK.stubFor(post(urlEqualTo("/xant/v1/messages"))
+                .withHeader("x-api-key", equalTo("sk-ant-529"))
+                .willReturn(aResponse().withStatus(529).withBody("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}")));
+
+        String geminiSse = """
+                data: {"responseId":"gem_1","candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Thinking..."}]}}]}
+
+                data: {"responseId":"gem_1","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"fc_1","name":"get_weather","args":{"city":"Tokyo"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1200,"cachedContentTokenCount":200,"candidatesTokenCount":300,"thoughtsTokenCount":200,"totalTokenCount":1700}}
+
+                """;
+        WIREMOCK.stubFor(post(urlEqualTo("/xgem/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"))
+                .withHeader("x-goog-api-key", equalTo("AIza-test-key"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "text/event-stream")
+                        .withBody(geminiSse)));
+
+        WIREMOCK.stubFor(post(urlEqualTo("/xgem/v1beta/models/gemini-2.5-flash:generateContent"))
+                .withHeader("x-goog-api-key", equalTo("AIza-test-key"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"responseId\":\"gem_2\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello from Gemini!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1000,\"candidatesTokenCount\":500,\"totalTokenCount\":1500}}")));
+
+        WIREMOCK.stubFor(post(urlEqualTo("/xds/v1/chat/completions"))
+                .withHeader("Authorization", equalTo("Bearer sk-ds-ok"))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"id\":\"chatcmpl-ds\",\"object\":\"chat.completion\",\"created\":1730000000,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hi from DeepSeek!\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":1000,\"total_tokens\":2000}}")));
+
+        mirrorService.load(orgId, "omni-xproto").block();
+        mirrorService.load(orgId, "gem-to-oai").block();
+
+        // 1. Anthropic SSE -> homomorphic Tier-1 Anthropic tried first (529) -> fails over to Tier-1 Gemini SSE!
+        String antStreamResp = webTestClient.post()
+                .uri("/v1/messages")
+                .header("x-api-key", generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {
+                          "model": "omni-xproto",
+                          "max_tokens": 512,
+                          "stream": true,
+                          "messages": [{"role": "user", "content": "Weather in Tokyo?"}],
+                          "tools": [{"name": "get_weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]
+                        }
+                        """)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(antStreamResp)
+                .contains("event: message_start")
+                .contains("thinking_delta")
+                .contains("input_json_delta")
+                .contains("Tokyo")
+                .contains("\"stop_reason\":\"tool_use\"")
+                .contains("event: message_stop");
+        WIREMOCK.verify(postRequestedFor(urlEqualTo("/xant/v1/messages")));
+        WIREMOCK.verify(postRequestedFor(urlEqualTo("/xgem/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"))
+                .withHeader("x-goog-api-key", equalTo("AIza-test-key")));
+
+        // Verify billing: uncachedInput=1000 (@1M=1000), cachedRead=200 (@250k=50),
+        // completion=300 (@2M=600), reasoning=200 (fallback to output @2M=400) => total = 2050 micros!
+        String walletKey = GatewayRedisKeys.wallet(orgId);
+        assertThat(redisTemplate.opsForHash().get(walletKey, "cash_micros").block()).isEqualTo("97950");
+
+        // 2. OpenAI Responses non-streaming -> translated to Gemini generateContent -> Responses envelope
+        webTestClient.post()
+                .uri("/v1/responses")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"model\":\"omni-xproto\",\"instructions\":\"Be brief.\",\"input\":\"Say hi\"}")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.object").isEqualTo("response")
+                .jsonPath("$.status").isEqualTo("completed")
+                .jsonPath("$.model").isEqualTo("omni-xproto")
+                .jsonPath("$.output[0].content[0].text").isEqualTo("Hello from Gemini!")
+                .jsonPath("$.usage.input_tokens").isEqualTo(1000)
+                .jsonPath("$.usage.output_tokens").isEqualTo(500);
+
+        // 3. Gemini REST endpoint (?key= auth) -> translated to OpenAI Chat (DeepSeek) -> Gemini response
+        webTestClient.post()
+                .uri("/v1beta/models/gem-to-oai:generateContent?key=" + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}]}")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.candidates[0].content.parts[0].text").isEqualTo("Hi from DeepSeek!")
+                .jsonPath("$.candidates[0].finishReason").isEqualTo("STOP")
+                .jsonPath("$.usageMetadata.promptTokenCount").isEqualTo(1000)
+                .jsonPath("$.usageMetadata.candidatesTokenCount").isEqualTo(1000);
+
+        // 4. OpenAI Responses stateful previous_response_id on cross-protocol channel -> 400 + hold cleanly released
+        webTestClient.post()
+                .uri("/v1/responses")
+                .header("Authorization", "Bearer " + generated.rawKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"model\":\"gem-to-oai\",\"previous_response_id\":\"resp_old\",\"input\":\"Continue\"}")
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.error.code").isEqualTo("PROTOCOL_UNSUPPORTED_FEATURE");
+        assertThat(redisTemplate.opsForHash().get(walletKey, "held_cash_micros").block()).isEqualTo("0");
+    }
+
     private KafkaConsumer<String, String> createConsumer() {
         return new KafkaConsumer<>(Map.of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),

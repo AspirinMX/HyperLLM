@@ -47,6 +47,7 @@ public enum ErrorCode {
     PROJECT_BUDGET_UNAVAILABLE(503, "Project budget state cannot be verified; retry shortly"),
     ANALYTICS_UNAVAILABLE(503, "The usage warehouse is unavailable; retry shortly"),
     PROTOCOL_INVALID_REQUEST(400, "Invalid request payload"),
+    PROTOCOL_UNSUPPORTED_FEATURE(400, "Requested feature is not supported across protocol translation"),
     UPSTREAM_ERROR(502, "Upstream provider error"),
     CONFLICT_OPTIMISTIC_LOCK(409, "Resource was modified concurrently"),
     LEDGER_BACKLOG(503, "The billing ledger is behind; retry shortly"),

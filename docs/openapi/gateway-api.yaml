@@ -5,25 +5,33 @@ info:
   summary: Multi-protocol commercial LLM API gateway data plane
   description: |
     High-throughput reactive data plane (`backend/gateway`, Spring WebFlux + Netty) exposing
-    OpenAI-compatible and Anthropic-compatible LLM inference endpoints backed by:
+    four bidirectional text-output LLM protocol endpoints (supporting text + image inputs,
+    tool calling, structured outputs, reasoning/thinking, prompt caching, and streaming SSE):
 
-    - **Zero-Overhead Homomorphic Passthrough** (with automatic `stream_options.include_usage`
-      injection/stripping on OpenAI SSE and native event inspection on Anthropic SSE)
+    - **OpenAI Chat Completions** (`POST /v1/chat/completions`)
+    - **OpenAI Responses** (`POST /v1/responses`)
+    - **Anthropic Messages** (`POST /v1/messages`)
+    - **Google Gemini GenerateContent** (`POST /v1beta/models/{model}:generateContent` and `:streamGenerateContent`)
+
+    Backed by:
+    - **Zero-Overhead Homomorphic Passthrough + Canonical IR Bidirectional Translation**
+      (same-tier homomorphic-first routing with seamless pre-first-byte cross-protocol failover)
     - **Four-Tier Distributed Rate Limiting** (API Key, Project, Organization, Upstream Channel)
     - **Project Monthly Soft/Hard Budget Enforcement**
     - **Redis Authoritative Pre-hold & Streaming Settle** (`Resource Pack -> Bonus Grant -> Cash`)
-    - **Priority-Weighted Multi-Channel Routing & Pre-First-Byte Automatic Failover Retry**
     - **Zero Data Retention (ZDR) by Default**
 
     ### Authentication
     - OpenAI routes accept `Authorization: Bearer sk-...` (or Playground ephemeral token `sk-hl-sb-...`).
     - Anthropic routes accept `x-api-key: sk-...` or `Authorization: Bearer sk-...`.
+    - Google Gemini routes accept `x-goog-api-key: sk-...`, `?key=sk-...`, or `Authorization: Bearer sk-...`.
 
     ### Error Envelopes
-    Gateway pre-stream errors strictly conform to the caller's native protocol format
-    (`OpenAiErrorEnvelope` on `/v1/chat/completions` and `/v1/models`, `AnthropicErrorEnvelope`
-    on `/v1/messages`). Backpressure rejections (`503 LEDGER_BACKLOG`, `OUTBOX_UNAVAILABLE`,
-    `PROJECT_BUDGET_UNAVAILABLE`) include a `Retry-After` response header.
+    Gateway pre-stream errors and translated upstream errors strictly conform to the caller's native
+    protocol format (`OpenAiErrorEnvelope` on `/v1/chat/completions`, `/v1/responses`, and `/v1/models`,
+    `AnthropicErrorEnvelope` on `/v1/messages`, `GeminiErrorEnvelope` on `/v1beta/models/**`).
+    Backpressure rejections (`503 LEDGER_BACKLOG`, `OUTBOX_UNAVAILABLE`, `PROJECT_BUDGET_UNAVAILABLE`)
+    include a `Retry-After` response header.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
@@ -36,13 +44,17 @@ servers:
 
 tags:
   - name: OpenAI Compatible
-    description: OpenAI-compatible inference and model listing endpoints
+    description: OpenAI Chat Completions, Responses, and model listing endpoints
   - name: Anthropic Compatible
     description: Anthropic native Messages API endpoints
+  - name: Google Gemini Compatible
+    description: Google Gemini GenerateContent REST endpoints
 
 security:
   - apiKeyBearer: []
   - anthropicApiKey: []
+  - geminiApiKey: []
+  - geminiQueryKey: []
 
 paths:
   /v1/models:
@@ -127,6 +139,56 @@ paths:
               schema:
                 type: string
                 description: 'OpenAI SSE frames (`data: {"id":...,"choices":[...]}\n\n` ... `data: [DONE]\n\n`)'
+        "400":
+          $ref: "#/components/responses/OpenAiBadRequest"
+        "401":
+          $ref: "#/components/responses/OpenAiUnauthorized"
+        "402":
+          $ref: "#/components/responses/OpenAiInsufficientBalance"
+        "403":
+          $ref: "#/components/responses/OpenAiForbidden"
+        "404":
+          $ref: "#/components/responses/OpenAiModelNotFound"
+        "429":
+          $ref: "#/components/responses/OpenAiRateOrBudgetLimited"
+        "502":
+          $ref: "#/components/responses/OpenAiUpstreamError"
+        "503":
+          $ref: "#/components/responses/OpenAiServiceUnavailable"
+
+  /v1/responses:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: gatewayOpenAiResponses
+      summary: Create an OpenAI Response (streaming or non-streaming)
+      description: |
+        Native OpenAI Responses API endpoint supporting text/image inputs (`input_text`,
+        `input_image`), flat function tools (`function_call` / `function_call_output`),
+        structured outputs (`text.format`), reasoning effort/summaries, and named SSE events
+        (`response.created` through `response.completed`).
+
+        Passes through zero-overhead to OpenAI Responses-capable channels; translates seamlessly
+        via Canonical IR to OpenAI Chat, Anthropic, or Gemini channels when routed cross-protocol
+        (stateful `previous_response_id` / built-in server tools require homomorphic passthrough
+        and fail fast with `400 PROTOCOL_UNSUPPORTED_FEATURE` cross-protocol).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenAiResponsesRequest"
+      responses:
+        "200":
+          description: Response JSON (`application/json`) or named OpenAI Responses SSE stream (`text/event-stream`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiResponsesResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: 'Named OpenAI Responses SSE events (`event: response.created`, `event: response.output_text.delta`, `event: response.completed`).'
         "400":
           $ref: "#/components/responses/OpenAiBadRequest"
         "401":
@@ -229,6 +291,124 @@ paths:
         "503":
           $ref: "#/components/responses/AnthropicServiceUnavailable"
 
+  /v1beta/models/{model}:generateContent:
+    post:
+      tags:
+        - Google Gemini Compatible
+      operationId: gatewayGeminiGenerateContent
+      summary: Generate content via Google Gemini REST protocol (non-streaming)
+      description: |
+        Native Google Gemini `generateContent` endpoint supporting `systemInstruction`,
+        multimodal `contents` (`text`, `inlineData`, `fileData`), function calling (`functionCall` /
+        `functionResponse`), structured outputs (`responseJsonSchema`), and `thinkingConfig`.
+        Routes homomorphically to Gemini channels or translates bidirectionally to OpenAI / Anthropic.
+      parameters:
+        - name: model
+          in: path
+          required: true
+          description: Virtual model code registered in HyperLLM
+          schema:
+            type: string
+            example: gemini-2.5-flash
+        - name: key
+          in: query
+          required: false
+          description: 'Optional Gemini-style API key query parameter (alternative to `x-goog-api-key` or `Authorization: Bearer`).'
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiGenerateContentRequest"
+      responses:
+        "200":
+          description: Gemini `GenerateContentResponse` payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeminiGenerateContentResponse"
+        "400":
+          $ref: "#/components/responses/GeminiBadRequest"
+        "401":
+          $ref: "#/components/responses/GeminiUnauthorized"
+        "402":
+          $ref: "#/components/responses/GeminiPermissionDenied"
+        "403":
+          $ref: "#/components/responses/GeminiPermissionDenied"
+        "404":
+          $ref: "#/components/responses/GeminiNotFound"
+        "429":
+          $ref: "#/components/responses/GeminiResourceExhausted"
+        "502":
+          $ref: "#/components/responses/GeminiInternalError"
+        "503":
+          $ref: "#/components/responses/GeminiUnavailable"
+
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      tags:
+        - Google Gemini Compatible
+      operationId: gatewayGeminiStreamGenerateContent
+      summary: Stream generated content via Google Gemini REST protocol
+      description: |
+        Streams incremental `GenerateContentResponse` frames as SSE (`text/event-stream`) when
+        `?alt=sse` is supplied, or as a streaming JSON array (`application/json`) when omitted.
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+            example: gemini-2.5-flash
+        - name: alt
+          in: query
+          required: false
+          description: 'Pass `sse` to stream Server-Sent Events (`data: {...}\n\n`).'
+          schema:
+            type: string
+            enum: [sse]
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiGenerateContentRequest"
+      responses:
+        "200":
+          description: Streaming Gemini chunks (`text/event-stream` when `alt=sse`, else streaming JSON array)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GeminiGenerateContentResponse"
+        "400":
+          $ref: "#/components/responses/GeminiBadRequest"
+        "401":
+          $ref: "#/components/responses/GeminiUnauthorized"
+        "402":
+          $ref: "#/components/responses/GeminiPermissionDenied"
+        "403":
+          $ref: "#/components/responses/GeminiPermissionDenied"
+        "404":
+          $ref: "#/components/responses/GeminiNotFound"
+        "429":
+          $ref: "#/components/responses/GeminiResourceExhausted"
+        "502":
+          $ref: "#/components/responses/GeminiInternalError"
+        "503":
+          $ref: "#/components/responses/GeminiUnavailable"
+
 components:
   securitySchemes:
     apiKeyBearer:
@@ -241,6 +421,16 @@ components:
       in: header
       name: x-api-key
       description: Anthropic-style API key header accepting customer API key (`sk-...`) or sandbox token (`sk-hl-sb-...`).
+    geminiApiKey:
+      type: apiKey
+      in: header
+      name: x-goog-api-key
+      description: Google Gemini API key header accepting customer API key (`sk-...`) or sandbox token (`sk-hl-sb-...`).
+    geminiQueryKey:
+      type: apiKey
+      in: query
+      name: key
+      description: Optional Google Gemini query parameter authentication (accepted on `/v1beta/models/**` only).
 
   responses:
     OpenAiBadRequest:
@@ -355,6 +545,55 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/AnthropicErrorEnvelope"
+
+    GeminiBadRequest:
+      description: Malformed or unsupported request (`INVALID_ARGUMENT`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiUnauthorized:
+      description: Missing, invalid, or expired API key (`UNAUTHENTICATED`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiPermissionDenied:
+      description: Insufficient balance or forbidden (`PERMISSION_DENIED`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiNotFound:
+      description: Model not found (`NOT_FOUND`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiResourceExhausted:
+      description: Rate limit, capacity, or monthly project budget exceeded (`RESOURCE_EXHAUSTED`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiInternalError:
+      description: Upstream failure (`INTERNAL`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
+    GeminiUnavailable:
+      description: Channel unavailable or admission backpressure active (`UNAVAILABLE`)
+      headers:
+        Retry-After:
+          description: Suggested wait duration in seconds before retrying
+          schema:
+            type: integer
+            example: 5
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorEnvelope"
 
   schemas:
     OpenAiModelObject:
@@ -719,3 +958,145 @@ components:
             message:
               type: string
               example: Insufficient wallet balance
+
+    OpenAiResponsesRequest:
+      type: object
+      required:
+        - model
+        - input
+      additionalProperties: true
+      properties:
+        model:
+          type: string
+          example: gpt-5
+        instructions:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+        max_output_tokens:
+          type: integer
+          minimum: 1
+        stream:
+          type: boolean
+          default: false
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+        text:
+          type: object
+          additionalProperties: true
+        reasoning:
+          type: object
+          additionalProperties: true
+
+    OpenAiResponsesResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: resp_019a1b2c3d
+        object:
+          type: string
+          const: response
+        created_at:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [completed, incomplete, failed, in_progress]
+        model:
+          type: string
+        output:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+
+    GeminiGenerateContentRequest:
+      type: object
+      required:
+        - contents
+      additionalProperties: true
+      properties:
+        systemInstruction:
+          type: object
+          additionalProperties: true
+        contents:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: true
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        toolConfig:
+          type: object
+          additionalProperties: true
+        generationConfig:
+          type: object
+          additionalProperties: true
+
+    GeminiGenerateContentResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        responseId:
+          type: string
+        modelVersion:
+          type: string
+        candidates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        usageMetadata:
+          type: object
+          additionalProperties: true
+
+    GeminiErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - status
+          properties:
+            code:
+              type: integer
+              example: 400
+            message:
+              type: string
+              example: Invalid request payload
+            status:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - RESOURCE_EXHAUSTED
+                - INTERNAL
+                - UNAVAILABLE

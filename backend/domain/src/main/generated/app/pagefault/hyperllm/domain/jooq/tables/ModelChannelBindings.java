@@ -137,6 +137,11 @@ public class ModelChannelBindings extends TableImpl<ModelChannelBindingsRecord> 
      */
     public final TableField<ModelChannelBindingsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.model_channel_bindings.upstream_protocol</code>.
+     */
+    public final TableField<ModelChannelBindingsRecord, String> UPSTREAM_PROTOCOL = createField(DSL.name("upstream_protocol"), SQLDataType.VARCHAR(32), this, "");
+
     private ModelChannelBindings(Name alias, Table<ModelChannelBindingsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -252,6 +257,7 @@ public class ModelChannelBindings extends TableImpl<ModelChannelBindingsRecord> 
             Internal.createCheck(this, DSL.name("model_channel_bindings_cost_discount_bps_override_check"), "(((cost_discount_bps_override IS NULL) OR (cost_discount_bps_override >= 0)))", true),
             Internal.createCheck(this, DSL.name("model_channel_bindings_priority_tier_check"), "((priority_tier >= 1))", true),
             Internal.createCheck(this, DSL.name("model_channel_bindings_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DISABLED'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("model_channel_bindings_upstream_protocol_check"), "(((upstream_protocol IS NULL) OR ((upstream_protocol)::text = ANY ((ARRAY['OPENAI_CHAT'::character varying, 'OPENAI_RESPONSES'::character varying, 'ANTHROPIC_MESSAGES'::character varying, 'GEMINI_GENERATE_CONTENT'::character varying])::text[]))))", true),
             Internal.createCheck(this, DSL.name("model_channel_bindings_weight_check"), "((weight > 0))", true)
         );
     }
