@@ -104,6 +104,11 @@ public class ConsoleProjectAndKeyService {
         cacheSync.evictKeyHashesAfterCommit(keyHashes);
     }
 
+    public List<UUID> listProjectMembers(UUID projectId, UUID userId) {
+        rbac.requireProjectAccess(projectId, userId, true);
+        return projectMemberRepository.listUserIdsByProject(projectId);
+    }
+
     @Transactional
     public List<UUID> replaceProjectMembers(UUID projectId, UUID userId, ReplaceProjectMembersRequest req) {
         ConsoleRbacService.ProjectAccess access = rbac.requireProjectAccess(projectId, userId, true);

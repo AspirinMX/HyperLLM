@@ -51,6 +51,10 @@ public class AdminModelAndPricingService {
         );
     }
 
+    public VirtualModelDto getModel(UUID modelId) {
+        return toModelDto(requireModel(modelId));
+    }
+
     @Transactional
     public VirtualModelDto createModel(CreateVirtualModelRequest req) {
         String code = req.modelCode().trim();

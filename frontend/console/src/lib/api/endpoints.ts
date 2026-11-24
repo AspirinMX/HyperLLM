@@ -179,6 +179,11 @@ export const projectApi = {
       signal,
     });
   },
+  listMembers(projectId: string, signal?: AbortSignal) {
+    return apiRequest<string[]>(`/api/v1/projects/${projectId}/members`, {
+      signal,
+    });
+  },
   replaceMembers(projectId: string, userIds: string[]) {
     return apiRequest<string[]>(`/api/v1/projects/${projectId}/members`, {
       method: "PUT",

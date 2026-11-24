@@ -88,6 +88,12 @@ function ProjectDetailContent({
     Boolean(orgId) && canEdit,
   );
 
+  const projectMembersState = useAsyncData(
+    (signal) => projectApi.listMembers(projectId, signal),
+    [projectId],
+    Boolean(projectId) && canEdit,
+  );
+
   const { fromIso, toIso } = useMemo(() => {
     const to = new Date();
     const from = new Date(to.getTime() - 7 * 24 * 3600 * 1000);
@@ -110,10 +116,8 @@ function ProjectDetailContent({
 
   const activeUserIds = useMemo(() => {
     if (selectedUserIds !== null) return selectedUserIds;
-    return (membersState.data ?? [])
-      .filter((m) => m.role === "DEVELOPER")
-      .map((m) => m.userId);
-  }, [selectedUserIds, membersState.data]);
+    return projectMembersState.data ?? [];
+  }, [selectedUserIds, projectMembersState.data]);
 
   function toggleMember(userId: string) {
     setSelectedUserIds((prev) => {
@@ -128,6 +132,8 @@ function ProjectDetailContent({
     setSavingMembers(true);
     try {
       await projectApi.replaceMembers(projectId, activeUserIds);
+      setSelectedUserIds(null);
+      projectMembersState.reload();
       toast.success("项目成员授权已保存");
     } catch {
       toast.error("保存成员授权失败");

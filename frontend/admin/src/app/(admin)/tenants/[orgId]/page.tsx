@@ -101,10 +101,7 @@ function TenantDetailContent({
   const canToggleStatus = canCommerceWrite(profile?.role);
 
   const orgState = useAsyncData(
-    async (signal) => {
-      const page = await adminTenantApi.listOrgs({ page: 1, pageSize: 200 }, signal);
-      return page.items.find((o) => o.id === orgId) ?? null;
-    },
+    (signal) => adminTenantApi.getOrg(orgId, signal),
     [orgId],
   );
 

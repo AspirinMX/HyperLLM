@@ -47,6 +47,9 @@ public class ConsoleAuthFilter extends OncePerRequestFilter {
             // Channel callbacks authenticate with their signature, not with a console session.
             return true;
         }
+        if ("GET".equalsIgnoreCase(request.getMethod()) && "/api/v1/models".equals(path)) {
+            return true;
+        }
         return "POST".equalsIgnoreCase(request.getMethod()) && PUBLIC_POST_PATHS.contains(path);
     }
 

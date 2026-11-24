@@ -46,6 +46,12 @@ public class AdminTenantAndBillingController {
         return service.listOrganizations(status, PageQuery.of(page, pageSize));
     }
 
+    @GetMapping("/{orgId}")
+    public AdminOrgDto getOrganization(@PathVariable UUID orgId, HttpServletRequest request) {
+        AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.OPS, AdminRole.FINANCE, AdminRole.AUDITOR);
+        return service.getOrganization(orgId);
+    }
+
     /**
      * Live wallet of one tenant. A list cannot show this, because only the mirror knows what is
      * reserved; the detail view is where an operator looks before touching a balance.

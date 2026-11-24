@@ -49,6 +49,12 @@ public class AdminModelController {
         return service.listModels(PageQuery.of(page, pageSize));
     }
 
+    @GetMapping("/{modelId}")
+    public VirtualModelDto getModel(@PathVariable UUID modelId, HttpServletRequest request) {
+        AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.OPS, AdminRole.FINANCE, AdminRole.AUDITOR);
+        return service.getModel(modelId);
+    }
+
     @PostMapping
     public ResponseEntity<VirtualModelDto> createModel(
             @Valid @RequestBody CreateVirtualModelRequest body,

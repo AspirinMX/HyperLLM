@@ -132,6 +132,11 @@ export const adminModelApi = {
       { signal },
     );
   },
+  getModel(modelId: string, signal?: AbortSignal) {
+    return adminRequest<VirtualModelDto>(`/api/v1/admin/models/${modelId}`, {
+      signal,
+    });
+  },
   createModel(body: CreateVirtualModelRequest) {
     return adminRequest<VirtualModelDto>("/api/v1/admin/models", {
       method: "POST",
@@ -194,6 +199,9 @@ export const adminTenantApi = {
       })}`,
       { signal },
     );
+  },
+  getOrg(orgId: string, signal?: AbortSignal) {
+    return adminRequest<AdminOrgDto>(`/api/v1/admin/orgs/${orgId}`, { signal });
   },
   getWallet(orgId: string, signal?: AbortSignal) {
     return adminRequest<AdminWalletDetailDto>(

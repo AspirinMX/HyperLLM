@@ -116,10 +116,7 @@ function ModelWorkbenchContent({
   const canEditPricing = canCommerceWrite(profile?.role);
 
   const modelState = useAsyncData(
-    async (signal) => {
-      const list = await adminModelApi.listModels(1, 200, signal);
-      return list.items.find((m) => m.id === modelId) ?? null;
-    },
+    (signal) => adminModelApi.getModel(modelId, signal),
     [modelId],
   );
 

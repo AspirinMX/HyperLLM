@@ -67,6 +67,13 @@ public class AdminTenantAndBillingService {
         );
     }
 
+    public AdminOrgDto getOrganization(UUID orgId) {
+        Organization org = organizationRepository.findById(orgId)
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
+        Map<UUID, WalletRepository.Balance> balances = walletRepository.findBalancesByOrgIds(java.util.List.of(orgId));
+        return toOrgDto(org, balances.get(orgId));
+    }
+
     @Transactional
     public AdminOrgDto updateOrgStatus(UUID orgId, UUID adminId, String clientIp, UpdateOrgStatusRequest req) {
         organizationRepository.findById(orgId)

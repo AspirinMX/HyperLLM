@@ -87,6 +87,14 @@ public class ConsoleProjectController {
         return ResponseEntity.noContent().build();
     }
 
+    @GetMapping("/projects/{projectId}/members")
+    public List<UUID> listProjectMembers(
+            @PathVariable UUID projectId,
+            HttpServletRequest request
+    ) {
+        return service.listProjectMembers(projectId, ConsoleRequestContext.requirePrincipal(request).userId());
+    }
+
     @PutMapping("/projects/{projectId}/members")
     public List<UUID> replaceProjectMembers(
             @PathVariable UUID projectId,
