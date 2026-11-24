@@ -17,4 +17,6 @@ public interface UserIdentityRepository {
     List<UserIdentity> findByUserId(UUID userId);
 
     void updateLastUsed(UUID identityId, OffsetDateTime lastUsedAt);
+
+    boolean updatePasswordHash(UUID identityId, String passwordHash, OffsetDateTime updatedAt);
 }

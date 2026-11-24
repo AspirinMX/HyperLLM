@@ -10,11 +10,13 @@ import app.pagefault.hyperllm.console.config.ConsoleCacheSyncService;
 import app.pagefault.hyperllm.console.config.ConsoleJwtService;
 import app.pagefault.hyperllm.console.config.ConsoleProperties;
 import app.pagefault.hyperllm.console.dto.AuthDtos.AuthTokenResponse;
+import app.pagefault.hyperllm.console.dto.AuthDtos.ChangePasswordRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.LoginRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.OrgMembershipSummaryDto;
 import app.pagefault.hyperllm.console.dto.AuthDtos.RegisterRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.SendEmailCodeRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.SendEmailCodeResponse;
+import app.pagefault.hyperllm.console.dto.AuthDtos.UpdateProfileRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.UserProfileDto;
 import app.pagefault.hyperllm.domain.model.auth.RefreshToken;
 import app.pagefault.hyperllm.domain.model.auth.User;
@@ -205,6 +207,38 @@ public class ConsoleAuthService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.AUTH_INVALID_CREDENTIALS));
         return toUserProfile(user);
+    }
+
+    @Transactional
+    public UserProfileDto updateProfile(UUID userId, UpdateProfileRequest req) {
+        userRepository.findById(userId)
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.AUTH_INVALID_CREDENTIALS));
+        String currency = req.preferredCurrency().trim().toUpperCase(Locale.ROOT);
+        if (!"USD".equals(currency) && !"CNY".equals(currency)) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Unsupported currency: " + currency);
+        }
+        String locale = req.locale().trim();
+        userRepository.updateProfile(
+                userId, req.displayName().trim(), locale, currency, OffsetDateTime.now(ZoneOffset.UTC)
+        );
+        return toUserProfile(userRepository.findById(userId).orElseThrow());
+    }
+
+    @Transactional
+    public void changePassword(UUID userId, ChangePasswordRequest req) {
+        UserIdentity passwordIdentity = userIdentityRepository.findByUserId(userId).stream()
+                .filter(id -> id.provider() == IdentityProvider.PASSWORD)
+                .findFirst()
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.AUTH_INVALID_CREDENTIALS, "No password credential configured"));
+        if (passwordIdentity.passwordHash() == null
+                || !passwordEncoder.matches(req.currentPassword(), passwordIdentity.passwordHash())) {
+            throw new HyperLlmException(ErrorCode.AUTH_INVALID_CREDENTIALS, "Current password is incorrect");
+        }
+        userIdentityRepository.updatePasswordHash(
+                passwordIdentity.id(),
+                passwordEncoder.encode(req.newPassword()),
+                OffsetDateTime.now(ZoneOffset.UTC)
+        );
     }
 
     private AuthSessionResult issueSession(

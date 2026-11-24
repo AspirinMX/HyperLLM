@@ -63,6 +63,16 @@ public class JooqUserIdentityRepository implements UserIdentityRepository {
                 .execute();
     }
 
+    @Override
+    public boolean updatePasswordHash(UUID identityId, String passwordHash, OffsetDateTime updatedAt) {
+        int updated = dsl.update(USER_IDENTITIES)
+                .set(USER_IDENTITIES.PASSWORD_HASH, passwordHash)
+                .set(USER_IDENTITIES.UPDATED_AT, updatedAt)
+                .where(USER_IDENTITIES.ID.eq(identityId))
+                .execute();
+        return updated == 1;
+    }
+
     private UserIdentity toDomain(UserIdentitiesRecord r) {
         return new UserIdentity(
                 r.getId(),

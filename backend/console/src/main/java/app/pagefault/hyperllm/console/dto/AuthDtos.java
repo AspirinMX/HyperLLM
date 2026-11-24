@@ -68,4 +68,17 @@ public final class AuthDtos {
             List<OrgMembershipSummaryDto> organizations
     ) {
     }
+
+    public record UpdateProfileRequest(
+            @NotBlank @Size(min = 1, max = 100) String displayName,
+            @NotBlank @Size(max = 16) String locale,
+            @NotBlank @Size(min = 3, max = 3) String preferredCurrency
+    ) {
+    }
+
+    public record ChangePasswordRequest(
+            @NotBlank String currentPassword,
+            @NotBlank @Size(min = 8, max = 128) String newPassword
+    ) {
+    }
 }

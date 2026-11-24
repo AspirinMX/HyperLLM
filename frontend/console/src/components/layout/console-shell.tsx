@@ -18,6 +18,7 @@ import {
   LogOut,
   Moon,
   Plus,
+  Settings,
   Sparkles,
   Sun,
   Terminal,
@@ -85,6 +86,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/billing": "账务与充值",
   "/alerts": "告警",
   "/team": "团队与设置",
+  "/settings": "个人设置",
 };
 
 function resolvePageTitle(pathname: string): string {
@@ -403,6 +405,10 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" side="top" className="w-56">
                   <DropdownMenuGroup>
+                    <DropdownMenuItem render={<Link href="/settings" />}>
+                      <Settings className="size-3.5" />
+                      <span>个人设置</span>
+                    </DropdownMenuItem>
                     <DropdownMenuItem render={<Link href="/models" />}>
                       <Sparkles className="size-3.5" />
                       <span>模型广场</span>

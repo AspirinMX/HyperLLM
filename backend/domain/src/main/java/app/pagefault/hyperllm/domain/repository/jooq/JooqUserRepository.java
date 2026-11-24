@@ -71,6 +71,26 @@ public class JooqUserRepository implements UserRepository {
     }
 
     @Override
+    public boolean updateProfile(
+            UUID userId,
+            String displayName,
+            String locale,
+            String preferredCurrency,
+            OffsetDateTime updatedAt
+    ) {
+        int updated = dsl.update(USERS)
+                .set(USERS.DISPLAY_NAME, displayName)
+                .set(USERS.LOCALE, locale)
+                .set(USERS.PREFERRED_CURRENCY, preferredCurrency)
+                .set(USERS.VERSION, USERS.VERSION.plus(1))
+                .set(USERS.UPDATED_AT, updatedAt)
+                .where(USERS.ID.eq(userId))
+                .and(USERS.DELETED_AT.isNull())
+                .execute();
+        return updated == 1;
+    }
+
+    @Override
     public void updateLastLogin(UUID userId, OffsetDateTime loginAt) {
         dsl.update(USERS)
                 .set(USERS.LAST_LOGIN_AT, loginAt)

@@ -16,5 +16,7 @@ public interface UserRepository {
 
     boolean updateDefaultOrg(UUID userId, UUID orgId, long expectedVersion, OffsetDateTime updatedAt);
 
+    boolean updateProfile(UUID userId, String displayName, String locale, String preferredCurrency, OffsetDateTime updatedAt);
+
     void updateLastLogin(UUID userId, OffsetDateTime loginAt);
 }

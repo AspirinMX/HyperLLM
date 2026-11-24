@@ -194,7 +194,7 @@ public class AdminModelAndPricingService {
         }
         String normalized = raw.trim().toUpperCase();
         if (!"BEST_EFFORT".equals(normalized) && !"STRICT".equals(normalized)) {
-            throw new HyperLlmException(ErrorCode.VALIDATION_FAILED, "Unsupported translationPolicy: " + raw);
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Unsupported translationPolicy: " + raw);
         }
         return normalized;
     }

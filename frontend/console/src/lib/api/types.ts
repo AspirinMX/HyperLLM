@@ -99,6 +99,17 @@ export interface AuthTokenResponse {
   user: UserProfileDto;
 }
 
+export interface UpdateProfileRequest {
+  displayName: string;
+  locale: string;
+  preferredCurrency: "USD" | "CNY";
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
+}
+
 export interface CreateOrgRequest {
   name: string;
   slug: string;

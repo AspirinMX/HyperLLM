@@ -2,10 +2,12 @@ package app.pagefault.hyperllm.console.controller;
 
 import app.pagefault.hyperllm.console.config.ConsoleProperties;
 import app.pagefault.hyperllm.console.dto.AuthDtos.AuthTokenResponse;
+import app.pagefault.hyperllm.console.dto.AuthDtos.ChangePasswordRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.LoginRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.RegisterRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.SendEmailCodeRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.SendEmailCodeResponse;
+import app.pagefault.hyperllm.console.dto.AuthDtos.UpdateProfileRequest;
 import app.pagefault.hyperllm.console.dto.AuthDtos.UserProfileDto;
 import app.pagefault.hyperllm.console.service.ConsoleAuthService;
 import app.pagefault.hyperllm.console.web.ConsolePrincipal;
@@ -20,6 +22,7 @@ import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -104,6 +107,25 @@ public class ConsoleAuthController {
     public UserProfileDto me(HttpServletRequest servletRequest) {
         ConsolePrincipal principal = ConsoleRequestContext.requirePrincipal(servletRequest);
         return authService.me(principal.userId());
+    }
+
+    @PatchMapping("/me")
+    public UserProfileDto updateProfile(
+            @Valid @RequestBody UpdateProfileRequest request,
+            HttpServletRequest servletRequest
+    ) {
+        ConsolePrincipal principal = ConsoleRequestContext.requirePrincipal(servletRequest);
+        return authService.updateProfile(principal.userId(), request);
+    }
+
+    @PostMapping("/password")
+    public ResponseEntity<Void> changePassword(
+            @Valid @RequestBody ChangePasswordRequest request,
+            HttpServletRequest servletRequest
+    ) {
+        ConsolePrincipal principal = ConsoleRequestContext.requirePrincipal(servletRequest);
+        authService.changePassword(principal.userId(), request);
+        return ResponseEntity.noContent().build();
     }
 
     private void writeRefreshCookie(HttpServletResponse response, String value, Duration maxAge) {

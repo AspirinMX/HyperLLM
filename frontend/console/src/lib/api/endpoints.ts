@@ -4,6 +4,7 @@ import type {
   ApiKeyDto,
   AuthTokenResponse,
   BonusGrantDto,
+  ChangePasswordRequest,
   CreateAlertRuleRequest,
   CreateApiKeyRequest,
   CreateEndpointRequest,
@@ -34,6 +35,7 @@ import type {
   UpdateApiKeyRequest,
   UpdateEndpointRequest,
   UpdateOrgRequest,
+  UpdateProfileRequest,
   UpdateProjectRequest,
   UsageGroupBy,
   UsageReport,
@@ -83,6 +85,18 @@ export const authApi = {
   },
   me(signal?: AbortSignal) {
     return apiRequest<UserProfileDto>("/api/v1/auth/me", { signal });
+  },
+  updateProfile(body: UpdateProfileRequest) {
+    return apiRequest<UserProfileDto>("/api/v1/auth/me", {
+      method: "PATCH",
+      body,
+    });
+  },
+  changePassword(body: ChangePasswordRequest) {
+    return apiRequest<void>("/api/v1/auth/password", {
+      method: "POST",
+      body,
+    });
   },
 };
 
