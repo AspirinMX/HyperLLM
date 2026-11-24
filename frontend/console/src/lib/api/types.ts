@@ -147,7 +147,7 @@ export interface InvitationResponseDto {
   projectIds: string[];
   status: InvitationStatus;
   expiresAt: string;
-  invitationToken: string;
+  invitationToken: string | null;
 }
 
 export interface CreateProjectRequest {

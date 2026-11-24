@@ -131,6 +131,12 @@ export const orgApi = {
       method: "DELETE",
     });
   },
+  listInvitations(orgId: string, signal?: AbortSignal) {
+    return apiRequest<InvitationResponseDto[]>(
+      `/api/v1/orgs/${orgId}/invitations`,
+      { signal },
+    );
+  },
   createInvitation(orgId: string, body: CreateInvitationRequest) {
     return apiRequest<InvitationResponseDto>(
       `/api/v1/orgs/${orgId}/invitations`,
@@ -138,6 +144,12 @@ export const orgApi = {
         method: "POST",
         body,
       },
+    );
+  },
+  revokeInvitation(orgId: string, invitationId: string) {
+    return apiRequest<void>(
+      `/api/v1/orgs/${orgId}/invitations/${invitationId}`,
+      { method: "DELETE" },
     );
   },
   acceptInvitation(token: string) {

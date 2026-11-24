@@ -91,6 +91,14 @@ export default function TeamPage() {
     Boolean(orgId) && canEdit,
   );
 
+  const invitationsState = useAsyncData(
+    (signal) => orgApi.listInvitations(orgId!, signal),
+    [orgId],
+    Boolean(orgId) && canEdit,
+  );
+
+  const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null);
+
   const [orgNameDraft, setOrgNameDraft] = useState<string | null>(null);
   const [savingOrg, setSavingOrg] = useState(false);
   const [orgError, setOrgError] = useState<unknown>(null);
@@ -171,6 +179,7 @@ export default function TeamPage() {
       setCreatedInvite(res);
       setInviteEmail("");
       setInviteProjectIds([]);
+      invitationsState.reload();
       toast.success("邀请已生成");
     } catch (err) {
       setInviteError(err);
@@ -179,8 +188,22 @@ export default function TeamPage() {
     }
   }
 
+  async function handleRevokeInvite(invitationId: string) {
+    if (!orgId) return;
+    setRevokingInviteId(invitationId);
+    try {
+      await orgApi.revokeInvitation(orgId, invitationId);
+      toast.success("邀请已撤销");
+      invitationsState.reload();
+    } catch {
+      toast.error("撤销邀请失败");
+    } finally {
+      setRevokingInviteId(null);
+    }
+  }
+
   const inviteLink =
-    createdInvite && typeof window !== "undefined"
+    createdInvite?.invitationToken && typeof window !== "undefined"
       ? `${window.location.origin}/invitations/accept?token=${encodeURIComponent(createdInvite.invitationToken)}`
       : createdInvite?.invitationToken ?? "";
 
@@ -373,6 +396,74 @@ export default function TeamPage() {
           </Table>
         )}
       </section>
+
+      {/* Pending Invitations Table */}
+      {canEdit ? (
+        <section className="squircle-md overflow-hidden rounded-xl border border-border bg-card">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">待接受邀请</span>
+              <Badge variant="secondary" className="tabular-nums">
+                {invitationsState.data?.length ?? 0}
+              </Badge>
+            </div>
+          </div>
+
+          {invitationsState.loading ? (
+            <div className="flex flex-col gap-3 p-5">
+              <Skeleton className="h-9 w-full" />
+            </div>
+          ) : (invitationsState.data ?? []).length === 0 ? (
+            <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+              暂无待处理邀请
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/35 hover:bg-muted/35">
+                  <TableHead>受邀邮箱</TableHead>
+                  <TableHead>分配角色</TableHead>
+                  <TableHead>授权项目数</TableHead>
+                  <TableHead>过期时间</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(invitationsState.data ?? []).map((inv) => (
+                  <TableRow key={inv.id}>
+                    <TableCell className="font-mono text-xs">{inv.email}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{ORG_ROLE_LABEL[inv.role]}</Badge>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground tabular-nums">
+                      {inv.projectIds.length > 0 ? `${inv.projectIds.length} 个项目` : "默认范围"}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground tabular-nums">
+                      {formatDateTime(inv.expiresAt)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="text-destructive hover:text-destructive"
+                        disabled={revokingInviteId === inv.id}
+                        onClick={() => handleRevokeInvite(inv.id)}
+                      >
+                        {revokingInviteId === inv.id ? (
+                          <Loader2 className="size-3 animate-spin motion-reduce:animate-none" />
+                        ) : (
+                          <Trash2 className="size-3" />
+                        )}
+                        <span>撤销</span>
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </section>
+      ) : null}
 
       {/* Invite Member Dialog */}
       <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>

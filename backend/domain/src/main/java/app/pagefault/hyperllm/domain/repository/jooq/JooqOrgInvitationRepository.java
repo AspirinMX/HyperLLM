@@ -66,6 +66,17 @@ public class JooqOrgInvitationRepository implements OrgInvitationRepository {
         return updated == 1;
     }
 
+    @Override
+    public boolean revoke(UUID orgId, UUID invitationId) {
+        int updated = dsl.update(ORG_INVITATIONS)
+                .set(ORG_INVITATIONS.STATUS, InvitationStatus.REVOKED.name())
+                .where(ORG_INVITATIONS.ID.eq(invitationId))
+                .and(ORG_INVITATIONS.ORG_ID.eq(orgId))
+                .and(ORG_INVITATIONS.STATUS.eq(InvitationStatus.PENDING.name()))
+                .execute();
+        return updated == 1;
+    }
+
     private OrgInvitation toDomain(OrgInvitationsRecord r) {
         return new OrgInvitation(
                 r.getId(),

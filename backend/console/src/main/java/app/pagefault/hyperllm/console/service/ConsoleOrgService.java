@@ -193,6 +193,25 @@ public class ConsoleOrgService {
         return new InvitationResponseDto(invId, orgId, inviteEmail, req.role(), projectIds, InvitationStatus.PENDING, expiresAt, rawToken);
     }
 
+    public List<InvitationResponseDto> listPendingInvitations(UUID orgId, UUID actorUserId) {
+        rbac.requireOrgRole(orgId, actorUserId, OrgRole.OWNER, OrgRole.ADMIN);
+        return orgInvitationRepository.listByOrgAndStatus(orgId, InvitationStatus.PENDING).stream()
+                .map(inv -> new InvitationResponseDto(
+                        inv.id(), inv.orgId(), inv.email(), inv.role(),
+                        inv.projectIds() == null ? List.of() : inv.projectIds(),
+                        inv.status(), inv.expiresAt(), null
+                ))
+                .toList();
+    }
+
+    @Transactional
+    public void revokeInvitation(UUID orgId, UUID invitationId, UUID actorUserId) {
+        rbac.requireOrgRole(orgId, actorUserId, OrgRole.OWNER, OrgRole.ADMIN);
+        if (!orgInvitationRepository.revoke(orgId, invitationId)) {
+            throw new HyperLlmException(ErrorCode.TENANT_INVITATION_INVALID);
+        }
+    }
+
     @Transactional
     public OrgDto acceptInvitation(UUID userId, AcceptInvitationRequest req) {
         User user = userRepository.findById(userId)

@@ -17,4 +17,6 @@ public interface OrgInvitationRepository {
     List<OrgInvitation> listByOrgAndStatus(UUID orgId, InvitationStatus status);
 
     boolean markAccepted(UUID invitationId, OffsetDateTime acceptedAt);
+
+    boolean revoke(UUID orgId, UUID invitationId);
 }

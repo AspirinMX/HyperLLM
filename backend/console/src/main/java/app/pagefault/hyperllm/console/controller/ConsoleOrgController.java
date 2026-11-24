@@ -84,6 +84,14 @@ public class ConsoleOrgController {
         return ResponseEntity.noContent().build();
     }
 
+    @GetMapping("/orgs/{orgId}/invitations")
+    public List<InvitationResponseDto> listPendingInvitations(
+            @PathVariable UUID orgId,
+            HttpServletRequest request
+    ) {
+        return orgService.listPendingInvitations(orgId, ConsoleRequestContext.requirePrincipal(request).userId());
+    }
+
     @PostMapping("/orgs/{orgId}/invitations")
     public ResponseEntity<InvitationResponseDto> createInvitation(
             @PathVariable UUID orgId,
@@ -94,6 +102,16 @@ public class ConsoleOrgController {
                 orgId, ConsoleRequestContext.requirePrincipal(request).userId(), body
         );
         return ResponseEntity.status(HttpStatus.CREATED).body(dto);
+    }
+
+    @DeleteMapping("/orgs/{orgId}/invitations/{invitationId}")
+    public ResponseEntity<Void> revokeInvitation(
+            @PathVariable UUID orgId,
+            @PathVariable UUID invitationId,
+            HttpServletRequest request
+    ) {
+        orgService.revokeInvitation(orgId, invitationId, ConsoleRequestContext.requirePrincipal(request).userId());
+        return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/invitations/accept")
