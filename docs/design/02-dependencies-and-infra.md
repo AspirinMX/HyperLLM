@@ -164,7 +164,7 @@ flowchart LR
 | **默认（无 Profile）** | `kafka` | `apache/kafka:3.9.0` | 单节点 KRaft（同时担任 broker + controller，无 ZooKeeper），配置双 Listener（`29092` 容器内 / `9092` 宿主机） |
 | **默认（无 Profile）** | `kafka-init` | `apache/kafka:3.9.0` | `depends_on: kafka (healthy)` 一次性初始化容器，幂等创建 `cdc.gateway.config`、`cdc.wallet.*`、`llm.billing.settlement`、`llm.request.events` 等 Topic |
 | **`pipeline`** | `clickhouse` | `clickhouse/clickhouse-server:24-alpine` | 挂载 `infra/clickhouse/init/*.sql` 至 `/docker-entrypoint-initdb.d/` 自动初始化宽表、物化视图与调试表 |
-| **`pipeline`** | `debezium` | `debezium/connect:2.7` | 依赖 `postgres` + `kafka` 健康就绪；负责读取 PG `pgoutput` WAL 写入 Kafka |
+| **`pipeline`** | `debezium` | `quay.io/debezium/connect:2.7` | 依赖 `postgres` + `kafka` 健康就绪；负责读取 PG `pgoutput` WAL 写入 Kafka |
 | **`pipeline`** | `debezium-init` | `curlimages/curl:8.11.0` | 依赖 `debezium` 就绪后幂等 PUT/POST 注册 `infra/debezium/` 下的 Config CDC 与 Outbox Connector JSON |
 | **`observability`** | `otel-collector` | `otel/opentelemetry-collector-contrib:0.114.0` | 接收后端 OTLP Trace/Metric，挂载 `infra/observability/otel-collector.yaml` |
 | **`observability`** | `prometheus` | `prom/prometheus:v2.55.1` | 挂载 `infra/observability/prometheus.yml`，抓取后端 `/actuator/prometheus` 与中间件指标 |

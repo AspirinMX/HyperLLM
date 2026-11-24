@@ -115,7 +115,7 @@ services:
       retries: 12
 
   debezium:
-    image: debezium/connect:2.7
+    image: quay.io/debezium/connect:2.7
     container_name: hyperllm-debezium
     profiles: ["pipeline"]
     restart: unless-stopped
