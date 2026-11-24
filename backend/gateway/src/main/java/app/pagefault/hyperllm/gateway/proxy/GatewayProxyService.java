@@ -177,7 +177,7 @@ public class GatewayProxyService {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
                     return cacheService.resolveModelRoute(canonical.model())
-                            .switchIfEmpty(Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
+                            .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 if (route.model().status() != ModelStatus.ACTIVE) {
                                     return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
@@ -216,7 +216,7 @@ public class GatewayProxyService {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
                     return cacheService.resolveModelRoute(canonical.model())
-                            .switchIfEmpty(Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
+                            .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 VirtualModel vm = route.model();
                                 if (vm.status() != ModelStatus.ACTIVE) {
@@ -859,7 +859,7 @@ public class GatewayProxyService {
         }
         if (ApiKeyGenerator.isSandboxKey(rawToken)) {
             return cacheService.resolveSandboxToken(rawToken)
-                    .switchIfEmpty(Mono.error(new HyperLlmException(ErrorCode.AUTH_INVALID_KEY, "Invalid or expired sandbox token")))
+                    .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.AUTH_INVALID_KEY, "Invalid or expired sandbox token")))
                     .flatMap(payload -> {
                         if (payload.expiresAt() == null || !payload.expiresAt().isAfter(OffsetDateTime.now(ZoneOffset.UTC))) {
                             return Mono.error(new HyperLlmException(ErrorCode.KEY_EXPIRED, "Sandbox token expired"));
@@ -875,7 +875,7 @@ public class GatewayProxyService {
             return Mono.error(new HyperLlmException(ErrorCode.AUTH_INVALID_KEY));
         }
         return cacheService.resolveLiveKey(rawToken)
-                .switchIfEmpty(Mono.error(new HyperLlmException(ErrorCode.AUTH_INVALID_KEY)))
+                .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.AUTH_INVALID_KEY)))
                 .flatMap(ctx -> validateLiveKeyContext(ctx, clientIp));
     }
 

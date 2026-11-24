@@ -220,7 +220,7 @@ public class PreHoldService {
                 log.warn("Outbox queue full, leaving settlement {} for replay", holdId);
             }
             return new SettleOutcome(status, number(raw.get(1)), number(raw.get(2)), number(raw.get(3)));
-        }).switchIfEmpty(Mono.error(new IllegalStateException("Redis returned no settlement verdict")));
+        }).switchIfEmpty(Mono.error(() -> new IllegalStateException("Redis returned no settlement verdict")));
     }
 
     public Mono<Boolean> renew(Lease lease, long ttlSeconds) {

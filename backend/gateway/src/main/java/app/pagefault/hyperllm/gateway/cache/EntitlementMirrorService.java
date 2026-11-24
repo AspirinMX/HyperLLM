@@ -128,7 +128,7 @@ public class EntitlementMirrorService {
                     return load(orgId, modelCode, true)
                             .then(healthGate.current().flatMap(fresh -> readOnce(orgId, modelCode, renew, fresh)));
                 })))
-                .switchIfEmpty(Mono.error(new IllegalStateException(
+                .switchIfEmpty(Mono.error(() -> new IllegalStateException(
                         "tenant mirror still missing after load, org=" + orgId)));
     }
 
