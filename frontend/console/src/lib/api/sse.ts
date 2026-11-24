@@ -7,10 +7,19 @@ export interface PlaygroundChatMessage {
   content: string;
 }
 
+/**
+ * Strictly disjoint 5-bucket token usage matching backend `TokenUsage`:
+ * - promptTokens: uncached input tokens only
+ * - cachedReadTokens: prompt-cache read hit tokens
+ * - cachedWriteTokens: prompt-cache creation tokens
+ * - completionTokens: non-reasoning output tokens only
+ * - reasoningTokens: thinking / reasoning output tokens
+ */
 export interface StreamUsageStats {
   promptTokens: number;
-  completionTokens: number;
   cachedReadTokens: number;
+  cachedWriteTokens: number;
+  completionTokens: number;
   reasoningTokens: number;
 }
 
@@ -40,9 +49,9 @@ export interface StreamCompletionResult {
 
 function parseOpenAiUsage(raw: unknown): Partial<StreamUsageStats> | null {
   if (!isRecord(raw)) return null;
-  const promptTokens =
+  const inclusivePrompt =
     typeof raw.prompt_tokens === "number" ? raw.prompt_tokens : undefined;
-  const completionTokens =
+  const inclusiveCompletion =
     typeof raw.completion_tokens === "number"
       ? raw.completion_tokens
       : undefined;
@@ -52,7 +61,7 @@ function parseOpenAiUsage(raw: unknown): Partial<StreamUsageStats> | null {
     isRecord(raw.prompt_tokens_details) &&
     typeof raw.prompt_tokens_details.cached_tokens === "number"
   ) {
-    cachedReadTokens = raw.prompt_tokens_details.cached_tokens;
+    cachedReadTokens = Math.max(0, raw.prompt_tokens_details.cached_tokens);
   }
 
   let reasoningTokens: number | undefined;
@@ -60,13 +69,22 @@ function parseOpenAiUsage(raw: unknown): Partial<StreamUsageStats> | null {
     isRecord(raw.completion_tokens_details) &&
     typeof raw.completion_tokens_details.reasoning_tokens === "number"
   ) {
-    reasoningTokens = raw.completion_tokens_details.reasoning_tokens;
+    reasoningTokens = Math.max(0, raw.completion_tokens_details.reasoning_tokens);
   }
+
+  const promptTokens =
+    inclusivePrompt !== undefined
+      ? Math.max(0, inclusivePrompt - (cachedReadTokens ?? 0))
+      : undefined;
+  const completionTokens =
+    inclusiveCompletion !== undefined
+      ? Math.max(0, inclusiveCompletion - (reasoningTokens ?? 0))
+      : undefined;
 
   return {
     promptTokens,
-    completionTokens,
     cachedReadTokens,
+    completionTokens,
     reasoningTokens,
   };
 }
@@ -75,13 +93,17 @@ function parseAnthropicUsage(raw: unknown): Partial<StreamUsageStats> | null {
   if (!isRecord(raw)) return null;
   return {
     promptTokens:
-      typeof raw.input_tokens === "number" ? raw.input_tokens : undefined,
-    completionTokens:
-      typeof raw.output_tokens === "number" ? raw.output_tokens : undefined,
+      typeof raw.input_tokens === "number" ? Math.max(0, raw.input_tokens) : undefined,
     cachedReadTokens:
       typeof raw.cache_read_input_tokens === "number"
-        ? raw.cache_read_input_tokens
+        ? Math.max(0, raw.cache_read_input_tokens)
         : undefined,
+    cachedWriteTokens:
+      typeof raw.cache_creation_input_tokens === "number"
+        ? Math.max(0, raw.cache_creation_input_tokens)
+        : undefined,
+    completionTokens:
+      typeof raw.output_tokens === "number" ? Math.max(0, raw.output_tokens) : undefined,
   };
 }
 
@@ -92,8 +114,9 @@ function mergeUsage(
   if (!patch) return base;
   return {
     promptTokens: patch.promptTokens ?? base.promptTokens,
-    completionTokens: patch.completionTokens ?? base.completionTokens,
     cachedReadTokens: patch.cachedReadTokens ?? base.cachedReadTokens,
+    cachedWriteTokens: patch.cachedWriteTokens ?? base.cachedWriteTokens,
+    completionTokens: patch.completionTokens ?? base.completionTokens,
     reasoningTokens: patch.reasoningTokens ?? base.reasoningTokens,
   };
 }
@@ -107,8 +130,9 @@ export async function runPlaygroundCompletion(
   let thinking = "";
   let usage: StreamUsageStats = {
     promptTokens: 0,
-    completionTokens: 0,
     cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    completionTokens: 0,
     reasoningTokens: 0,
   };
 

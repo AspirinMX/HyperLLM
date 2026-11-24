@@ -10,11 +10,12 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiErrorAlert } from "@/components/common/api-error-alert";
 import { useConsoleAuth } from "@/components/providers/console-auth-provider";
+import { sanitizeRedirectPath } from "@/lib/format/micro-usd";
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect") || "/overview";
+  const redirect = sanitizeRedirectPath(searchParams.get("redirect"));
   const { login } = useConsoleAuth();
 
   const [email, setEmail] = useState("");
@@ -28,7 +29,7 @@ function LoginForm() {
     setSubmitting(true);
     try {
       await login({ email: email.trim(), password });
-      router.replace(redirect.startsWith("/") ? redirect : "/overview");
+      router.replace(redirect);
     } catch (err) {
       setError(err);
     } finally {

@@ -182,7 +182,7 @@ function UsageAnalyticsContent() {
           r.requests > 0 ? Number(((r.successes / r.requests) * 100).toFixed(2)) : 100;
         return {
           label: formatDateTime(r.dimension),
-          promptTokens: Math.max(0, r.promptTokens - r.cachedReadTokens),
+          promptTokens: r.promptTokens,
           cachedReadTokens: r.cachedReadTokens,
           completionTokens: r.completionTokens,
           reasoningTokens: r.reasoningTokens,

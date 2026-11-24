@@ -76,6 +76,7 @@ import type { ApiKeyDto, ApiKeyStatus } from "@/lib/api/types";
 import {
   formatCompactNumber,
   formatDateTime,
+  formatLocalDateTimeInput,
   formatMicroUsd,
   MICROS_PER_USD,
   parseUsdToMicros,
@@ -184,7 +185,7 @@ function ApiKeysContent() {
       maxConcurrency: k.maxConcurrency ? String(k.maxConcurrency) : "",
       allowedModelsCsv: (k.allowedModels ?? []).join(", "),
       ipWhitelistCsv: (k.ipWhitelist ?? []).join(", "),
-      expiresAtLocal: k.expiresAt ? k.expiresAt.slice(0, 16) : "",
+      expiresAtLocal: formatLocalDateTimeInput(k.expiresAt),
     });
     setFormError(null);
     setSheetOpen(true);

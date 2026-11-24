@@ -64,6 +64,7 @@ import type {
 } from "@/lib/api/types";
 import {
   formatFullDateTime,
+  formatLocalDateTimeInput,
   formatMicroUsd,
   formatPerMillionUsd,
   parseUsdToMicros,
@@ -152,7 +153,7 @@ function ModelWorkbenchContent({
   const [reasonPrice, setReasonPrice] = useState("0");
   const [perCallPrice, setPerCallPrice] = useState("0");
   const [effectiveFromLocal, setEffectiveFromLocal] = useState(() =>
-    new Date(Date.now() + 60_000).toISOString().slice(0, 16),
+    formatLocalDateTimeInput(new Date(Date.now() + 60_000)),
   );
   const [effectiveToLocal, setEffectiveToLocal] = useState("");
   const [publishingPrice, setPublishingPrice] = useState(false);

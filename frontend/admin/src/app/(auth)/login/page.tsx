@@ -18,13 +18,14 @@ import { ApiErrorAlert } from "@/components/common/api-error-alert";
 import { CopyButton } from "@/components/common/copy-button";
 import { useAdminAuth } from "@/components/providers/admin-auth-provider";
 import { adminAuthApi } from "@/lib/api/endpoints";
+import { sanitizeRedirectPath } from "@/lib/format/micro-usd";
 
 type LoginStep = "CREDENTIALS" | "MFA_SETUP" | "MFA_VERIFY";
 
 function AdminLoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect") || "/overview";
+  const redirect = sanitizeRedirectPath(searchParams.get("redirect"));
   const { completeAuth } = useAdminAuth();
 
   const [step, setStep] = useState<LoginStep>("CREDENTIALS");
@@ -49,7 +50,7 @@ function AdminLoginForm() {
 
       if (!res.mfaRequired && res.accessToken) {
         completeAuth(res);
-        router.replace(redirect.startsWith("/") ? redirect : "/overview");
+        router.replace(redirect);
         return;
       }
 
@@ -93,7 +94,7 @@ function AdminLoginForm() {
       if (step === "MFA_SETUP") {
         toast.success("双因素认证已绑定");
       }
-      router.replace(redirect.startsWith("/") ? redirect : "/overview");
+      router.replace(redirect);
     } catch (err) {
       setError(err);
       setTotpCode("");

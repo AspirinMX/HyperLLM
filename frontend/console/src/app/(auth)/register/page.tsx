@@ -12,11 +12,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ApiErrorAlert } from "@/components/common/api-error-alert";
 import { useConsoleAuth } from "@/components/providers/console-auth-provider";
 import { authApi } from "@/lib/api/endpoints";
+import { sanitizeRedirectPath } from "@/lib/format/micro-usd";
 
 function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect") || "/overview";
+  const redirect = sanitizeRedirectPath(searchParams.get("redirect"));
   const { register } = useConsoleAuth();
 
   const [displayName, setDisplayName] = useState("");
@@ -73,7 +74,7 @@ function RegisterForm() {
         locale: "zh-CN",
       });
       toast.success("注册成功，已自动创建个人工作空间");
-      router.replace(redirect.startsWith("/") ? redirect : "/overview");
+      router.replace(redirect);
     } catch (err) {
       setError(err);
     } finally {

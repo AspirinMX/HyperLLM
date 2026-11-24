@@ -187,20 +187,16 @@ function PlaygroundContent() {
     (usage: StreamUsageStats): number => {
       const p = activeModel?.pricing;
       if (!p) return 0;
-      const uncachedPrompt = Math.max(
-        0,
-        usage.promptTokens - usage.cachedReadTokens,
-      );
+      const effectiveReasoningPrice =
+        p.reasoningPriceMicros1m > 0
+          ? p.reasoningPriceMicros1m
+          : p.outputPriceMicros1m;
       return (
-        ceilTokenCostMicros(uncachedPrompt, p.inputPriceMicros1m) +
+        ceilTokenCostMicros(usage.promptTokens, p.inputPriceMicros1m) +
         ceilTokenCostMicros(usage.cachedReadTokens, p.cacheReadPriceMicros1m) +
+        ceilTokenCostMicros(usage.cachedWriteTokens, p.cacheWritePriceMicros1m) +
         ceilTokenCostMicros(usage.completionTokens, p.outputPriceMicros1m) +
-        ceilTokenCostMicros(
-          usage.reasoningTokens,
-          p.reasoningPriceMicros1m > 0
-            ? p.reasoningPriceMicros1m
-            : p.outputPriceMicros1m,
-        )
+        ceilTokenCostMicros(usage.reasoningTokens, effectiveReasoningPrice)
       );
     },
     [activeModel],

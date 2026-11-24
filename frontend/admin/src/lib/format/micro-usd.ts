@@ -144,3 +144,33 @@ export function ceilTokenCostMicros(tokens: number, priceMicrosPer1m: number): n
   const denom = BigInt(1_000_000);
   return Number((prod + denom - BigInt(1)) / denom);
 }
+
+/**
+ * Formats a Date or ISO timestamp into a local YYYY-MM-DDTHH:mm string suitable
+ * for HTML `<input type="datetime-local">`, avoiding UTC timezone shifts.
+ */
+export function formatLocalDateTimeInput(
+  value: Date | string | null | undefined,
+): string {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Prevents open redirects by allowing only same-origin relative paths
+ * (rejecting protocol-relative `//...`, backslashes, and external URLs).
+ */
+export function sanitizeRedirectPath(
+  raw: string | null | undefined,
+  fallback = "/overview",
+): string {
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//") || trimmed.includes("\\")) {
+    return fallback;
+  }
+  return trimmed;
+}
