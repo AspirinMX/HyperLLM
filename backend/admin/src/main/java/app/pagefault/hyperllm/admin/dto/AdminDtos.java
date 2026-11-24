@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.admin.dto;
 
+import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.AdminRole;
 import app.pagefault.hyperllm.domain.model.enums.AuthScheme;
 import app.pagefault.hyperllm.domain.model.enums.BillingMode;
@@ -339,6 +340,21 @@ public final class AdminDtos {
             long version,
             OffsetDateTime createdAt,
             OffsetDateTime updatedAt
+    ) {
+    }
+
+    public record AuditLogDto(
+            UUID id,
+            ActorType actorType,
+            UUID actorId,
+            UUID orgId,
+            String action,
+            String resourceType,
+            String resourceId,
+            String diffJson,
+            String clientIp,
+            String traceId,
+            OffsetDateTime createdAt
     ) {
     }
 }

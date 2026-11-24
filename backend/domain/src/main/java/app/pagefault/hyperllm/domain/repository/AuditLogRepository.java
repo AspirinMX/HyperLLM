@@ -14,4 +14,6 @@ public interface AuditLogRepository {
     Optional<UUID> findFirstResourceEventId(UUID orgId, String action, String resourceId);
 
     PageResponse<AuditLogEntry> listByOrg(UUID orgId, PageQuery pageQuery);
+
+    PageResponse<AuditLogEntry> search(UUID orgId, String actionFilter, PageQuery pageQuery);
 }

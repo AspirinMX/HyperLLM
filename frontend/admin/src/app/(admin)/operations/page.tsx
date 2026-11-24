@@ -7,10 +7,12 @@ import {
   AlertTriangle,
   Bell,
   ChevronDown,
+  FileClock,
   Loader2,
   Play,
   RefreshCw,
   RotateCcw,
+  Search,
   ShieldAlert,
   Wrench,
 } from "lucide-react";
@@ -64,12 +66,14 @@ import { useAsyncData } from "@/hooks/use-async-data";
 import { adminOperationsApi } from "@/lib/api/endpoints";
 import type {
   AlertDeliveryDto,
+  AuditLogDto,
   PaymentAnomalyDto,
   PaymentAnomalyStatus,
   ReconciliationFinding,
 } from "@/lib/api/types";
 import {
   formatDateTime,
+  formatFullDateTime,
   formatMicroUsd,
   parseUsdToMicros,
 } from "@/lib/format/micro-usd";
@@ -95,13 +99,31 @@ const DELIVERY_STATUS_LABEL: Record<string, string> = {
   DEAD: "死信失败",
 };
 
+const ACTOR_TYPE_LABEL: Record<string, string> = {
+  ADMIN: "管理员",
+  USER: "开发者",
+  SYSTEM: "系统",
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function formatPrettyJson(raw: string | null): string {
+  if (!raw) return "";
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
 export default function AdminOperationsPage() {
   const { profile } = useAdminAuth();
   const canResolveFinance = canFinanceWrite(profile?.role);
 
-  const [tab, setTab] = useState<"reconcile" | "anomalies" | "deliveries">(
-    "reconcile",
-  );
+  const [tab, setTab] = useState<
+    "reconcile" | "anomalies" | "deliveries" | "audit"
+  >("reconcile");
   const [findingStateFilter, setFindingStateFilter] = useState<
     "OPEN" | "RESOLVED"
   >("OPEN");
@@ -109,6 +131,15 @@ export default function AdminOperationsPage() {
     useState<PaymentAnomalyStatus>("OPEN");
   const [deliveryStatusFilter, setDeliveryStatusFilter] =
     useState<string>("ALL");
+
+  // Audit log query filters & pagination
+  const [auditActionDraft, setAuditActionDraft] = useState("");
+  const [auditOrgDraft, setAuditOrgDraft] = useState("");
+  const [auditActionFilter, setAuditActionFilter] = useState("");
+  const [auditOrgFilter, setAuditOrgFilter] = useState("");
+  const [auditPage, setAuditPage] = useState(1);
+  const AUDIT_PAGE_SIZE = 20;
+  const [inspectAudit, setInspectAudit] = useState<AuditLogDto | null>(null);
 
   const findingsState = useAsyncData(
     (signal) => adminOperationsApi.listFindings(findingStateFilter, 100, signal),
@@ -135,6 +166,20 @@ export default function AdminOperationsPage() {
         signal,
       ),
     [deliveryStatusFilter],
+  );
+
+  const auditLogsState = useAsyncData(
+    (signal) =>
+      adminOperationsApi.listAuditLogs(
+        {
+          orgId: auditOrgFilter || undefined,
+          action: auditActionFilter || undefined,
+          page: auditPage,
+          pageSize: AUDIT_PAGE_SIZE,
+        },
+        signal,
+      ),
+    [auditOrgFilter, auditActionFilter, auditPage],
   );
 
   // Reconciliation actions
@@ -264,13 +309,36 @@ export default function AdminOperationsPage() {
     }
   }
 
+  function handleApplyAuditFilter(e: FormEvent) {
+    e.preventDefault();
+    const trimmedOrg = auditOrgDraft.trim();
+    if (trimmedOrg && !UUID_PATTERN.test(trimmedOrg)) {
+      toast.error("组织 ID 必须为合法 UUID 格式");
+      return;
+    }
+    setAuditOrgFilter(trimmedOrg);
+    setAuditActionFilter(auditActionDraft.trim());
+    setAuditPage(1);
+  }
+
+  function handleResetAuditFilter() {
+    setAuditOrgDraft("");
+    setAuditActionDraft("");
+    setAuditOrgFilter("");
+    setAuditActionFilter("");
+    setAuditPage(1);
+  }
+
+  const auditTotal = auditLogsState.data?.total ?? 0;
+  const auditTotalPages = Math.max(1, Math.ceil(auditTotal / AUDIT_PAGE_SIZE));
+
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Tabs
           value={tab}
           onValueChange={(v) =>
-            setTab(v as "reconcile" | "anomalies" | "deliveries")
+            setTab(v as "reconcile" | "anomalies" | "deliveries" | "audit")
           }
         >
           <TabsList>
@@ -282,6 +350,9 @@ export default function AdminOperationsPage() {
             </TabsTrigger>
             <TabsTrigger value="deliveries">
               告警投递（{deliveriesState.data?.length ?? 0}）
+            </TabsTrigger>
+            <TabsTrigger value="audit">
+              审计日志（{auditTotal}）
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -321,6 +392,7 @@ export default function AdminOperationsPage() {
               onClick={() => {
                 anomaliesState.reload();
                 deliveriesState.reload();
+                auditLogsState.reload();
               }}
             >
               <RefreshCw className="size-3.5" />
@@ -331,7 +403,10 @@ export default function AdminOperationsPage() {
 
       <ApiErrorAlert
         error={
-          findingsState.error ?? anomaliesState.error ?? deliveriesState.error
+          findingsState.error ??
+          anomaliesState.error ??
+          deliveriesState.error ??
+          auditLogsState.error
         }
       />
 
@@ -616,6 +691,156 @@ export default function AdminOperationsPage() {
             )}
           </div>
         </TabsContent>
+
+        {/* Tab 4: Audit Logs */}
+        <TabsContent value="audit" className="flex flex-col gap-4">
+          <form
+            onSubmit={handleApplyAuditFilter}
+            className="flex flex-wrap items-end gap-2"
+          >
+            <div className="flex min-w-52 flex-1 flex-col gap-1">
+              <Label htmlFor="audit-action-q" className="text-xs text-muted-foreground">
+                操作关键词
+              </Label>
+              <Input
+                id="audit-action-q"
+                value={auditActionDraft}
+                onChange={(e) => setAuditActionDraft(e.target.value)}
+                placeholder="例如：WALLET.TOPUP、ORG.STATUS、MODEL."
+                className="h-8 font-mono text-xs"
+              />
+            </div>
+            <div className="flex min-w-64 flex-1 flex-col gap-1">
+              <Label htmlFor="audit-org-q" className="text-xs text-muted-foreground">
+                关联组织 UUID（可选）
+              </Label>
+              <Input
+                id="audit-org-q"
+                value={auditOrgDraft}
+                onChange={(e) => setAuditOrgDraft(e.target.value)}
+                placeholder="精确筛选某租户的审计记录"
+                className="h-8 font-mono text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button type="submit" size="sm">
+                <Search className="size-3.5" />
+                <span>查询</span>
+              </Button>
+              {(auditActionFilter || auditOrgFilter) ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleResetAuditFilter}
+                >
+                  重置
+                </Button>
+              ) : null}
+            </div>
+          </form>
+
+          <div className="squircle-md overflow-hidden rounded-xl border border-border bg-card">
+            {auditLogsState.loading ? (
+              <div className="flex flex-col gap-3 p-5">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : (auditLogsState.data?.items ?? []).length === 0 ? (
+              <EmptyState
+                icon={<FileClock className="size-4" />}
+                title="暂无匹配的审计日志"
+              />
+            ) : (
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/35 hover:bg-muted/35">
+                      <TableHead>时间</TableHead>
+                      <TableHead>操作</TableHead>
+                      <TableHead>操作者</TableHead>
+                      <TableHead>目标资源</TableHead>
+                      <TableHead className="text-right">来源 IP</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(auditLogsState.data?.items ?? []).map((entry) => (
+                      <TableRow
+                        key={entry.id}
+                        className="cursor-pointer"
+                        onClick={() => setInspectAudit(entry)}
+                      >
+                        <TableCell className="text-xs text-muted-foreground tabular-nums">
+                          {formatFullDateTime(entry.createdAt)}
+                        </TableCell>
+                        <TableCell>
+                          <code className="font-mono text-xs font-medium">
+                            {entry.action}
+                          </code>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5">
+                            <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                              {ACTOR_TYPE_LABEL[entry.actorType] ??
+                                entry.actorType}
+                            </Badge>
+                            {entry.actorId ? (
+                              <code className="font-mono text-[11px] text-muted-foreground">
+                                {entry.actorId.slice(0, 8)}
+                              </code>
+                            ) : null}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          <span className="font-medium">
+                            {entry.resourceType}
+                          </span>
+                          {entry.resourceId ? (
+                            <code className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                              {entry.resourceId.length > 20
+                                ? `${entry.resourceId.slice(0, 18)}…`
+                                : entry.resourceId}
+                            </code>
+                          ) : null}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs text-muted-foreground tabular-nums">
+                          {entry.clientIp ?? "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+
+                <div className="flex items-center justify-between border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+                  <span className="tabular-nums">
+                    第 {auditPage} / {auditTotalPages} 页 · 共 {auditTotal} 条
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={auditPage <= 1}
+                      onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+                    >
+                      上一页
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={auditPage >= auditTotalPages}
+                      onClick={() =>
+                        setAuditPage((p) => Math.min(auditTotalPages, p + 1))
+                      }
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </TabsContent>
       </Tabs>
 
       {/* Reconciliation Inspection Sheet */}
@@ -793,6 +1018,99 @@ export default function AdminOperationsPage() {
                 </>
               ) : null}
             </form>
+          ) : null}
+        </SheetContent>
+      </Sheet>
+
+      {/* Audit Log Inspection Sheet */}
+      <Sheet
+        open={Boolean(inspectAudit)}
+        onOpenChange={(open) => {
+          if (!open) setInspectAudit(null);
+        }}
+      >
+        <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2">
+              <FileClock className="size-4 text-muted-foreground" />
+              <span>审计日志详情</span>
+            </SheetTitle>
+          </SheetHeader>
+
+          {inspectAudit ? (
+            <div className="flex flex-col gap-4 px-6 pb-6 text-xs">
+              <div className="grid grid-cols-2 gap-3 rounded-lg bg-muted/45 p-3">
+                <div className="col-span-2">
+                  <div className="text-muted-foreground">操作</div>
+                  <code className="mt-0.5 block font-mono text-sm font-medium">
+                    {inspectAudit.action}
+                  </code>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">时间</div>
+                  <div className="mt-0.5 tabular-nums">
+                    {formatFullDateTime(inspectAudit.createdAt)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">操作者</div>
+                  <div className="mt-0.5 font-mono">
+                    {ACTOR_TYPE_LABEL[inspectAudit.actorType] ??
+                      inspectAudit.actorType}
+                    {inspectAudit.actorId ? ` · ${inspectAudit.actorId}` : ""}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">目标资源</div>
+                  <div className="mt-0.5 font-mono break-all">
+                    {inspectAudit.resourceType}
+                    {inspectAudit.resourceId
+                      ? ` / ${inspectAudit.resourceId}`
+                      : ""}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">来源 IP</div>
+                  <div className="mt-0.5 font-mono">
+                    {inspectAudit.clientIp ?? "—"}
+                  </div>
+                </div>
+                {inspectAudit.orgId ? (
+                  <div className="col-span-2">
+                    <div className="text-muted-foreground">关联组织</div>
+                    <Link
+                      href={`/tenants/${inspectAudit.orgId}`}
+                      className="mt-0.5 inline-block font-mono text-primary hover:underline"
+                    >
+                      {inspectAudit.orgId} →
+                    </Link>
+                  </div>
+                ) : null}
+                {inspectAudit.traceId ? (
+                  <div className="col-span-2">
+                    <div className="text-muted-foreground">Trace ID</div>
+                    <code className="mt-0.5 block font-mono break-all">
+                      {inspectAudit.traceId}
+                    </code>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <div className="font-medium text-muted-foreground">
+                  变更载荷 (diff_json)
+                </div>
+                {inspectAudit.diffJson ? (
+                  <pre className="max-h-80 overflow-auto rounded-lg border border-border bg-muted/35 p-3 font-mono text-[11px] whitespace-pre-wrap">
+                    {formatPrettyJson(inspectAudit.diffJson)}
+                  </pre>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border p-3 text-muted-foreground">
+                    无附加变更载荷
+                  </div>
+                )}
+              </div>
+            </div>
           ) : null}
         </SheetContent>
       </Sheet>

@@ -7,6 +7,7 @@ import type {
   AdminWalletTopupRequest,
   AdminWalletTopupResponse,
   AlertDeliveryDto,
+  AuditLogDto,
   BindingDto,
   BindingItemRequest,
   ChannelDto,
@@ -404,5 +405,19 @@ export const adminOperationsApi = {
     return adminRequest<void>(`/api/v1/admin/alerts/deliveries/${id}/retry`, {
       method: "POST",
     });
+  },
+  listAuditLogs(
+    params: { orgId?: string; action?: string; page?: number; pageSize?: number },
+    signal?: AbortSignal,
+  ) {
+    return adminRequest<PageResponse<AuditLogDto>>(
+      `/api/v1/admin/audit-logs${buildQuery({
+        orgId: params.orgId,
+        action: params.action,
+        page: params.page ?? 1,
+        pageSize: params.pageSize ?? 20,
+      })}`,
+      { signal },
+    );
   },
 };

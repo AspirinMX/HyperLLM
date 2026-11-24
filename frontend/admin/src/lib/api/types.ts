@@ -511,3 +511,19 @@ export interface AlertDeliveryDto {
   nextAttemptAt: string | null;
   lastErrorClass: string | null;
 }
+
+export type ActorType = "ADMIN" | "USER" | "SYSTEM";
+
+export interface AuditLogDto {
+  id: string;
+  actorType: ActorType;
+  actorId: string | null;
+  orgId: string | null;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  diffJson: string | null;
+  clientIp: string | null;
+  traceId: string | null;
+  createdAt: string;
+}

@@ -9,6 +9,7 @@ import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
 import lombok.RequiredArgsConstructor;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
@@ -50,6 +51,25 @@ public class JooqAuditLogRepository implements AuditLogRepository {
     @Override
     public PageResponse<AuditLogEntry> listByOrg(UUID orgId, PageQuery pageQuery) {
         Condition cond = AUDIT_LOGS.ORG_ID.eq(orgId);
+        return PgJooqSupport.fetchPage(
+                dsl,
+                AUDIT_LOGS,
+                cond,
+                AUDIT_LOGS.CREATED_AT.desc(),
+                pageQuery,
+                this::toDomain
+        );
+    }
+
+    @Override
+    public PageResponse<AuditLogEntry> search(UUID orgId, String actionFilter, PageQuery pageQuery) {
+        Condition cond = DSL.trueCondition();
+        if (orgId != null) {
+            cond = cond.and(AUDIT_LOGS.ORG_ID.eq(orgId));
+        }
+        if (actionFilter != null && !actionFilter.isBlank()) {
+            cond = cond.and(AUDIT_LOGS.ACTION.containsIgnoreCase(actionFilter.trim()));
+        }
         return PgJooqSupport.fetchPage(
                 dsl,
                 AUDIT_LOGS,
