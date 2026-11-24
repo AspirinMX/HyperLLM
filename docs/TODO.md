@@ -294,7 +294,7 @@
 - [ ] 编写后续治理表 Flyway 迁移（SSO / 调账 / 账单 / 发票）并刷新 `-Pjooq`
 - [ ] 接入企业级能力：OIDC / SAML 企业 SSO 登录与 JIT 入组、`RESTRICTED` 私有模型定向授权、GitHub / Google OAuth 完善
 - [ ] 落地内容安全与调试合规：`GuardrailProvider` SPI（AC 自动机敏感词、PII 脱敏、注入拦截、外部审核）与 Opt-in 项目加密调试日志写 ClickHouse `llm_debug_payloads`（1~7 天 TTL 自动清除）
-- [ ] 落地财务与合规后台接口：运营人工调账二次审批流（四眼约束）、月度 `billing_statements` 结账任务、双轨 `invoices` 开具与 `audit_logs` 审计查询 API
+- [ ] 落地财务与合规后台接口：运营人工调账二次审批流（四眼约束）、月度 `billing_statements` 结账任务、双轨 `invoices` 开具（`audit_logs` 审计查询接口与后台查看页已先行交付）
 
 ---
 
@@ -308,9 +308,9 @@
 
 ---
 
-## Frontend Track（⏸️ 当前暂缓，待后端 Phase 1/2 接口稳定后独立启动）
+## Frontend Track（Console `:3000` 与 Admin `:3001` 主体功能已落地）
 
-- [ ] 选型与统一前端底座：`shadcn/ui`、Tailwind CSS v4 语义主题、`openapi-typescript` + `openapi-fetch`、Next.js 16 `cacheComponents` 鉴权状态流与 `next-intl` 双语方案
-- [ ] `frontend/console`（端口 `3000`）：门户官网与模型广场、注册登录引导、Org/Project/API Key 管理、Playground（SSE 直连与 Arena 对比）、ClickHouse 用量仪表盘与充值开票中心
-- [ ] `frontend/admin`（端口 `3001`）：运营登录与 TOTP MFA、渠道密钥池与探针调试、虚拟模型与路由编排、定价版本与代金券配置、毛利大盘、调账审批与对账巡检中心
-- [ ] 评估双端通用组件稳定后是否整合 `frontend/` 为统一 `pnpm` Workspace（抽离 `packages/ui` 与 `packages/sdk`）
+- [x] 前端底座与生产加固：Next.js 16 + React 19 + Tailwind CSS v4 + shadcn/Base UI、`cacheComponents` 鉴权流、统一错误边界与 404 页面、安全响应头与 `standalone` 产物配置、核心计费/协议解析单元测试
+- [x] `frontend/console`（端口 `3000`）：公开门户官网、模型广场（含 4 协议与 Prompt 缓存费用估算器）、四协议对接文档、注册/登录/忘记密码与个人设置（`/settings`）、Org/Project/成员与待接受邀请管理、API Key 生命周期、四协议多模态 Playground（含图片上传与 Arena 双模型对比）、ClickHouse 用量仪表盘（自定义日期范围 + CSV 导出）、充值/资源包/赠金权益中心与告警规则配置
+- [x] `frontend/admin`（端口 `3001`）：运营登录与 TOTP MFA、渠道密钥池（V9 协议能力与服务端分页）与探针调试、虚拟模型与路由编排（含每绑定上游协议与转译策略）、定价版本与租户专属模型协议价覆盖、商品资源包与代金券配置、毛利大盘、对账巡检/支付异常/告警投递与审计日志查看器
+- [ ] 前端进阶增强：接入 `next-intl` 中英双语切换、基于 OpenAPI 自动生成强类型客户端（`openapi-typescript`）、补齐 Playwright 端到端冒烟测试与前后端联调 Dockerfile、评估抽离 `packages/ui` 共享组件库

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --import ./tests/ts-loader.mjs --test tests"
   },
   "dependencies": {
     "@animate-ui/react": "^2.4.6",
