@@ -62,12 +62,15 @@ public class AdminModelAndPricingService {
             throw new HyperLlmException(ErrorCode.MODEL_CODE_EXISTS);
         }
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        boolean allowTranslation = req.allowProtocolTranslation() == null || req.allowProtocolTranslation();
+        String policy = normalizeTranslationPolicy(req.translationPolicy());
         VirtualModel model = new VirtualModel(
                 UuidV7.next(), code, req.displayName().trim(), req.providerBadge(),
                 req.capabilityType(), req.nativeProtocol(), req.contextWindow(), req.maxOutputTokens(),
                 req.supportsTools(), req.supportsVision(), req.supportsThinking(), req.supportsPromptCache(),
                 req.routingStrategy(), req.stickyCacheEnabled(), req.stickyTtlSeconds(),
                 req.visibility(), req.fallbackModelCode(), ModelStatus.ACTIVE, "{}",
+                allowTranslation, policy,
                 null, 0L, now, now
         );
         modelRepository.insert(model);
@@ -78,11 +81,15 @@ public class AdminModelAndPricingService {
     public VirtualModelDto updateModel(UUID modelId, UpdateVirtualModelRequest req) {
         VirtualModel existing = requireModel(modelId);
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        boolean allowTranslation = req.allowProtocolTranslation() != null
+                ? req.allowProtocolTranslation() : existing.allowProtocolTranslation();
+        String policy = req.translationPolicy() != null && !req.translationPolicy().isBlank()
+                ? normalizeTranslationPolicy(req.translationPolicy()) : existing.translationPolicy();
         boolean ok = modelRepository.update(
                 modelId, req.displayName().trim(), req.providerBadge(), req.contextWindow(), req.maxOutputTokens(),
                 req.supportsTools(), req.supportsVision(), req.supportsThinking(), req.supportsPromptCache(),
                 req.routingStrategy(), req.stickyCacheEnabled(), req.stickyTtlSeconds(), req.visibility(),
-                req.fallbackModelCode(), req.status(), "{}", req.version(), now
+                req.fallbackModelCode(), req.status(), "{}", allowTranslation, policy, req.version(), now
         );
         if (!ok) {
             throw new HyperLlmException(ErrorCode.CONFLICT_OPTIMISTIC_LOCK);
@@ -115,11 +122,14 @@ public class AdminModelAndPricingService {
         for (BindingItemRequest item : req.bindings()) {
             channelRepository.findById(item.channelId())
                     .orElseThrow(() -> new HyperLlmException(ErrorCode.CHANNEL_NOT_FOUND, "Channel not found: " + item.channelId()));
+            String upstreamProtocol = (item.upstreamProtocol() == null || item.upstreamProtocol().isBlank())
+                    ? null : item.upstreamProtocol().trim();
             next.add(new ModelChannelBinding(
                     UuidV7.next(),
                     modelId,
                     item.channelId(),
                     item.upstreamModelName().trim(),
+                    upstreamProtocol,
                     item.priorityTier(),
                     item.weight(),
                     item.costDiscountBpsOverride(),
@@ -178,20 +188,32 @@ public class AdminModelAndPricingService {
                 .orElseThrow(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
     }
 
+    private static String normalizeTranslationPolicy(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "BEST_EFFORT";
+        }
+        String normalized = raw.trim().toUpperCase();
+        if (!"BEST_EFFORT".equals(normalized) && !"STRICT".equals(normalized)) {
+            throw new HyperLlmException(ErrorCode.VALIDATION_FAILED, "Unsupported translationPolicy: " + raw);
+        }
+        return normalized;
+    }
+
     private static VirtualModelDto toModelDto(VirtualModel m) {
         return new VirtualModelDto(
                 m.id(), m.modelCode(), m.displayName(), m.providerBadge(),
                 m.capabilityType(), m.nativeProtocol(), m.contextWindow(), m.maxOutputTokens(),
                 m.supportsTools(), m.supportsVision(), m.supportsThinking(), m.supportsPromptCache(),
                 m.routingStrategy(), m.stickyCacheEnabled(), m.stickyTtlSeconds(),
-                m.visibility(), m.fallbackModelCode(), m.status(), m.version(),
-                m.createdAt(), m.updatedAt()
+                m.visibility(), m.fallbackModelCode(), m.status(),
+                m.allowProtocolTranslation(), m.translationPolicy(),
+                m.version(), m.createdAt(), m.updatedAt()
         );
     }
 
     private static BindingDto toBindingDto(ModelChannelBinding b) {
         return new BindingDto(
-                b.id(), b.virtualModelId(), b.channelId(), b.upstreamModelName(),
+                b.id(), b.virtualModelId(), b.channelId(), b.upstreamModelName(), b.upstreamProtocol(),
                 b.priorityTier(), b.weight(), b.costDiscountBpsOverride(), b.status(), b.updatedAt()
         );
     }

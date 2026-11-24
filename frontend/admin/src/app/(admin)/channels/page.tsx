@@ -67,6 +67,7 @@ import {
   CHANNEL_STATUS_LABEL,
   formatBpsPercent,
   PROTOCOL_LABEL,
+  WIRE_PROTOCOL_LABEL,
 } from "@/lib/format/labels";
 import { cn } from "@/lib/utils";
 
@@ -116,13 +117,16 @@ export default function AdminChannelsPage() {
   const { profile } = useAdminAuth();
   const canEdit = canOpsWrite(profile?.role);
 
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
+
   const providersState = useAsyncData(
     (signal) => adminChannelApi.listProviders(signal),
     [],
   );
   const channelsState = useAsyncData(
-    (signal) => adminChannelApi.listChannels(1, 100, signal),
-    [],
+    (signal) => adminChannelApi.listChannels(page, pageSize, signal),
+    [page],
   );
 
   const [providerFilter, setProviderFilter] = useState<string>("ALL");
@@ -360,12 +364,27 @@ export default function AdminChannelsPage() {
                       ) : null}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1.5 text-xs">
-                        <span>{provider?.displayName ?? "—"}</span>
-                        {ch.region ? (
-                          <Badge variant="outline" className="font-mono text-[10px]">
-                            {ch.region}
-                          </Badge>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5 text-xs">
+                          <span>{provider?.displayName ?? "—"}</span>
+                          {ch.region ? (
+                            <Badge variant="outline" className="font-mono text-[10px]">
+                              {ch.region}
+                            </Badge>
+                          ) : null}
+                        </div>
+                        {provider?.supportedProtocols?.length ? (
+                          <div className="flex flex-wrap gap-1">
+                            {provider.supportedProtocols.map((wp) => (
+                              <Badge
+                                key={wp}
+                                variant="secondary"
+                                className="h-4 px-1 font-mono text-[10px]"
+                              >
+                                {WIRE_PROTOCOL_LABEL[wp] ?? wp}
+                              </Badge>
+                            ))}
+                          </div>
                         ) : null}
                       </div>
                     </TableCell>
@@ -460,6 +479,32 @@ export default function AdminChannelsPage() {
           </Table>
         )}
       </div>
+
+      {(channelsState.data?.total ?? 0) > pageSize ? (
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span className="tabular-nums">
+            第 {page} / {Math.max(1, Math.ceil((channelsState.data?.total ?? 0) / pageSize))} 页 · 共 {channelsState.data?.total ?? 0} 条渠道
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              上一页
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={page * pageSize >= (channelsState.data?.total ?? 0)}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              下一页
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Create / Edit Channel Sheet */}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>

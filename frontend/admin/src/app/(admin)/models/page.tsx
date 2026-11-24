@@ -54,6 +54,7 @@ import type {
   ModelVisibility,
   ProtocolFamily,
   RoutingStrategy,
+  TranslationPolicy,
 } from "@/lib/api/types";
 import { formatCompactNumber } from "@/lib/format/micro-usd";
 import {
@@ -62,6 +63,7 @@ import {
   MODEL_VISIBILITY_LABEL,
   PROTOCOL_LABEL,
   ROUTING_STRATEGY_LABEL,
+  TRANSLATION_POLICY_LABEL,
 } from "@/lib/format/labels";
 
 interface CreateModelForm {
@@ -81,6 +83,8 @@ interface CreateModelForm {
   stickyTtlSeconds: string;
   visibility: ModelVisibility;
   fallbackModelCode: string;
+  allowProtocolTranslation: boolean;
+  translationPolicy: TranslationPolicy;
 }
 
 const DEFAULT_CREATE_FORM: CreateModelForm = {
@@ -100,15 +104,20 @@ const DEFAULT_CREATE_FORM: CreateModelForm = {
   stickyTtlSeconds: "300",
   visibility: "PUBLIC",
   fallbackModelCode: "",
+  allowProtocolTranslation: true,
+  translationPolicy: "BEST_EFFORT",
 };
 
 export default function AdminModelsPage() {
   const { profile } = useAdminAuth();
   const canEdit = canOpsWrite(profile?.role);
 
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
+
   const modelsState = useAsyncData(
-    (signal) => adminModelApi.listModels(1, 100, signal),
-    [],
+    (signal) => adminModelApi.listModels(page, pageSize, signal),
+    [page],
   );
 
   const [query, setQuery] = useState("");
@@ -159,6 +168,8 @@ export default function AdminModelsPage() {
         stickyTtlSeconds: Math.max(0, Number(form.stickyTtlSeconds) || 0),
         visibility: form.visibility,
         fallbackModelCode: form.fallbackModelCode.trim() || null,
+        allowProtocolTranslation: form.allowProtocolTranslation,
+        translationPolicy: form.translationPolicy,
       });
       toast.success("虚拟模型已创建");
       setSheetOpen(false);
@@ -284,6 +295,19 @@ export default function AdminModelsPage() {
                           粘性 {m.stickyTtlSeconds}s
                         </Badge>
                       ) : null}
+                      {m.allowProtocolTranslation ? (
+                        <Badge
+                          variant="outline"
+                          className="font-mono text-[10px]"
+                          title={TRANSLATION_POLICY_LABEL[m.translationPolicy]}
+                        >
+                          {m.translationPolicy === "STRICT" ? "严格转译" : "跨协议"}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                          仅同构
+                        </Badge>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -319,6 +343,32 @@ export default function AdminModelsPage() {
           </Table>
         )}
       </div>
+
+      {(modelsState.data?.total ?? 0) > pageSize ? (
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span className="tabular-nums">
+            第 {page} / {Math.max(1, Math.ceil((modelsState.data?.total ?? 0) / pageSize))} 页 · 共 {modelsState.data?.total ?? 0} 个模型
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              上一页
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={page * pageSize >= (modelsState.data?.total ?? 0)}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              下一页
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Create Model Sheet */}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
@@ -530,6 +580,40 @@ export default function AdminModelsPage() {
                   placeholder="可选"
                   className="font-mono text-xs"
                 />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs">
+                <span>允许跨协议转译</span>
+                <Switch
+                  checked={form.allowProtocolTranslation}
+                  onCheckedChange={(v) =>
+                    setForm({ ...form, allowProtocolTranslation: v })
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label>转译策略</Label>
+                <Select
+                  disabled={!form.allowProtocolTranslation}
+                  value={form.translationPolicy}
+                  onValueChange={(v) =>
+                    setForm({
+                      ...form,
+                      translationPolicy:
+                        (v as TranslationPolicy) ?? "BEST_EFFORT",
+                    })
+                  }
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="BEST_EFFORT">尽力兼容 (Best-Effort)</SelectItem>
+                    <SelectItem value="STRICT">严格校验 (Strict)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 

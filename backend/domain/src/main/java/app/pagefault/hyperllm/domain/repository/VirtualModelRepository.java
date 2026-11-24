@@ -24,6 +24,33 @@ public interface VirtualModelRepository {
 
     PageResponse<VirtualModel> listPage(PageQuery pageQuery);
 
+    default boolean update(
+            UUID modelId,
+            String displayName,
+            String providerBadge,
+            int contextWindow,
+            Integer maxOutputTokens,
+            boolean supportsTools,
+            boolean supportsVision,
+            boolean supportsThinking,
+            boolean supportsPromptCache,
+            RoutingStrategy routingStrategy,
+            boolean stickyCacheEnabled,
+            int stickyTtlSeconds,
+            ModelVisibility visibility,
+            String fallbackModelCode,
+            ModelStatus status,
+            String metadataJson,
+            long expectedVersion,
+            OffsetDateTime updatedAt
+    ) {
+        return update(modelId, displayName, providerBadge, contextWindow, maxOutputTokens,
+                supportsTools, supportsVision, supportsThinking, supportsPromptCache,
+                routingStrategy, stickyCacheEnabled, stickyTtlSeconds, visibility,
+                fallbackModelCode, status, metadataJson, true, "BEST_EFFORT",
+                expectedVersion, updatedAt);
+    }
+
     boolean update(
             UUID modelId,
             String displayName,
@@ -41,6 +68,8 @@ public interface VirtualModelRepository {
             String fallbackModelCode,
             ModelStatus status,
             String metadataJson,
+            boolean allowProtocolTranslation,
+            String translationPolicy,
             long expectedVersion,
             OffsetDateTime updatedAt
     );

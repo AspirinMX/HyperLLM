@@ -109,9 +109,13 @@ public class JooqVirtualModelRepository implements VirtualModelRepository {
             String fallbackModelCode,
             ModelStatus status,
             String metadataJson,
+            boolean allowProtocolTranslation,
+            String translationPolicy,
             long expectedVersion,
             OffsetDateTime updatedAt
     ) {
+        String policy = (translationPolicy == null || translationPolicy.isBlank())
+                ? "BEST_EFFORT" : translationPolicy.trim();
         int updated = dsl.update(VIRTUAL_MODELS)
                 .set(VIRTUAL_MODELS.DISPLAY_NAME, displayName)
                 .set(VIRTUAL_MODELS.PROVIDER_BADGE, providerBadge)
@@ -128,6 +132,8 @@ public class JooqVirtualModelRepository implements VirtualModelRepository {
                 .set(VIRTUAL_MODELS.FALLBACK_MODEL_CODE, fallbackModelCode)
                 .set(VIRTUAL_MODELS.STATUS, status.name())
                 .set(VIRTUAL_MODELS.METADATA_JSON, PgJooqSupport.toJsonb(metadataJson))
+                .set(VIRTUAL_MODELS.ALLOW_PROTOCOL_TRANSLATION, allowProtocolTranslation)
+                .set(VIRTUAL_MODELS.TRANSLATION_POLICY, policy)
                 .set(VIRTUAL_MODELS.VERSION, VIRTUAL_MODELS.VERSION.plus(1))
                 .set(VIRTUAL_MODELS.UPDATED_AT, updatedAt)
                 .where(VIRTUAL_MODELS.ID.eq(modelId))

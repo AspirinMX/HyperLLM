@@ -55,7 +55,8 @@ public class AdminChannelService {
         return providerRepository.listAllActive().stream()
                 .map(p -> new ProviderDto(
                         p.id(), p.code(), p.displayName(), p.protocolFamily(),
-                        p.defaultBaseUrl(), p.authScheme(), p.status()
+                        p.defaultBaseUrl(), p.authScheme(), p.status(),
+                        p.supportedProtocols(), p.defaultWireProtocol()
                 ))
                 .toList();
     }

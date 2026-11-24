@@ -68,7 +68,9 @@ public final class AdminDtos {
             ProtocolFamily protocolFamily,
             String defaultBaseUrl,
             AuthScheme authScheme,
-            String status
+            String status,
+            List<String> supportedProtocols,
+            String defaultWireProtocol
     ) {
     }
 
@@ -147,7 +149,9 @@ public final class AdminDtos {
             boolean stickyCacheEnabled,
             @Min(0) int stickyTtlSeconds,
             @NotNull ModelVisibility visibility,
-            String fallbackModelCode
+            String fallbackModelCode,
+            Boolean allowProtocolTranslation,
+            String translationPolicy
     ) {
     }
 
@@ -166,6 +170,8 @@ public final class AdminDtos {
             @NotNull ModelVisibility visibility,
             String fallbackModelCode,
             @NotNull ModelStatus status,
+            Boolean allowProtocolTranslation,
+            String translationPolicy,
             @NotNull Long version
     ) {
     }
@@ -189,6 +195,8 @@ public final class AdminDtos {
             ModelVisibility visibility,
             String fallbackModelCode,
             ModelStatus status,
+            boolean allowProtocolTranslation,
+            String translationPolicy,
             long version,
             OffsetDateTime createdAt,
             OffsetDateTime updatedAt
@@ -198,6 +206,7 @@ public final class AdminDtos {
     public record BindingItemRequest(
             @NotNull UUID channelId,
             @NotBlank String upstreamModelName,
+            String upstreamProtocol,
             @Min(1) short priorityTier,
             @Positive int weight,
             @Positive Integer costDiscountBpsOverride,
@@ -213,6 +222,7 @@ public final class AdminDtos {
             UUID virtualModelId,
             UUID channelId,
             String upstreamModelName,
+            String upstreamProtocol,
             short priorityTier,
             int weight,
             Integer costDiscountBpsOverride,

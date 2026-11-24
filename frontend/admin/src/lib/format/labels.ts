@@ -15,8 +15,10 @@ import type {
   PaymentChannel,
   ProtocolFamily,
   RoutingStrategy,
+  TranslationPolicy,
   VoucherStatus,
   VoucherType,
+  WireProtocol,
 } from "@/lib/api/types";
 
 export const ADMIN_ROLE_LABEL: Record<AdminRole, string> = {
@@ -55,6 +57,18 @@ export const PROTOCOL_LABEL: Record<ProtocolFamily, string> = {
   ANTHROPIC: "Anthropic",
   GEMINI: "Gemini",
   COHERE_RERANK: "Rerank",
+};
+
+export const WIRE_PROTOCOL_LABEL: Record<WireProtocol, string> = {
+  OPENAI_CHAT: "OpenAI Chat",
+  OPENAI_RESPONSES: "Responses",
+  ANTHROPIC_MESSAGES: "Anthropic",
+  GEMINI_GENERATE_CONTENT: "Gemini",
+};
+
+export const TRANSLATION_POLICY_LABEL: Record<TranslationPolicy, string> = {
+  BEST_EFFORT: "尽力兼容 (Best-Effort)",
+  STRICT: "严格校验 (Strict)",
 };
 
 export const CAPABILITY_LABEL: Record<ModelCapability, string> = {

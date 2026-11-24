@@ -2,9 +2,16 @@ export type AdminRole = "SUPER_ADMIN" | "OPS" | "FINANCE" | "AUDITOR";
 export type AuthScheme =
   | "BEARER"
   | "X_API_KEY"
+  | "X_GOOG_API_KEY"
   | "AZURE_API_KEY"
   | "AWS_SIGV4"
   | "GCP_OAUTH";
+export type WireProtocol =
+  | "OPENAI_CHAT"
+  | "OPENAI_RESPONSES"
+  | "ANTHROPIC_MESSAGES"
+  | "GEMINI_GENERATE_CONTENT";
+export type TranslationPolicy = "BEST_EFFORT" | "STRICT";
 export type BillingMode =
   | "TOKEN"
   | "PER_CALL"
@@ -95,6 +102,8 @@ export interface ProviderDto {
   defaultBaseUrl: string;
   authScheme: AuthScheme;
   status: string;
+  supportedProtocols: WireProtocol[];
+  defaultWireProtocol: WireProtocol | null;
 }
 
 export interface CreateChannelRequest {
@@ -169,6 +178,8 @@ export interface CreateVirtualModelRequest {
   stickyTtlSeconds: number;
   visibility: ModelVisibility;
   fallbackModelCode: string | null;
+  allowProtocolTranslation?: boolean;
+  translationPolicy?: TranslationPolicy;
 }
 
 export interface UpdateVirtualModelRequest {
@@ -186,6 +197,8 @@ export interface UpdateVirtualModelRequest {
   visibility: ModelVisibility;
   fallbackModelCode: string | null;
   status: ModelStatus;
+  allowProtocolTranslation?: boolean;
+  translationPolicy?: TranslationPolicy;
   version: number;
 }
 
@@ -208,6 +221,8 @@ export interface VirtualModelDto {
   visibility: ModelVisibility;
   fallbackModelCode: string | null;
   status: ModelStatus;
+  allowProtocolTranslation: boolean;
+  translationPolicy: TranslationPolicy;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -216,6 +231,7 @@ export interface VirtualModelDto {
 export interface BindingItemRequest {
   channelId: string;
   upstreamModelName: string;
+  upstreamProtocol: WireProtocol | null;
   priorityTier: number;
   weight: number;
   costDiscountBpsOverride: number | null;
@@ -227,6 +243,7 @@ export interface BindingDto {
   virtualModelId: string;
   channelId: string;
   upstreamModelName: string;
+  upstreamProtocol: WireProtocol | null;
   priorityTier: number;
   weight: number;
   costDiscountBpsOverride: number | null;

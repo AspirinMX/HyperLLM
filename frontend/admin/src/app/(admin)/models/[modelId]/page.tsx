@@ -60,7 +60,9 @@ import type {
   ModelVisibility,
   PricingRuleDto,
   RoutingStrategy,
+  TranslationPolicy,
   VirtualModelDto,
+  WireProtocol,
 } from "@/lib/api/types";
 import {
   formatFullDateTime,
@@ -89,6 +91,7 @@ interface DraftBinding {
   key: string;
   channelId: string;
   upstreamModelName: string;
+  upstreamProtocol: WireProtocol | null;
   priorityTier: number;
   weight: number;
   discountPercent: string;
@@ -171,6 +174,7 @@ function ModelWorkbenchContent({
       key: b.id,
       channelId: b.channelId,
       upstreamModelName: b.upstreamModelName,
+      upstreamProtocol: b.upstreamProtocol ?? null,
       priorityTier: b.priorityTier,
       weight: b.weight,
       discountPercent:
@@ -211,6 +215,7 @@ function ModelWorkbenchContent({
         key: `new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         channelId: defaultChannel,
         upstreamModelName: model?.modelCode ?? "",
+        upstreamProtocol: null,
         priorityTier: tier,
         weight: 100,
         discountPercent: "",
@@ -224,6 +229,7 @@ function ModelWorkbenchContent({
     const payload: BindingItemRequest[] = activeBindings.map((b) => ({
       channelId: b.channelId,
       upstreamModelName: b.upstreamModelName.trim(),
+      upstreamProtocol: b.upstreamProtocol,
       priorityTier: Math.max(1, b.priorityTier),
       weight: Math.max(1, b.weight),
       costDiscountBpsOverride: b.discountPercent.trim()
@@ -316,6 +322,8 @@ function ModelWorkbenchContent({
         visibility: model.visibility,
         fallbackModelCode: model.fallbackModelCode?.trim() || null,
         status: model.status,
+        allowProtocolTranslation: model.allowProtocolTranslation,
+        translationPolicy: model.translationPolicy,
         version: model.version,
       });
       setBaseDraft(null);
@@ -576,6 +584,39 @@ function ModelWorkbenchContent({
                             />
                           </div>
 
+                          <div className="sm:col-span-2">
+                            <Select
+                              disabled={!canEditOps}
+                              value={item.upstreamProtocol ?? "AUTO"}
+                              onValueChange={(v) =>
+                                mutateBindings((prev) =>
+                                  prev.map((row) =>
+                                    row.key === item.key
+                                      ? {
+                                          ...row,
+                                          upstreamProtocol:
+                                            v === "AUTO" || !v
+                                              ? null
+                                              : (v as WireProtocol),
+                                        }
+                                      : row,
+                                  ),
+                                )
+                              }
+                            >
+                              <SelectTrigger className="w-full text-xs">
+                                <SelectValue placeholder="协议自动" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="AUTO">自动（默认）</SelectItem>
+                                <SelectItem value="OPENAI_CHAT">OpenAI Chat</SelectItem>
+                                <SelectItem value="OPENAI_RESPONSES">Responses</SelectItem>
+                                <SelectItem value="ANTHROPIC_MESSAGES">Anthropic</SelectItem>
+                                <SelectItem value="GEMINI_GENERATE_CONTENT">Gemini</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+
                           <div className="flex items-center gap-1.5 sm:col-span-2">
                             <span className="text-[11px] text-muted-foreground">
                               层级
@@ -604,7 +645,7 @@ function ModelWorkbenchContent({
                             />
                           </div>
 
-                          <div className="flex items-center gap-1.5 sm:col-span-2">
+                          <div className="flex items-center gap-1.5 sm:col-span-1">
                             <span className="text-[11px] text-muted-foreground">
                               权重
                             </span>
@@ -632,7 +673,7 @@ function ModelWorkbenchContent({
                             />
                           </div>
 
-                          <div className="flex items-center justify-end gap-2 sm:col-span-2">
+                          <div className="flex items-center justify-end gap-2 sm:col-span-1">
                             <Switch
                               disabled={!canEditOps}
                               checked={item.status === "ACTIVE"}
@@ -909,6 +950,41 @@ function ModelWorkbenchContent({
                     }
                     className="font-mono text-xs"
                   />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs">
+                  <span>允许跨协议转译</span>
+                  <Switch
+                    disabled={!canEditOps}
+                    checked={model.allowProtocolTranslation}
+                    onCheckedChange={(checked) =>
+                      setBaseDraft({
+                        ...model,
+                        allowProtocolTranslation: checked,
+                      })
+                    }
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label>跨协议转译策略</Label>
+                  <Select
+                    disabled={!canEditOps || !model.allowProtocolTranslation}
+                    value={model.translationPolicy}
+                    onValueChange={(v) =>
+                      setBaseDraft({
+                        ...model,
+                        translationPolicy:
+                          (v as TranslationPolicy) ?? model.translationPolicy,
+                      })
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="BEST_EFFORT">尽力兼容 (Best-Effort)</SelectItem>
+                      <SelectItem value="STRICT">严格校验 (Strict)</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
