@@ -10,13 +10,17 @@ import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import lombok.RequiredArgsConstructor;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+
+import static app.pagefault.hyperllm.domain.jooq.Tables.PAYMENT_ORDERS;
 
 
 /** Read models for the operator report: request margin and resource-pack sales. */
@@ -61,21 +65,27 @@ public class AdminAnalyticsService {
     }
 
     private List<PackSalesRow> sales(OffsetDateTime from, OffsetDateTime to, String status) {
-        return dsl.fetch("""
-                        SELECT payment_channel, pay_currency, count(*) AS orders,
-                               coalesce(sum(pay_amount_minor), 0) AS amount_minor,
-                               coalesce(sum(credit_micros), 0) AS credit_micros
-                        FROM payment_orders
-                        WHERE status = ? AND paid_at >= ? AND paid_at < ?
-                        GROUP BY payment_channel, pay_currency
-                        ORDER BY payment_channel, pay_currency
-                        """, status, from, to)
-                .map(row -> new PackSalesRow(
-                        row.get("payment_channel", String.class),
-                        row.get("pay_currency", String.class),
-                        row.get("orders", Long.class),
-                        row.get("amount_minor", Long.class),
-                        row.get("credit_micros", Long.class)));
+        var orders = DSL.count().as("orders");
+        var amountMinor = DSL.coalesce(DSL.sum(PAYMENT_ORDERS.PAY_AMOUNT_MINOR), BigDecimal.ZERO).as("amount_minor");
+        var creditMicros = DSL.coalesce(DSL.sum(PAYMENT_ORDERS.CREDIT_MICROS), BigDecimal.ZERO).as("credit_micros");
+        return dsl.select(
+                        PAYMENT_ORDERS.PAYMENT_CHANNEL,
+                        PAYMENT_ORDERS.PAY_CURRENCY,
+                        orders,
+                        amountMinor,
+                        creditMicros)
+                .from(PAYMENT_ORDERS)
+                .where(PAYMENT_ORDERS.STATUS.eq(status)
+                        .and(PAYMENT_ORDERS.PAID_AT.ge(from))
+                        .and(PAYMENT_ORDERS.PAID_AT.lt(to)))
+                .groupBy(PAYMENT_ORDERS.PAYMENT_CHANNEL, PAYMENT_ORDERS.PAY_CURRENCY)
+                .orderBy(PAYMENT_ORDERS.PAYMENT_CHANNEL, PAYMENT_ORDERS.PAY_CURRENCY)
+                .fetch(row -> new PackSalesRow(
+                        row.get(PAYMENT_ORDERS.PAYMENT_CHANNEL),
+                        row.get(PAYMENT_ORDERS.PAY_CURRENCY),
+                        row.get(orders, Long.class),
+                        row.get(amountMinor, Long.class),
+                        row.get(creditMicros, Long.class)));
     }
 
     private static MarginRow toMargin(Map<String, Object> row) {
