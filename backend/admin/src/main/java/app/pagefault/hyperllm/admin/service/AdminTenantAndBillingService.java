@@ -4,6 +4,8 @@ import app.pagefault.hyperllm.admin.config.AdminCacheSyncService;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminOrgDto;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminWalletTopupRequest;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminWalletTopupResponse;
+import app.pagefault.hyperllm.admin.dto.AdminDtos.CreateOrgPricingOverrideRequest;
+import app.pagefault.hyperllm.admin.dto.AdminDtos.OrgPricingOverrideDto;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.TopupType;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.UpdateOrgStatusRequest;
 import app.pagefault.hyperllm.common.error.ErrorCode;
@@ -16,12 +18,18 @@ import app.pagefault.hyperllm.domain.billing.WalletCreditOutbox;
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.domain.model.billing.AuditLogEntry;
+import app.pagefault.hyperllm.domain.model.billing.OrgModelPricingOverride;
 import app.pagefault.hyperllm.domain.model.enums.ActorType;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
+import app.pagefault.hyperllm.domain.model.enums.OverrideMode;
+import app.pagefault.hyperllm.domain.model.enums.ToggleStatus;
+import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.Organization;
 import app.pagefault.hyperllm.domain.repository.ApiKeyRepository;
 import app.pagefault.hyperllm.domain.repository.AuditLogRepository;
+import app.pagefault.hyperllm.domain.repository.OrgModelPricingOverrideRepository;
 import app.pagefault.hyperllm.domain.repository.OrganizationRepository;
+import app.pagefault.hyperllm.domain.repository.VirtualModelRepository;
 import app.pagefault.hyperllm.domain.repository.WalletLedgerRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -49,6 +57,8 @@ public class AdminTenantAndBillingService {
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
     private final WalletCreditOutbox walletCreditOutbox;
+    private final OrgModelPricingOverrideRepository pricingOverrideRepository;
+    private final VirtualModelRepository virtualModelRepository;
     private final AuditLogRepository auditLogRepository;
     private final AdminCacheSyncService cacheSync;
     private final ObjectMapper objectMapper;
@@ -112,6 +122,104 @@ public class AdminTenantAndBillingService {
         auditLogRepository.insert(new AuditLogEntry(event.eventId(), ActorType.ADMIN, adminId, orgId,
                 TOPUP_AUTHORIZED, "BILLING_EVENT", requestHash, null, clientIp, null, event.occurredAt()));
         return new AdminWalletTopupResponse(orgId, event.eventId());
+    }
+
+    public java.util.List<OrgPricingOverrideDto> listPricingOverrides(UUID orgId) {
+        organizationRepository.findById(orgId)
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
+        return pricingOverrideRepository.listActiveByOrg(orgId).stream()
+                .map(ov -> {
+                    VirtualModel model = virtualModelRepository.findById(ov.virtualModelId()).orElse(null);
+                    return toOverrideDto(ov, model);
+                })
+                .toList();
+    }
+
+    @Transactional
+    public OrgPricingOverrideDto createPricingOverride(
+            UUID orgId, UUID adminId, String clientIp, CreateOrgPricingOverrideRequest req
+    ) {
+        organizationRepository.findById(orgId)
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.TENANT_ORG_NOT_FOUND));
+        VirtualModel model = virtualModelRepository.findById(req.virtualModelId())
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
+        if (req.effectiveTo() != null && !req.effectiveTo().isAfter(req.effectiveFrom())) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "effectiveTo must be after effectiveFrom");
+        }
+        if (req.overrideMode() == OverrideMode.DISCOUNT_BPS && (req.discountRatioBps() == null || req.discountRatioBps() <= 0)) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "discountRatioBps must be positive for DISCOUNT_BPS mode");
+        }
+        if (req.overrideMode() == OverrideMode.FIXED_PRICING) {
+            if (req.fixedPricingJson() == null || req.fixedPricingJson().isBlank()) {
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "fixedPricingJson is required for FIXED_PRICING mode");
+            }
+            try {
+                var tree = objectMapper.readTree(req.fixedPricingJson());
+                if (tree == null || !tree.isObject()) {
+                    throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "fixedPricingJson must be a JSON object");
+                }
+            } catch (HyperLlmException ex) {
+                throw ex;
+            } catch (Exception ex) {
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "fixedPricingJson must be valid JSON");
+            }
+        }
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        OrgModelPricingOverride created = new OrgModelPricingOverride(
+                UuidV7.next(),
+                orgId,
+                model.id(),
+                req.overrideMode(),
+                req.overrideMode() == OverrideMode.DISCOUNT_BPS ? req.discountRatioBps() : null,
+                req.overrideMode() == OverrideMode.FIXED_PRICING ? req.fixedPricingJson().trim() : null,
+                req.effectiveFrom(),
+                req.effectiveTo(),
+                ToggleStatus.ACTIVE,
+                adminId,
+                null,
+                0L,
+                now,
+                now
+        );
+        pricingOverrideRepository.insert(created);
+        cacheSync.evictRoutesAfterCommit(java.util.List.of(model.modelCode()));
+        recordAudit(adminId, orgId, "ORG.PRICING_OVERRIDE_CREATE", clientIp,
+                Map.of("overrideId", created.id().toString(), "modelCode", model.modelCode(), "mode", created.overrideMode().name()), now);
+        return toOverrideDto(created, model);
+    }
+
+    @Transactional
+    public void deletePricingOverride(UUID orgId, UUID overrideId, long version, UUID adminId, String clientIp) {
+        OrgModelPricingOverride existing = pricingOverrideRepository.findById(overrideId)
+                .filter(ov -> ov.orgId().equals(orgId))
+                .orElseThrow(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND, "Pricing override not found"));
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        if (!pricingOverrideRepository.softDelete(overrideId, version, now)) {
+            throw new HyperLlmException(ErrorCode.CONFLICT_OPTIMISTIC_LOCK);
+        }
+        virtualModelRepository.findById(existing.virtualModelId())
+                .ifPresent(m -> cacheSync.evictRoutesAfterCommit(java.util.List.of(m.modelCode())));
+        recordAudit(adminId, orgId, "ORG.PRICING_OVERRIDE_DELETE", clientIp,
+                Map.of("overrideId", overrideId.toString()), now);
+    }
+
+    private static OrgPricingOverrideDto toOverrideDto(OrgModelPricingOverride ov, VirtualModel model) {
+        return new OrgPricingOverrideDto(
+                ov.id(),
+                ov.orgId(),
+                ov.virtualModelId(),
+                model == null ? null : model.modelCode(),
+                model == null ? null : model.displayName(),
+                ov.overrideMode(),
+                ov.discountRatioBps(),
+                ov.fixedPricingJson(),
+                ov.effectiveFrom(),
+                ov.effectiveTo(),
+                ov.status(),
+                ov.version(),
+                ov.createdAt(),
+                ov.updatedAt()
+        );
     }
 
     private static String hashRequestKey(String requestKey) {

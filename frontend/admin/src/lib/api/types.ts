@@ -316,6 +316,34 @@ export interface AdminWalletTopupRequest {
   description: string | null;
 }
 
+export type OverrideMode = "DISCOUNT_BPS" | "FIXED_PRICING";
+
+export interface CreateOrgPricingOverrideRequest {
+  virtualModelId: string;
+  overrideMode: OverrideMode;
+  discountRatioBps: number | null;
+  fixedPricingJson: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+}
+
+export interface OrgPricingOverrideDto {
+  id: string;
+  orgId: string;
+  virtualModelId: string;
+  modelCode: string | null;
+  modelDisplayName: string | null;
+  overrideMode: OverrideMode;
+  discountRatioBps: number | null;
+  fixedPricingJson: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  status: "ACTIVE" | "DISABLED";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AdminWalletTopupResponse {
   orgId: string;
   eventId: string;

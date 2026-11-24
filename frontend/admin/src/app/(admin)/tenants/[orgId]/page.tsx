@@ -8,9 +8,11 @@ import {
   CheckCircle2,
   CreditCard,
   Loader2,
+  Percent,
   PlusCircle,
   RefreshCw,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { Bar, BarChart, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
@@ -63,17 +65,22 @@ import { ProportionBar } from "@/components/common/proportion-bar";
 import { StatusDot } from "@/components/common/status-dot";
 import { useAdminAuth } from "@/components/providers/admin-auth-provider";
 import { useAsyncData } from "@/hooks/use-async-data";
-import { adminTenantApi } from "@/lib/api/endpoints";
+import { adminModelApi, adminTenantApi } from "@/lib/api/endpoints";
 import { createIdempotencyKey } from "@/lib/api/client";
 import type {
+  OrgPricingOverrideDto,
   OrgStatus,
+  OverrideMode,
   PaymentOrderAdminDto,
   TopupType,
 } from "@/lib/api/types";
 import {
   formatDateTime,
+  formatFullDateTime,
+  formatLocalDateTimeInput,
   formatMicroUsd,
   formatMinorCurrency,
+  formatPerMillionUsd,
   parseMajorToMinor,
   parseUsdToMicros,
 } from "@/lib/format/micro-usd";
@@ -89,6 +96,37 @@ import {
 const LIFETIME_CONFIG: ChartConfig = {
   amountUsd: { label: "金额 (USD)", color: "var(--chart-1)" },
 };
+
+function parsePercentToBps(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed || !/^\d+(\.\d{0,2})?$/.test(trimmed)) return null;
+  const [wholeStr, fracStr = ""] = trimmed.split(".");
+  const bps = Number(wholeStr) * 100 + Number(fracStr.padEnd(2, "0"));
+  if (!Number.isSafeInteger(bps) || bps <= 0) return null;
+  return bps;
+}
+
+function summarizeFixedPricing(json: string | null): string {
+  if (!json) return "—";
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const input = Number(parsed.inputPriceMicros1m ?? 0);
+    const output = Number(parsed.outputPriceMicros1m ?? 0);
+    const cacheRead = Number(parsed.cacheReadPriceMicros1m ?? 0);
+    const cacheWrite = Number(parsed.cacheWritePriceMicros1m ?? 0);
+    const reasoning = Number(parsed.reasoningPriceMicros1m ?? 0);
+    const parts = [
+      `输入 ${formatPerMillionUsd(input)}`,
+      `输出 ${formatPerMillionUsd(output)}`,
+    ];
+    if (cacheRead > 0) parts.push(`缓存读 ${formatPerMillionUsd(cacheRead)}`);
+    if (cacheWrite > 0) parts.push(`缓存写 ${formatPerMillionUsd(cacheWrite)}`);
+    if (reasoning > 0) parts.push(`推理 ${formatPerMillionUsd(reasoning)}`);
+    return `${parts.join(" · ")} / 1M`;
+  } catch {
+    return json;
+  }
+}
 
 function TenantDetailContent({
   params,
@@ -115,6 +153,16 @@ function TenantDetailContent({
     [orgId],
   );
 
+  const overridesState = useAsyncData(
+    (signal) => adminTenantApi.listPricingOverrides(orgId, signal),
+    [orgId],
+  );
+
+  const modelsState = useAsyncData(
+    (signal) => adminModelApi.listModels(1, 200, signal),
+    [],
+  );
+
   // Manual top-up dialog
   const [topupOpen, setTopupOpen] = useState(false);
   const [topupType, setTopupType] = useState<TopupType>("CASH");
@@ -135,6 +183,25 @@ function TenantDetailContent({
   const [refundNote, setRefundNote] = useState("");
   const [refunding, setRefunding] = useState(false);
   const [refundError, setRefundError] = useState<unknown>(null);
+
+  // Pricing override dialog & delete confirmation
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideModelId, setOverrideModelId] = useState("");
+  const [overrideMode, setOverrideMode] = useState<OverrideMode>("DISCOUNT_BPS");
+  const [overrideDiscountPct, setOverrideDiscountPct] = useState("85");
+  const [overrideInputUsd, setOverrideInputUsd] = useState("1.00");
+  const [overrideOutputUsd, setOverrideOutputUsd] = useState("4.00");
+  const [overrideCacheReadUsd, setOverrideCacheReadUsd] = useState("0");
+  const [overrideCacheWriteUsd, setOverrideCacheWriteUsd] = useState("0");
+  const [overrideReasoningUsd, setOverrideReasoningUsd] = useState("0");
+  const [overrideEffectiveFrom, setOverrideEffectiveFrom] = useState("");
+  const [overrideEffectiveTo, setOverrideEffectiveTo] = useState("");
+  const [submittingOverride, setSubmittingOverride] = useState(false);
+  const [overrideError, setOverrideError] = useState<unknown>(null);
+
+  const [deleteOverrideTarget, setDeleteOverrideTarget] =
+    useState<OrgPricingOverrideDto | null>(null);
+  const [deletingOverride, setDeletingOverride] = useState(false);
 
   const org = orgState.data;
   const wallet = walletState.data;
@@ -243,6 +310,124 @@ function TenantDetailContent({
     }
   }
 
+  function openCreateOverrideDialog() {
+    const models = modelsState.data?.items ?? [];
+    setOverrideModelId(models[0]?.id ?? "");
+    setOverrideMode("DISCOUNT_BPS");
+    setOverrideDiscountPct("85");
+    setOverrideInputUsd("1.00");
+    setOverrideOutputUsd("4.00");
+    setOverrideCacheReadUsd("0");
+    setOverrideCacheWriteUsd("0");
+    setOverrideReasoningUsd("0");
+    setOverrideEffectiveFrom(formatLocalDateTimeInput(new Date()));
+    setOverrideEffectiveTo("");
+    setOverrideError(null);
+    setOverrideOpen(true);
+  }
+
+  async function handleCreateOverride(e: FormEvent) {
+    e.preventDefault();
+    setOverrideError(null);
+
+    if (!overrideModelId) {
+      toast.error("请选择虚拟模型");
+      return;
+    }
+    const fromDate = new Date(overrideEffectiveFrom);
+    if (!overrideEffectiveFrom || Number.isNaN(fromDate.getTime())) {
+      toast.error("请填写有效的生效时间");
+      return;
+    }
+    let toIso: string | null = null;
+    if (overrideEffectiveTo.trim()) {
+      const toDate = new Date(overrideEffectiveTo);
+      if (Number.isNaN(toDate.getTime()) || toDate <= fromDate) {
+        toast.error("失效时间必须晚于生效时间");
+        return;
+      }
+      toIso = toDate.toISOString();
+    }
+
+    let discountRatioBps: number | null = null;
+    let fixedPricingJson: string | null = null;
+
+    if (overrideMode === "DISCOUNT_BPS") {
+      discountRatioBps = parsePercentToBps(overrideDiscountPct);
+      if (!discountRatioBps) {
+        toast.error("请输入有效的折扣比例（如 85 表示 85%）");
+        return;
+      }
+    } else {
+      const inputPriceMicros1m = parseUsdToMicros(overrideInputUsd);
+      const outputPriceMicros1m = parseUsdToMicros(overrideOutputUsd);
+      const cacheReadPriceMicros1m = parseUsdToMicros(
+        overrideCacheReadUsd.trim() || "0",
+      );
+      const cacheWritePriceMicros1m = parseUsdToMicros(
+        overrideCacheWriteUsd.trim() || "0",
+      );
+      const reasoningPriceMicros1m = parseUsdToMicros(
+        overrideReasoningUsd.trim() || "0",
+      );
+      if (
+        inputPriceMicros1m === null ||
+        outputPriceMicros1m === null ||
+        cacheReadPriceMicros1m === null ||
+        cacheWritePriceMicros1m === null ||
+        reasoningPriceMicros1m === null
+      ) {
+        toast.error("请填写合法的固定单价（非负 USD / 1M tokens）");
+        return;
+      }
+      fixedPricingJson = JSON.stringify({
+        inputPriceMicros1m,
+        outputPriceMicros1m,
+        cacheReadPriceMicros1m,
+        cacheWritePriceMicros1m,
+        reasoningPriceMicros1m,
+      });
+    }
+
+    setSubmittingOverride(true);
+    try {
+      await adminTenantApi.createPricingOverride(orgId, {
+        virtualModelId: overrideModelId,
+        overrideMode,
+        discountRatioBps,
+        fixedPricingJson,
+        effectiveFrom: fromDate.toISOString(),
+        effectiveTo: toIso,
+      });
+      toast.success("专属协议价已生效并刷新路由缓存");
+      setOverrideOpen(false);
+      overridesState.reload();
+    } catch (err) {
+      setOverrideError(err);
+    } finally {
+      setSubmittingOverride(false);
+    }
+  }
+
+  async function handleDeleteOverride() {
+    if (!deleteOverrideTarget) return;
+    setDeletingOverride(true);
+    try {
+      await adminTenantApi.deletePricingOverride(
+        orgId,
+        deleteOverrideTarget.id,
+        deleteOverrideTarget.version,
+      );
+      toast.success("专属协议价已删除");
+      setDeleteOverrideTarget(null);
+      overridesState.reload();
+    } catch {
+      toast.error("删除失败，请刷新后重试");
+    } finally {
+      setDeletingOverride(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -282,6 +467,7 @@ function TenantDetailContent({
             onClick={() => {
               walletState.reload();
               ordersState.reload();
+              overridesState.reload();
               orgState.reload();
             }}
           >
@@ -322,10 +508,11 @@ function TenantDetailContent({
       </div>
 
       <ApiErrorAlert
-        error={walletState.error ?? ordersState.error}
+        error={walletState.error ?? ordersState.error ?? overridesState.error}
         onRetry={() => {
           walletState.reload();
           ordersState.reload();
+          overridesState.reload();
         }}
       />
 
@@ -446,6 +633,108 @@ function TenantDetailContent({
             </ChartContainer>
           )}
         </div>
+      </section>
+
+      {/* Org Model Pricing Overrides */}
+      <section className="squircle-md overflow-hidden rounded-xl border border-border bg-card">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">专属模型协议价覆盖</div>
+            <p className="text-xs text-muted-foreground">
+              针对单个模型的协议折扣或固定单价，优先级高于租户默认折扣与客户等级折扣。
+            </p>
+          </div>
+          {canTopupRefund ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={openCreateOverrideDialog}
+              disabled={(modelsState.data?.items ?? []).length === 0}
+            >
+              <Percent className="size-3.5" />
+              <span>新增协议价</span>
+            </Button>
+          ) : null}
+        </div>
+        {overridesState.loading ? (
+          <div className="p-4">
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : (overridesState.data ?? []).length === 0 ? (
+          <EmptyState
+            icon={<Percent className="size-4" />}
+            title="暂无专属协议价"
+          />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/35 hover:bg-muted/35">
+                <TableHead>模型</TableHead>
+                <TableHead>覆盖模式</TableHead>
+                <TableHead>协议单价 / 折扣</TableHead>
+                <TableHead>生效窗口</TableHead>
+                {canTopupRefund ? (
+                  <TableHead className="text-right">操作</TableHead>
+                ) : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(overridesState.data ?? []).map((ov) => (
+                <TableRow key={ov.id}>
+                  <TableCell>
+                    <div className="text-sm font-medium">
+                      {ov.modelDisplayName ?? ov.modelCode ?? ov.virtualModelId}
+                    </div>
+                    {ov.modelCode ? (
+                      <code className="font-mono text-[11px] text-muted-foreground">
+                        {ov.modelCode}
+                      </code>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        ov.overrideMode === "FIXED_PRICING"
+                          ? "secondary"
+                          : "outline"
+                      }
+                    >
+                      {ov.overrideMode === "FIXED_PRICING"
+                        ? "固定单价"
+                        : "折扣比例"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums">
+                    {ov.overrideMode === "DISCOUNT_BPS"
+                      ? `${((ov.discountRatioBps ?? 10_000) / 100).toFixed(2)}% (${ov.discountRatioBps ?? 10_000} bps)`
+                      : summarizeFixedPricing(ov.fixedPricingJson)}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground tabular-nums">
+                    <div>{formatFullDateTime(ov.effectiveFrom)} 起</div>
+                    <div>
+                      {ov.effectiveTo
+                        ? `至 ${formatFullDateTime(ov.effectiveTo)}`
+                        : "长期有效"}
+                    </div>
+                  </TableCell>
+                  {canTopupRefund ? (
+                    <TableCell className="text-right">
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => setDeleteOverrideTarget(ov)}
+                      >
+                        <Trash2 className="size-3" />
+                        <span>删除</span>
+                      </Button>
+                    </TableCell>
+                  ) : null}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </section>
 
       {/* Tenant Orders Table */}
@@ -679,6 +968,211 @@ function TenantDetailContent({
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Create Pricing Override Dialog */}
+      <Dialog open={overrideOpen} onOpenChange={setOverrideOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>新增专属模型协议价</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreateOverride} className="flex flex-col gap-4">
+            <ApiErrorAlert error={overrideError} />
+            <div className="flex flex-col gap-1.5">
+              <Label>虚拟模型</Label>
+              <Select
+                value={overrideModelId}
+                onValueChange={(v) => setOverrideModelId(v ?? "")}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(modelsState.data?.items ?? []).map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.displayName} ({m.modelCode})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label>覆盖模式</Label>
+              <Select
+                value={overrideMode}
+                onValueChange={(v) =>
+                  setOverrideMode((v as OverrideMode) ?? "DISCOUNT_BPS")
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="DISCOUNT_BPS">
+                    折扣比例 (DISCOUNT_BPS)
+                  </SelectItem>
+                  <SelectItem value="FIXED_PRICING">
+                    固定单价 (FIXED_PRICING)
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {overrideMode === "DISCOUNT_BPS" ? (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="ov-discount-pct">折扣比例 (%)</Label>
+                <div className="relative">
+                  <Input
+                    id="ov-discount-pct"
+                    required
+                    inputMode="decimal"
+                    value={overrideDiscountPct}
+                    onChange={(e) => setOverrideDiscountPct(e.target.value)}
+                    placeholder="例如：85 表示 8.5 折"
+                    className="pr-10 font-mono tabular-nums"
+                  />
+                  <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">
+                    %
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  100% = 原价（10,000 bps），85% = 8.5 折（8,500 bps）。
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="ov-in-usd">输入单价 (USD/1M)</Label>
+                  <Input
+                    id="ov-in-usd"
+                    required
+                    inputMode="decimal"
+                    value={overrideInputUsd}
+                    onChange={(e) => setOverrideInputUsd(e.target.value)}
+                    className="font-mono tabular-nums"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="ov-out-usd">输出单价 (USD/1M)</Label>
+                  <Input
+                    id="ov-out-usd"
+                    required
+                    inputMode="decimal"
+                    value={overrideOutputUsd}
+                    onChange={(e) => setOverrideOutputUsd(e.target.value)}
+                    className="font-mono tabular-nums"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="ov-cr-usd">缓存读 (USD/1M)</Label>
+                  <Input
+                    id="ov-cr-usd"
+                    inputMode="decimal"
+                    value={overrideCacheReadUsd}
+                    onChange={(e) => setOverrideCacheReadUsd(e.target.value)}
+                    className="font-mono tabular-nums"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="ov-cw-usd">缓存写 (USD/1M)</Label>
+                  <Input
+                    id="ov-cw-usd"
+                    inputMode="decimal"
+                    value={overrideCacheWriteUsd}
+                    onChange={(e) => setOverrideCacheWriteUsd(e.target.value)}
+                    className="font-mono tabular-nums"
+                  />
+                </div>
+                <div className="col-span-2 flex flex-col gap-1.5">
+                  <Label htmlFor="ov-rs-usd">
+                    推理输出单价 (USD/1M，填 0 时按输出单价计费)
+                  </Label>
+                  <Input
+                    id="ov-rs-usd"
+                    inputMode="decimal"
+                    value={overrideReasoningUsd}
+                    onChange={(e) => setOverrideReasoningUsd(e.target.value)}
+                    className="font-mono tabular-nums"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="ov-from">生效时间</Label>
+                <Input
+                  id="ov-from"
+                  type="datetime-local"
+                  required
+                  value={overrideEffectiveFrom}
+                  onChange={(e) => setOverrideEffectiveFrom(e.target.value)}
+                  className="font-mono text-xs tabular-nums"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="ov-to">失效时间（留空长期有效）</Label>
+                <Input
+                  id="ov-to"
+                  type="datetime-local"
+                  value={overrideEffectiveTo}
+                  onChange={(e) => setOverrideEffectiveTo(e.target.value)}
+                  className="font-mono text-xs tabular-nums"
+                />
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setOverrideOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={submittingOverride}>
+                {submittingOverride ? (
+                  <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
+                ) : null}
+                <span>保存协议价</span>
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Pricing Override AlertDialog */}
+      <AlertDialog
+        open={Boolean(deleteOverrideTarget)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteOverrideTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除专属协议价？</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除模型「
+              {deleteOverrideTarget?.modelDisplayName ??
+                deleteOverrideTarget?.modelCode}
+              」的协议价覆盖后，后续请求将立即回退到租户默认折扣与公开定价。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deletingOverride}
+              onClick={handleDeleteOverride}
+            >
+              {deletingOverride ? (
+                <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
+              ) : null}
+              <span>确认删除</span>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Suspend / Restore Org AlertDialog */}
       <AlertDialog open={statusDialogOpen} onOpenChange={setStatusDialogOpen}>

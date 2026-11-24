@@ -9,8 +9,10 @@ import app.pagefault.hyperllm.domain.model.enums.ModelCapability;
 import app.pagefault.hyperllm.domain.model.enums.ModelStatus;
 import app.pagefault.hyperllm.domain.model.enums.ModelVisibility;
 import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
+import app.pagefault.hyperllm.domain.model.enums.OverrideMode;
 import app.pagefault.hyperllm.domain.model.enums.ProtocolFamily;
 import app.pagefault.hyperllm.domain.model.enums.RoutingStrategy;
+import app.pagefault.hyperllm.domain.model.enums.ToggleStatus;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -309,6 +311,34 @@ public final class AdminDtos {
     public record AdminWalletTopupResponse(
             UUID orgId,
             UUID eventId
+    ) {
+    }
+
+    public record CreateOrgPricingOverrideRequest(
+            @NotNull UUID virtualModelId,
+            @NotNull OverrideMode overrideMode,
+            @Positive Integer discountRatioBps,
+            String fixedPricingJson,
+            @NotNull OffsetDateTime effectiveFrom,
+            OffsetDateTime effectiveTo
+    ) {
+    }
+
+    public record OrgPricingOverrideDto(
+            UUID id,
+            UUID orgId,
+            UUID virtualModelId,
+            String modelCode,
+            String modelDisplayName,
+            OverrideMode overrideMode,
+            Integer discountRatioBps,
+            String fixedPricingJson,
+            OffsetDateTime effectiveFrom,
+            OffsetDateTime effectiveTo,
+            ToggleStatus status,
+            long version,
+            OffsetDateTime createdAt,
+            OffsetDateTime updatedAt
     ) {
     }
 }

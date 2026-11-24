@@ -3,6 +3,8 @@ package app.pagefault.hyperllm.admin.controller;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminOrgDto;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminWalletTopupRequest;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.AdminWalletTopupResponse;
+import app.pagefault.hyperllm.admin.dto.AdminDtos.CreateOrgPricingOverrideRequest;
+import app.pagefault.hyperllm.admin.dto.AdminDtos.OrgPricingOverrideDto;
 import app.pagefault.hyperllm.admin.dto.AdminDtos.UpdateOrgStatusRequest;
 import app.pagefault.hyperllm.admin.service.AdminTenantAndBillingService;
 import app.pagefault.hyperllm.admin.web.AdminPrincipal;
@@ -14,6 +16,7 @@ import app.pagefault.hyperllm.domain.model.enums.OrgStatus;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -24,7 +27,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -84,5 +89,37 @@ public class AdminTenantAndBillingController {
     ) {
         AdminPrincipal principal = AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.FINANCE);
         return service.topupWallet(orgId, principal.adminId(), AdminRequestContext.extractClientIp(request), body);
+    }
+
+    @GetMapping("/{orgId}/pricing-overrides")
+    public List<OrgPricingOverrideDto> listPricingOverrides(
+            @PathVariable UUID orgId,
+            HttpServletRequest request
+    ) {
+        AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.OPS, AdminRole.FINANCE, AdminRole.AUDITOR);
+        return service.listPricingOverrides(orgId);
+    }
+
+    @PostMapping("/{orgId}/pricing-overrides")
+    public ResponseEntity<OrgPricingOverrideDto> createPricingOverride(
+            @PathVariable UUID orgId,
+            @Valid @RequestBody CreateOrgPricingOverrideRequest body,
+            HttpServletRequest request
+    ) {
+        AdminPrincipal principal = AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.FINANCE);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createPricingOverride(orgId, principal.adminId(), AdminRequestContext.extractClientIp(request), body));
+    }
+
+    @DeleteMapping("/{orgId}/pricing-overrides/{overrideId}")
+    public ResponseEntity<Void> deletePricingOverride(
+            @PathVariable UUID orgId,
+            @PathVariable UUID overrideId,
+            @RequestParam long version,
+            HttpServletRequest request
+    ) {
+        AdminPrincipal principal = AdminRequestContext.requireRole(request, AdminRole.SUPER_ADMIN, AdminRole.FINANCE);
+        service.deletePricingOverride(orgId, overrideId, version, principal.adminId(), AdminRequestContext.extractClientIp(request));
+        return ResponseEntity.noContent().build();
     }
 }

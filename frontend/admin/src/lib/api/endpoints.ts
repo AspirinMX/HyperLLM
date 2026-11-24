@@ -13,11 +13,13 @@ import type {
   ChannelProbeDto,
   CodeBatchResponse,
   CreateChannelRequest,
+  CreateOrgPricingOverrideRequest,
   CreatePackSkuRequest,
   CreateVirtualModelRequest,
   CreateVoucherRequest,
   MarginRow,
   MfaSetupChallengeResponse,
+  OrgPricingOverrideDto,
   OrgStatus,
   PackSalesReport,
   PackSkuAdminDto,
@@ -231,6 +233,24 @@ export const adminTenantApi = {
     return adminRequest<PaymentOrderAdminDto>(
       `/api/v1/admin/payment-orders/${orderId}/refund`,
       { method: "POST", body: { refundedAmountMinor, note } },
+    );
+  },
+  listPricingOverrides(orgId: string, signal?: AbortSignal) {
+    return adminRequest<OrgPricingOverrideDto[]>(
+      `/api/v1/admin/orgs/${orgId}/pricing-overrides`,
+      { signal },
+    );
+  },
+  createPricingOverride(orgId: string, body: CreateOrgPricingOverrideRequest) {
+    return adminRequest<OrgPricingOverrideDto>(
+      `/api/v1/admin/orgs/${orgId}/pricing-overrides`,
+      { method: "POST", body },
+    );
+  },
+  deletePricingOverride(orgId: string, overrideId: string, version: number) {
+    return adminRequest<void>(
+      `/api/v1/admin/orgs/${orgId}/pricing-overrides/${overrideId}${buildQuery({ version })}`,
+      { method: "DELETE" },
     );
   },
 };
