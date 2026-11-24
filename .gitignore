@@ -21,3 +21,6 @@ Thumbs.db
 # Node / Next.js fallback ignores
 node_modules/
 .next/
+
+# Benchmark compiled binaries
+bench/bin/

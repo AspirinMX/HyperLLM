@@ -1,0 +1,106 @@
+name: hyperllm-bench
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hyperllm-bench-postgres
+    network_mode: host
+    cpuset: "${BENCH_INFRA_CPUS:-2-4}"
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - wal_level=minimal
+      - -c
+      - max_wal_senders=0
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hyperllm}
+      POSTGRES_USER: ${POSTGRES_USER:-hyperllm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hyperllm_dev_password}
+    volumes:
+      - bench_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-hyperllm} -d ${POSTGRES_DB:-hyperllm}"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    container_name: hyperllm-bench-redis
+    network_mode: host
+    cpuset: "${BENCH_INFRA_CPUS:-2-4}"
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --bind
+      - 127.0.0.1
+      - --port
+      - "6379"
+      - --appendonly
+      - "yes"
+      - --save
+      - ""
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - bench_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: hyperllm-bench-kafka
+    network_mode: host
+    cpuset: "${BENCH_INFRA_CPUS:-2-4}"
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://127.0.0.1:9092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - bench_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: hyperllm-bench-kafka-init
+    network_mode: host
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_INTERNAL_BOOTSTRAP: 127.0.0.1:9092
+    volumes:
+      - ../../infra/kafka/create-topics.sh:/etc/hyperllm/create-topics.sh:ro
+    entrypoint: ["bash", "/etc/hyperllm/create-topics.sh"]
+    restart: "no"
+
+volumes:
+  bench_postgres_data:
+  bench_redis_data:
+  bench_kafka_data:

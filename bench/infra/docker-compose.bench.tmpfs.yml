@@ -1,0 +1,47 @@
+# Override for zero-disk-jitter pure-gateway ceiling benchmarks on KVM.
+# Usage:
+#   docker compose -f bench/infra/docker-compose.bench.yml -f bench/infra/docker-compose.bench.tmpfs.yml up -d
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - wal_level=minimal
+      - -c
+      - max_wal_senders=0
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data:size=1536m
+
+  redis:
+    command:
+      - redis-server
+      - --bind
+      - 127.0.0.1
+      - --port
+      - "6379"
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - noeviction
+    volumes: !reset []
+
+  kafka:
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/kafka/data:size=1024m
