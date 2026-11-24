@@ -2,7 +2,7 @@
 
 import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { BarChart3, RefreshCw } from "lucide-react";
+import { BarChart3, Download, RefreshCw } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -56,16 +56,29 @@ import {
   formatMicroUsd,
 } from "@/lib/format/micro-usd";
 
-type PresetRange = "24h" | "7d" | "30d";
+type PresetRange = "24h" | "7d" | "30d" | "custom";
 type SeriesTab = "tokens" | "cost" | "requests";
 type LatencyMode = "ttft" | "duration";
 type RankMetric = "cost" | "tokens" | "requests";
 
-const RANGE_HOURS: Record<PresetRange, number> = {
+const RANGE_HOURS: Record<Exclude<PresetRange, "custom">, number> = {
   "24h": 24,
   "7d": 24 * 7,
   "30d": 24 * 30,
 };
+
+function toDateInputValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function escapeCsvCell(value: string | number): string {
+  const raw = String(value);
+  if (raw.includes(",") || raw.includes('"') || raw.includes("\n")) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
 
 const SERIES_CONFIG: ChartConfig = {
   promptTokens: { label: "常规输入", color: "var(--chart-1)" },
@@ -96,6 +109,10 @@ function UsageAnalyticsContent() {
   const orgId = currentOrg?.orgId ?? null;
 
   const [range, setRange] = useState<PresetRange>("7d");
+  const [customFrom, setCustomFrom] = useState(() =>
+    toDateInputValue(new Date(Date.now() - 7 * 24 * 3600 * 1000)),
+  );
+  const [customTo, setCustomTo] = useState(() => toDateInputValue(new Date()));
   const [projectFilter, setProjectFilter] = useState<string>("ALL");
   const [apiKeyFilter, setApiKeyFilter] = useState<string>("ALL");
   const [modelFilter, setModelFilter] = useState<string>(initialModel);
@@ -106,10 +123,23 @@ function UsageAnalyticsContent() {
   const [rankMetric, setRankMetric] = useState<RankMetric>("cost");
 
   const { fromIso, toIso } = useMemo(() => {
+    if (range === "custom" && customFrom && customTo) {
+      const start = new Date(`${customFrom}T00:00:00`);
+      const end = new Date(`${customTo}T23:59:59.999`);
+      if (
+        !Number.isNaN(start.getTime()) &&
+        !Number.isNaN(end.getTime()) &&
+        end >= start
+      ) {
+        return { fromIso: start.toISOString(), toIso: end.toISOString() };
+      }
+    }
+    const preset: Exclude<PresetRange, "custom"> =
+      range === "custom" ? "7d" : range;
     const to = new Date();
-    const from = new Date(to.getTime() - RANGE_HOURS[range] * 3600 * 1000);
+    const from = new Date(to.getTime() - RANGE_HOURS[preset] * 3600 * 1000);
     return { fromIso: from.toISOString(), toIso: to.toISOString() };
-  }, [range]);
+  }, [range, customFrom, customTo]);
 
   const projectsState = useAsyncData(
     (signal) => projectApi.list(orgId!, 1, 50, signal),
@@ -208,7 +238,10 @@ function UsageAnalyticsContent() {
     const rows = groupedState.data?.rows ?? [];
     const mapped = rows.map((r) => {
       const totalTokens =
-        r.promptTokens + r.completionTokens + r.reasoningTokens;
+        r.promptTokens +
+        r.cachedReadTokens +
+        r.completionTokens +
+        r.reasoningTokens;
       const metricValue =
         rankMetric === "cost"
           ? Number((r.costMicros / 1_000_000).toFixed(6))
@@ -227,19 +260,72 @@ function UsageAnalyticsContent() {
   }, [groupedState.data, rankMetric, groupBy, projectNameMap, keyNameMap]);
 
   const totals = hourlyState.data?.totals;
+  const totalInputTokens =
+    (totals?.promptTokens ?? 0) + (totals?.cachedReadTokens ?? 0);
   const totalTokens =
-    (totals?.promptTokens ?? 0) +
+    totalInputTokens +
     (totals?.completionTokens ?? 0) +
     (totals?.reasoningTokens ?? 0);
   const cacheHitRatio =
-    totals && totals.promptTokens > 0
-      ? (totals.cachedReadTokens / totals.promptTokens) * 100
+    totals && totalInputTokens > 0
+      ? (totals.cachedReadTokens / totalInputTokens) * 100
       : 0;
   const successRateTotal =
     totals && totals.requests > 0
       ? (totals.successes / totals.requests) * 100
       : 100;
   const maxRankedCost = Math.max(1, ...rankedRows.map((r) => r.costMicros));
+
+  function handleExportCsv() {
+    const headers = [
+      "Dimension",
+      "Requests",
+      "Successes",
+      "UncachedPromptTokens",
+      "CachedReadTokens",
+      "CompletionTokens",
+      "ReasoningTokens",
+      "TotalTokens",
+      "CostUSD",
+      "CashUSD",
+      "BonusUSD",
+      "TtftP50Ms",
+      "TtftP90Ms",
+      "TtftP99Ms",
+    ];
+    const lines = [
+      headers.join(","),
+      ...rankedRows.map((r) =>
+        [
+          r.displayLabel,
+          r.requests,
+          r.successes,
+          r.promptTokens,
+          r.cachedReadTokens,
+          r.completionTokens,
+          r.reasoningTokens,
+          r.totalTokens,
+          (r.costMicros / 1_000_000).toFixed(6),
+          (r.cashMicros / 1_000_000).toFixed(6),
+          (r.bonusMicros / 1_000_000).toFixed(6),
+          Math.round(r.ttftP50Ms),
+          Math.round(r.ttftP90Ms),
+          Math.round(r.ttftP99Ms),
+        ]
+          .map(escapeCsvCell)
+          .join(","),
+      ),
+    ];
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `hyperllm-usage-${groupBy.toLowerCase()}-${fromIso.slice(0, 10)}_${toIso.slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -254,8 +340,29 @@ function UsageAnalyticsContent() {
               <TabsTrigger value="24h">24 小时</TabsTrigger>
               <TabsTrigger value="7d">近 7 天</TabsTrigger>
               <TabsTrigger value="30d">近 30 天</TabsTrigger>
+              <TabsTrigger value="custom">自定义</TabsTrigger>
             </TabsList>
           </Tabs>
+
+          {range === "custom" ? (
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                aria-label="开始日期"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                className="w-36 font-mono text-xs"
+              />
+              <span className="text-xs text-muted-foreground">至</span>
+              <Input
+                type="date"
+                aria-label="结束日期"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                className="w-36 font-mono text-xs"
+              />
+            </div>
+          ) : null}
 
           <Select
             value={projectFilter}
@@ -304,24 +411,36 @@ function UsageAnalyticsContent() {
           />
         </div>
 
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => {
-            hourlyState.reload();
-            groupedState.reload();
-          }}
-          aria-label="刷新报表"
-        >
-          <RefreshCw
-            className={
-              hourlyState.refreshing
-                ? "size-3.5 animate-spin motion-reduce:animate-none"
-                : "size-3.5"
-            }
-          />
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={rankedRows.length === 0}
+            onClick={handleExportCsv}
+          >
+            <Download className="size-3.5" />
+            <span>导出 CSV</span>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={() => {
+              hourlyState.reload();
+              groupedState.reload();
+            }}
+            aria-label="刷新报表"
+          >
+            <RefreshCw
+              className={
+                hourlyState.refreshing
+                  ? "size-3.5 animate-spin motion-reduce:animate-none"
+                  : "size-3.5"
+              }
+            />
+          </Button>
+        </div>
       </div>
 
       <ApiErrorAlert
