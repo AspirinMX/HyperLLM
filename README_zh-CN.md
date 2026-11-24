@@ -2,7 +2,9 @@
 
 # ⚡ HyperLLM
 
-**企业级商业化多租户 LLM API 网关、智能路由与实时计费 MaaS 平台**
+**企业级 LLM API 网关，支持主流大模型协议与无缝跨协议转换，针对高并发与高可用深度优化。**
+
+<sub>An enterprise-level LLM API gateway that supports mainstream API protocols and seamless inter-protocol conversion; highly optimized for high concurrency and high availability.</sub>
 
 <p>
   <a href="./README.md">English</a> ·
@@ -22,6 +24,7 @@
 </p>
 
 <p>
+  <a href="#高性能与高并发实测">性能实测</a> ·
   <a href="#为什么选择-hyperllm">核心定位</a> ·
   <a href="#核心能力">核心能力</a> ·
   <a href="#多协议支持矩阵">协议矩阵</a> ·
@@ -35,25 +38,48 @@
 
 ---
 
+## 高性能与高并发实测
+
+HyperLLM 数据面（`backend/gateway`）基于 **Spring WebFlux + Reactor Netty** 构建，全链路启用原生 Linux Epoll（`x86_64` & `ARM64`）、**Caffeine L1 + Redis L2** 多级缓存与 **Debezium CDC** 亚秒广播失效、静态预加载 Redis Lua 脚本、O(1) 字节长度 Token 估算以及非阻塞响应式热路径。
+
+在 **ARM64 KVM 实例（ARM Neoverse-N1，OpenJDK 21，`nettyEpoll=true`，全场景 `err=0`、`0 Full GC`）** 上开启完整鉴权、路由、Redis Lua 原子预占/结算、Outbox 落库与 Kafka 遥测后的实测成绩：
+
+| 压测场景（4 独占 ARM64 核 · 5G 堆） | 实测吞吐 | 延迟 / 网关附加开销 | 稳定性与余量 |
+| :--- | :---: | :---: | :--- |
+| **非流式短包吞吐**（`S1 c256`, 219B） | **`2,789 RPS`** *（2C：`1,836 RPS`）* | P50 `24.0 ms` / P99 `39.7 ms` *（c64 @ `2,560 RPS`）* | 网关 4 核仍有 **32–43% 空闲**；独立 8C16G 预计 **`6,500–7,500+ RPS`** |
+| **高并发 OpenAI SSE 流式**（`S2a c1000`） | **`1,000` 并发流 · `939 RPS` · `29,070 帧/秒`** | 网关 P50 TTFT 附加 **`+14.9 ms`** *（c200 仅 `+5.8 ms`）* | 网关 4 核仍余 **~20%**；独立 8C16G 预计稳态 **`3,000–5,000+`** 并发流 |
+| **Anthropic → OpenAI 跨协议 SSE**（`S2b c500`） | **`500` 并发流 · `483 RPS` · `16,883 帧/秒`** | 网关 P50 TTFT 附加 **`+9.4 ms`** *（跨协议额外开销 `< 2.5 ms`）* | 网关 4 核 **50% 空闲**，`Canonical IR` 转译开销极低 |
+| **Coding Agent 大上下文**（`S3`, +16 tools） | **`1,431 RPS`**（50 KB）/ **`741 RPS`**（200 KB） | P99 **`31.9 ms`**（50 KB）/ **`53.6 ms`**（200 KB，入站 **`~153 MB/s`**） | 高吞吐多轮 Agent 大包解析零错误 |
+| **中途强断与 GC 健康度**（`S4 c100`） | **`561 RPS`**（100 并发第 5 帧强断） | G1 Young 均值 **`21.2 ms`**（峰值 `54 ms`），**`0 Full GC`** | Netty Direct **`25.8 MB`**、Old Gen **`41.7 MB`**、**`0`** 处理器错误 |
+
+> 完整压测方案、`async-profiler 4.0` CPU/Alloc/Lock 交互式火焰图与优化前后详细数据，请参阅 [ARM64 KVM P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md) 及 [压测工具套件说明](./benchmark/README.md)。
+
+---
+
 ## 为什么选择 HyperLLM？
 
-市面上大多数 LLM 转发代理只解决了“把请求转出去”，一旦进入真实商业化运营便会暴露致命短板：高并发流式调用瞬间把预付费钱包打穿、浮点计费导致财务对账永久差几分钱、跨上游渠道漂移毁掉 Prompt Cache 命中率、运营后台与开发者门户混在一起放大安全风险。
+市面上大多数 LLM 转发代理只解决了“把请求转出去”，一旦进入高并发生产流量或真实商业化运营便会暴露致命短板：阻塞式 I/O 与高频重复存储访问导致流式长尾延迟崩塌、高并发调用瞬间把预付费钱包打穿、浮点计费导致财务对账永久差几分钱、跨上游渠道漂移毁掉 Prompt Cache 命中率、运营后台与开发者门户混在一起放大安全风险。
 
-**HyperLLM**（`app.pagefault.hyperllm`）从第一行代码起就面向**商业化 MaaS（Model-as-a-Service）平台**而设计：以亚 15ms 附加延迟的 **WebFlux / Netty** 响应式数据面为入口，以 **Redis Lua 权威预占/流式结算 + Outbox/Debezium CDC 幂等账本** 为金融级资金内核，结合 **ClickHouse 实时毛利 OLAP** 与 **物理隔离的开发者门户 & 运营管理后台**，开箱支撑大规模对外商业化运营。
+**HyperLLM**（`app.pagefault.hyperllm`）从第一行代码起就面向**高性能企业级 LLM API 网关与商业化 MaaS 平台**而设计：以低开销 **WebFlux / Netty** 响应式数据面为入口，提供 **OpenAI / Anthropic / Gemini** 主流协议原生兼容与无缝双向转译、**高可用无感容灾与熔断**、**Redis Lua 权威预占/流式结算 + Outbox/Debezium CDC 幂等账本**，结合 **ClickHouse 实时毛利 OLAP** 与 **物理隔离的开发者门户 & 运营管理后台**，开箱支撑高并发生产级与商业化运营。
 
 ---
 
 ## 核心能力
+
+### ⚡ 高并发与高可用响应式数据面
+- **全链路非阻塞核心**：基于 Spring WebFlux、Reactor Netty 原生 `epoll`（`linux-x86_64` 与 `linux-aarch_64`）以及 Lettuce 响应式 Redis 管道；热请求零 JDBC 阻塞，冷缓存回源经由受限工作池 + `SingleFlight` 合并去重脱离 Netty EventLoop 执行。
+- **多级缓存与亚秒失效**：路由、密钥、定价与额度元数据常驻 `Caffeine L1 + Redis L2`，通过 PostgreSQL WAL → Debezium → Kafka 广播实现多网关实例亚秒级缓存一致性。
+- **首字节前无感容灾与分布式熔断**：向客户端输出首字节前遇到 `429`/`5xx`/超时或通道满载，瞬时切换同级/降级备用渠道重试，客户端完全无感；配合渠道容量保护、三态分布式熔断器（`CLOSED` → `OPEN` → `HALF_OPEN`）与账本积压背压门禁（`503 LEDGER_BACKLOG` / `OUTBOX_UNAVAILABLE`）确保系统优雅降级。
+- **极致低分配热路径**：静态预加载 Redis Lua 脚本（`StaticScriptSource`）、节流化热路径懒回收、无限流渠道快路径跳过、O(1) 字节长度 Token 估算以及干净的客户端断连处理，确保千级并发 SSE 下堆外内存与 GC 停顿始终平稳可控。
 
 ### 🔀 多协议原生兼容与 `Canonical IR` 双向转译
 - **主流协议一站兼容**：完整承接 **OpenAI**（Chat、Responses、Embeddings、Images、Audio TTS/STT）、**Anthropic 原生 Messages**（Extended Thinking、Tool Use、Prompt Caching、`count_tokens` —— 原生支持 Claude Code、Cursor、Cline）、**Google Gemini** 与 **Cohere/Jina Rerank**。
 - **同构零损耗透传**：客户端与上游协议一致时直接流式透传字节，自动按需注入并无痕剥离 OpenAI `stream_options.include_usage` 以捕获权威 Usage，并在非标上游或流中断时按 UTF-8 字节数和 Unicode 码点数估算 token。
 - **异构高保真转译**：经由统一 `Canonical IR` 管道，将 OpenAI 请求路由至 Anthropic/Gemini，或将 Claude Code / Anthropic 请求无缝转译至 OpenAI、DeepSeek 及自建 vLLM/SGLang 集群。
 
-### 🎯 智能多策略路由、容灾重试与 Prompt Cache 粘性亲和
+### 🎯 智能多策略路由与 Prompt Cache 粘性亲和
 - **多策略组合调度**：支持 **分级优先级 + 权重轮询（Priority-Weighted）**、**采购成本最优（Lowest-Cost 毛利最大化）** 与基于近 1 分钟实时 **EWMA P90 TTFT 延迟感知** 路由，横跨 OpenAI、Azure、Anthropic、AWS Bedrock、Google Vertex、DeepSeek 与自建推理集群。
 - **Prompt Cache Sticky Session**：对含缓存标记或长上下文前缀的请求按 `org_id + virtual_model + prefix_tokens` 建立 5 分钟滑动粘性亲和，让多轮 Agent 对话持续命中同一上游 KV Cache，大幅降低输入成本与首字延迟。
-- **首字节前无感故障重试与熔断**：在向客户端输出首字节前遇到 `429`/`5xx`/超时或通道满载，瞬时切换同级/降级备用渠道重试，客户端完全无感；配合渠道自身容量保护与三态分布式熔断器（`CLOSED` → `OPEN` → `HALF_OPEN`）。
 
 ### 💰 商业化计费引擎、并发防超支与全自动对账
 - **全链路整型 `micro-USD` 精度**：统一以 64 位有符号整型微美元（`1 USD = 1,000,000 micro-USD`）与确定性向上取整（Ceiling）记账，彻底杜绝浮点误差。
@@ -62,13 +88,13 @@
   1. **定向模型资源包**（按 Token 或调用次数，按最早到期优先）
   2. **代金券 / 赠金批次**（按适用范围与最早到期优先）
   3. **现金预付费钱包余额**
-- **Redis 权威层 Pre-hold / Settle**：准入时按逐批次原子冻结最大预估费用，流式传输中通过心跳续期滑动 TTL 与租约，结束时按实测用量多退少补；节点宕机自动回收僵尸预占，并内置消费积压门禁（`503 LEDGER_BACKLOG` / `OUTBOX_UNAVAILABLE`）严守资金安全边界。
+- **Redis 权威层 Pre-hold / Settle**：准入时按逐批次原子冻结最大预估费用，流式传输中通过心跳续期滑动 TTL 与租约，结束时按实测用量多退少补；节点宕机自动回收僵尸预占。
 - **完整商业变现与财务闭环**：支持 **Stripe（USD）**、**支付宝（CNY）**、**微信支付（CNY）** 下单锁定汇率与验签回调、批量兑换码核销、按月分区不可变 `wallet_ledger`、自动化账务对账巡检、运营四眼审批人工调账、月度对账单与双轨开票。
 
 ### 🛡️ 企业级多租户、纵深安全与默认零数据留存（ZDR）
 - **多租户层级与双层 RBAC**：`Organization -> Project -> API Key` 清晰隔离；组织内区分 `Owner / Admin / Developer / Billing` 四角色，项目级成员授权、IP CIDR 白名单、模型白名单与单 Key 消费限额一应俱全。
 - **企业身份认证与隔离式运营域**：开发者控制台支持邮箱 OTP、GitHub/Google OAuth 与企业 OIDC/SAML SSO；运营后台物理独立部署，强制隔离 HS256 JWT 密钥/Cookie、**TOTP MFA 双因素认证** 与内网 CIDR 准入。
-- **纵深密钥保护**：客户 `sk-...` API Key 仅存加盐 `HMAC-SHA256` 摘要（支持主副双 Pepper 零停机轮换）；上游厂商密钥采用 `AES-256-GCM` 绑定 `channel_id` AAD 加密，密文穿透 PostgreSQL → Debezium → Kafka → Redis → Caffeine，仅在发出上游 HTTP 请求前于网关内存中瞬时解密。
+- **纵深密钥保护**：客户 `sk-...` API Key 仅存加盐 `HMAC-SHA256` 摘要（支持主副双 Pepper 零停机轮换）；上游厂商密钥采用 `AES-256-GCM` 绑定 `channel_id` AAD 加密（支持 ARMv8 / x86 AES-NI 硬件加速），密文穿透 PostgreSQL → Debezium → Kafka → Redis → Caffeine，仅在发出上游 HTTP 请求前于网关内存中瞬时解密。
 - **四层分布式限流与项目月预算**：覆盖 API Key、Project、Organization、Upstream Channel 四层滑动窗口 RPM/TPM/并发限流，支持 Project 月度软上限告警与硬上限准入熔断。
 - **默认 ZDR 与插拔式内容风控**：默认绝不在数据库或 ClickHouse 落盘任何 Prompt/Completion 正文；支持按非生产项目显式开启加密调试日志（独立 ClickHouse 表 1–7 天 TTL 自动物理销毁）；内置 `GuardrailProvider` SPI 扩展 AC 自动机敏感词、PII 隐私脱敏与 Prompt Injection 拦截。
 
@@ -167,7 +193,7 @@ docker compose --env-file .env -f infra/docker-compose.yaml --profile tools up -
 # 全模块编译并运行纯单元测试（无需 Docker）
 ./backend/mvnw -f backend/pom.xml test
 
-# 先启动 Console (:8081) 自动执行 Flyway V1–V8 建表迁移
+# 先启动 Console (:8081) 自动执行 Flyway V1–V9 建表迁移
 HYPERLLM_OTP_DEBUG_ECHO=true ./backend/mvnw -f backend/pom.xml -pl console spring-boot:run
 
 # Flyway 建表完成后，拉起 Debezium CDC + ClickHouse 管道
@@ -190,15 +216,14 @@ cd frontend/console && pnpm install && pnpm dev
 cd frontend/admin && pnpm install && pnpm dev
 ```
 
-### 4. 全链路自动化验证
+### 4. 全链路验证与压力测试
 
 ```bash
 # 全量构建 + Testcontainers 容器集成测试（PostgreSQL、Redis、Kafka、ClickHouse、WireMock）
 ./backend/mvnw -f backend/pom.xml verify
-
-# 活栈端到端商业化全链路冒烟测试
-bash scripts/e2e/phase2-smoke.sh
 ```
+
+> 如需在本地或独立 Linux 服务器上复现网关压测与 `async-profiler` 火焰图剖析，请参阅 [benchmark/README.md](./benchmark/README.md)。
 
 ---
 
@@ -248,35 +273,32 @@ curl http://localhost:8080/v1/messages \
 
 | 模块 | 默认端口 | 技术栈与职责 |
 | :--- | :---: | :--- |
-| `backend/common` | — | `micro-USD` 整型计算、`UuidV7`、`AesGcmCipher`、`HmacSha256`、`ApiKeyGenerator`、`ErrorCode`、跨服务 Kafka/Redis 契约与 12 个原子 Lua 脚本 |
-| `backend/domain` | — | Flyway `V1`–`V8` 迁移脚本、按月分区账本/审计表、`-Pjooq` 生成 SQL 层、35 组 jOOQ 仓储、`PricingResolver` 与 `EntitlementAllocator` |
-| `backend/protocol` | — | `Canonical IR`、OpenAI/Anthropic 协议适配、流式 SSE Usage 提取、基于长度的 token 估算、原生协议错误格式化 |
-| `backend/gateway` | `8080` | WebFlux 响应式数据面（Caffeine L1 + Redis L2）、Debezium 广播 L1 失效、多策略路由、Lua Pre-hold/Settle、四层限流与批量 Outbox |
+| `backend/common` | — | `micro-USD` 整型计算、`UuidV7`、`AesGcmCipher`、`HmacSha256`、`ApiKeyGenerator`、`ErrorCode`、跨服务 Kafka/Redis 契约与静态预加载原子 Lua 脚本 |
+| `backend/domain` | — | Flyway `V1`–`V9` 迁移脚本、按月分区账本/审计表、`-Pjooq` 生成 SQL 层、jOOQ 仓储、`PricingResolver` 与 `EntitlementAllocator` |
+| `backend/protocol` | — | `Canonical IR`、OpenAI/Anthropic/Gemini 协议适配、流式 SSE Usage 提取、O(1) 字节长度 Token 估算、原生协议错误格式化 |
+| `backend/gateway` | `8080` | WebFlux 响应式数据面（Caffeine L1 + Redis L2、原生 Linux Epoll）、Debezium 广播 L1 失效、多策略路由、Lua Pre-hold/Settle、四层限流与批量 Outbox |
 | `backend/console` | `8081` | 开发者控制面（MVC + 虚拟线程）、双层 RBAC、API Key、实时钱包、Stripe/支付宝/微信支付、兑换码核销、ClickHouse 用量、告警与 OpenAPI 3.1 |
 | `backend/admin` | `8082` | 运营控制面（MVC + 虚拟线程）、TOTP MFA、加密渠道池与探针、虚拟模型与定价编排、毛利分析、账本消费折叠、小时聚合、告警投递与自动对账 |
 | `frontend/console` | `3000` | Next.js 16 + React 19 + Tailwind CSS v4 开发者门户、模型广场、流式 Playground、账务与用量仪表盘 |
 | `frontend/admin` | `3001` | Next.js 16 + React 19 + Tailwind CSS v4 独立运营后台，涵盖渠道/模型/商品运营、毛利大盘与账务对账中心 |
+| `benchmark/` | — | 零依赖 Go 四协议 Mock 上游、SSE / Agent 压测发压器、种子初始化工具及硬核隔离 ARM64/x86_64 性能剖析套件 |
 | `infra/` | — | 分层 Docker Compose 编排、PG 逻辑复制脚本、Kafka Topic 初始化、Debezium Connector、ClickHouse DDL、OTel/Prometheus 与 WireMock 桩 |
 
 ---
 
 ## 文档导航
 
-### 🚀 新手接管手册与 OpenAPI 3.1 契约（推荐首先阅读）
-- **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 12 个 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook
+### 🚀 新手接管手册与 OpenAPI 3.1 契约
+- **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook
 - **[OpenAPI 3.1 接口契约文档](./docs/openapi/README.md)** — 可直接导入 Swagger UI / Postman / `openapi-typescript` 的标准规范：
   - [Gateway 数据面 API（`gateway-api.yaml`）](./docs/openapi/gateway-api.yaml)
   - [Console 开发者控制面 API（`console-api.yaml`）](./docs/openapi/console-api.yaml)
   - [Admin 运营控制面 API（`admin-api.yaml`）](./docs/openapi/admin-api.yaml)
 
-### 📐 原始架构蓝图与深度设计稿
-- [系统规划蓝图（PROPOSAL）](./docs/PROPOSAL.md) · [分阶段实施 TODO 清单](./docs/TODO.md)
-- [数据库实体详细设计](./docs/design/01-database-design.md)
-- [工程依赖与基础设施编排设计](./docs/design/02-dependencies-and-infra.md)
-- [后端认证、REST API 与 Gateway 运行契约](./docs/design/03-phase1-backend-contracts.md)
-- [阶段二商业化计费与 Redis 权威层最终方案](./docs/design/04-phase2-design.md)
-- [前端开发与视觉设计规范](./docs/FRONTEND_DESIGN_SPEC.md)
-- [端到端活栈冒烟脚本说明](./scripts/e2e/README.md)
+### ⚡ 性能压测报告与剖析指南
+- **[ARM64 KVM P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md)** — 完整 2C/4C 优化前后吞吐、TTFT/TPOT 延迟、GC 表现、8C16G 容量估算与交互式 `async-profiler 4.0` 火焰图
+- **[ARM64 KVM 基线压测与剖析报告](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md)** — 降核硬隔离压测方案、基线瓶颈定位与火焰图根因分析
+- **[压测与火焰图剖析工具使用说明](./benchmark/README.md)** — 一键复现网关压力测试与性能剖析
 
 ---
 

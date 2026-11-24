@@ -2,7 +2,7 @@
 
 # ⚡ HyperLLM
 
-**Commercial-Grade Multi-Tenant LLM API Gateway, Intelligent Router & Real-Time Billing MaaS Platform**
+**An enterprise-level LLM API gateway that supports mainstream API protocols and seamless inter-protocol conversion; highly optimized for high concurrency and high availability.**
 
 <p>
   <a href="./README.md"><strong>English</strong></a> ·
@@ -22,6 +22,7 @@
 </p>
 
 <p>
+  <a href="#performance-benchmarks">Performance</a> ·
   <a href="#why-hyperllm">Why HyperLLM</a> ·
   <a href="#key-capabilities">Capabilities</a> ·
   <a href="#protocol-matrix">Protocols</a> ·
@@ -35,25 +36,48 @@
 
 ---
 
+## Performance Benchmarks
+
+HyperLLM's data plane (`backend/gateway`) is engineered on **Spring WebFlux + Reactor Netty** with native Linux Epoll (`x86_64` & `ARM64`), **Caffeine L1 + Redis L2** multi-tier caching with sub-second **Debezium CDC** broadcast invalidation, preloaded static Redis Lua scripts, O(1) length-based token estimation, and zero-blocking hot paths.
+
+Verified on an **ARM64 KVM instance (ARM Neoverse-N1, OpenJDK 21, `nettyEpoll=true`, `err=0` across all scenarios, `0 Full GC`)** with full authentication, routing, atomic Redis Pre-hold/Settle billing, Outbox persistence, and Kafka telemetry enabled:
+
+| Workload (4 Dedicated ARM64 Cores · 5G Heap) | Throughput | Latency / Gateway Overhead | Stability & Headroom |
+| :--- | :---: | :---: | :--- |
+| **Non-Stream Short Payload** (`S1 c256`, 219B) | **`2,789 RPS`** *(2C: `1,836 RPS`)* | P50 `24.0 ms` / P99 `39.7 ms` *(c64 @ `2,560 RPS`)* | Gateway cores still **32–43% idle**; projected **`6,500–7,500+ RPS`** on 8C16G with dedicated infra |
+| **High-Concurrency OpenAI SSE** (`S2a c1000`) | **`1,000` streams · `939 RPS` · `29,070 events/s`** | Gateway TTFT overhead **`+14.9 ms`** P50 *(`+5.8 ms` @ c200)* | Gateway cores **~20% idle**; projected **`3,000–5,000+`** concurrent SSE streams on 8C16G |
+| **Anthropic → OpenAI Cross-Protocol SSE** (`S2b c500`) | **`500` streams · `483 RPS` · `16,883 events/s`** | Gateway TTFT overhead **`+9.4 ms`** P50 *(`< 2.5 ms` translation delta)* | Gateway cores **50% idle**; near-zero `Canonical IR` overhead |
+| **Coding Agent Large Context** (`S3`, +16 tools) | **`1,431 RPS`** (50 KB) / **`741 RPS`** (200 KB) | P99 **`31.9 ms`** (50 KB) / **`53.6 ms`** (200 KB, **`~153 MB/s`** inbound) | Sustained multi-turn agent payload parsing with zero errors |
+| **Mid-Stream Client Aborts & GC Health** (`S4 c100`) | **`561 RPS`** (100 concurrent aborts @ 5 chunks) | Avg G1 Young STW **`21.2 ms`** (max `54 ms`), **`0 Full GC`** | Netty Direct **`25.8 MB`**, Old Gen **`41.7 MB`**, **`0`** handler errors |
+
+> See full methodology, `async-profiler 4.0` CPU/Alloc/Lock flamegraphs, and before-vs-after tuning breakdown in the [ARM64 P0/P1 Optimization Benchmark Report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md) and [Benchmark Harness](./benchmark/README.md).
+
+---
+
 ## Why HyperLLM?
 
-Most LLM proxies start as thin reverse proxies and break down the moment you try to run a real commercial AI platform: concurrent streaming requests overspend prepaid wallets, floating-point drift breaks financial reconciliation, cross-channel routing destroys Prompt Cache hit rates, and sharing one admin backend with public developers widens the blast radius.
+Most LLM proxies start as thin reverse proxies and break down the moment you run high-concurrency production traffic or a commercial AI platform: blocking I/O and naive per-request DB/Redis round trips collapse tail latency under streaming load, concurrent requests overspend prepaid wallets, floating-point drift breaks financial reconciliation, cross-channel routing destroys Prompt Cache hit rates, and sharing one admin backend with public developers widens the blast radius.
 
-**HyperLLM** (`app.pagefault.hyperllm`) is engineered from the ground up as a **full-stack commercial Model-as-a-Service (MaaS) platform** combining a sub-15ms reactive **WebFlux/Netty** data plane, a **Redis-authoritative zero-overspend billing engine**, **Debezium CDC + Outbox** ledger consistency, **ClickHouse** real-time gross-margin OLAP, and **physically isolated Developer Console & Operator Admin portals**.
+**HyperLLM** (`app.pagefault.hyperllm`) is engineered from the ground up as a **high-performance, commercial-grade LLM API gateway & Model-as-a-Service (MaaS) platform** combining a low-overhead reactive **WebFlux/Netty** data plane, seamless **OpenAI / Anthropic / Gemini** bidirectional protocol conversion, **high-availability failover & circuit breaking**, a **Redis-authoritative zero-overspend billing engine**, **Debezium CDC + Outbox** ledger consistency, **ClickHouse** real-time gross-margin OLAP, and **physically isolated Developer Console & Operator Admin portals**.
 
 ---
 
 ## Key Capabilities
+
+### ⚡ High-Concurrency & High-Availability Data Plane
+- **Reactive Non-Blocking Core**: Built on Spring WebFlux, Reactor Netty with native `epoll` (`linux-x86_64` and `linux-aarch_64`), and Lettuce reactive Redis pipelines. Hot requests never touch JDBC; cold-cache misses are offloaded off the Netty EventLoop via bounded workers with `SingleFlight` request coalescing.
+- **Multi-Tier Caching & Sub-Second Invalidation**: `Caffeine L1 + Redis L2` caches route, credential, pricing, and entitlement metadata locally in memory, kept fresh across gateway replicas via Debezium WAL → Kafka broadcast eviction.
+- **Pre-First-Byte Failover & Distributed Circuit Breaking**: Automatic zero-impact failover retries on `429`/`5xx`/timeouts before the first response byte reaches the caller, backed by per-channel upstream capacity protection, 3-state circuit breakers (`CLOSED` → `OPEN` → `HALF_OPEN`), and backpressure gates (`503 LEDGER_BACKLOG` / `OUTBOX_UNAVAILABLE`) for graceful degradation.
+- **Predictable Low-Allocation Hot Path**: Preloaded static Redis Lua scripts (`StaticScriptSource`), throttled lazy hold reclaim, fast-path bypassing for unlimited channels, O(1) length-based token estimation, and clean client-disconnect handling keep direct memory and GC pauses flat under thousands of concurrent SSE streams.
 
 ### 🔀 Multi-Protocol Unified Gateway & Canonical IR Translation
 - **Drop-In Native Protocols**: Full compatibility with **OpenAI** (Chat, Responses, Embeddings, Images, Audio TTS/STT), **Anthropic Native Messages** (Extended Thinking, Tool Use, Prompt Caching, `count_tokens` — ready for Claude Code, Cursor, and Cline), **Google Gemini**, and **Cohere/Jina Rerank**.
 - **Zero-Overhead Homomorphic Passthrough**: When client and upstream protocols match, HyperLLM streams bytes directly with minimal overhead while transparently extracting authoritative SSE usage (auto-injecting and stripping OpenAI `stream_options.include_usage` as needed) with length-based token estimation on mid-stream disconnects.
 - **High-Fidelity Bidirectional Translation**: Seamlessly route OpenAI requests to Anthropic/Gemini or Anthropic Messages requests to OpenAI/DeepSeek/self-hosted vLLM via the unified `Canonical IR` pipeline.
 
-### 🎯 Intelligent Routing, Resilience & Prompt Cache Affinity
+### 🎯 Intelligent Routing & Prompt Cache Affinity
 - **Multi-Strategy Scheduler**: Combine **Priority-Tiered Weighted** routing, **Lowest-Cost Margin Optimization**, and real-time **EWMA P90 TTFT Latency-Aware** routing across multi-provider pools (OpenAI, Azure, Anthropic, AWS Bedrock, Google Vertex, DeepSeek, vLLM/SGLang).
 - **Prompt Cache Sticky Sessions**: Hash `org_id + virtual_model + prefix_tokens` with a sliding 5-minute channel affinity so multi-turn agent loops consistently hit upstream KV caches instead of paying full input pricing on every turn.
-- **Pre-First-Byte Failover & Distributed Circuit Breaking**: Automatic zero-impact failover retries on `429`/`5xx`/timeouts before the first response byte reaches the caller, backed by per-channel upstream capacity protection and 3-state circuit breakers (`CLOSED` → `OPEN` → `HALF_OPEN`).
 
 ### 💰 Commercial Billing, Zero-Overspend Pre-hold & Financial Reconciliation
 - **Integer `micro-USD` Precision**: Every balance, rate, budget, and ledger row uses 64-bit integer `micro-USD` (`1 USD = 1,000,000 micros`) with deterministic ceiling rounding — zero floating-point drift.
@@ -62,13 +86,13 @@ Most LLM proxies start as thin reverse proxies and break down the moment you try
   1. **Model-Scoped Resource Packs** (Tokens or Calls, earliest expiry first)
   2. **Promotional Vouchers & Bonus Grants** (earliest expiry first)
   3. **Prepaid Cash Wallet**
-- **Redis Authoritative Pre-hold & Streaming Settle**: Atomic Lua scripts freeze worst-case cost per batch at admission, renew leases via streaming heartbeats, settle exact cost on completion, reclaim orphaned holds on crash, and protect against ledger lag via backpressure gates (`503 LEDGER_BACKLOG` / `OUTBOX_UNAVAILABLE`).
+- **Redis Authoritative Pre-hold & Streaming Settle**: Atomic Lua scripts freeze worst-case cost per batch at admission, renew leases via streaming heartbeats, settle exact cost on completion, and reclaim orphaned holds on crash.
 - **End-to-End Monetization & Accounting**: Global payments (**Stripe**, **Alipay**, **WeChat Pay**) with order-locked FX rates, signed webhooks, redemption code batches, append-only monthly-partitioned `wallet_ledger`, automated reconciliation findings, dual-approval manual adjustments, monthly billing statements, and dual-track invoicing.
 
 ### 🛡️ Enterprise Multi-Tenancy, Security & Zero Data Retention (ZDR)
 - **Strict Tenant Hierarchy & Dual-Layer RBAC**: `Organization -> Project -> API Key` with `Owner / Admin / Developer / Billing` org roles, project-scoped developer access, IP CIDR allowlists, model allowlists, and per-key quotas.
 - **Enterprise Identity & Isolated Admin Plane**: Email OTP, GitHub/Google OAuth, and Enterprise OIDC/SAML SSO on the Developer Console; physically isolated Operator Admin plane enforcing independent HS256 JWT keys/cookies, **TOTP MFA**, and IP CIDR gates.
-- **Defense-in-Depth Cryptography**: Customer `sk-...` API keys stored only as salted `HMAC-SHA256` digests (with dual-pepper zero-downtime rotation); upstream provider keys encrypted at rest and in transit with `AES-256-GCM` bound to `channel_id` as AAD and decrypted only in memory microseconds before dispatch.
+- **Defense-in-Depth Cryptography**: Customer `sk-...` API keys stored only as salted `HMAC-SHA256` digests (with dual-pepper zero-downtime rotation); upstream provider keys encrypted at rest and in transit with `AES-256-GCM` bound to `channel_id` as AAD and decrypted only in memory microseconds before dispatch (hardware accelerated on ARMv8 & x86 AES-NI).
 - **4-Tier Rate Limiting & Monthly Project Budgets**: Sliding-window RPM/TPM/concurrency limits across API Key, Project, Organization, and Upstream Channel layers, plus Project soft-cap alerts and hard-cap enforcement.
 - **Zero Data Retention (ZDR) & Pluggable Guardrails**: Prompts and completions never touch PostgreSQL or ClickHouse by default; optional project-level opt-in debug payloads are AES-256-GCM encrypted in an isolated ClickHouse table with automatic 1–7 day TTL deletion; extensible `GuardrailProvider` SPI for DFA keyword filtering, PII masking, and prompt injection defense.
 
@@ -167,7 +191,7 @@ docker compose --env-file .env -f infra/docker-compose.yaml --profile tools up -
 # Build shared modules & run unit tests (no Docker required)
 ./backend/mvnw -f backend/pom.xml test
 
-# Start Console (:8081) — runs Flyway V1–V8 migrations automatically
+# Start Console (:8081) — runs Flyway V1–V9 migrations automatically
 HYPERLLM_OTP_DEBUG_ECHO=true ./backend/mvnw -f backend/pom.xml -pl console spring-boot:run
 
 # After Flyway tables exist, start Debezium CDC + ClickHouse pipeline
@@ -190,15 +214,14 @@ cd frontend/console && pnpm install && pnpm dev
 cd frontend/admin && pnpm install && pnpm dev
 ```
 
-### 4. Verify Full Stack
+### 4. Verify & Benchmark
 
 ```bash
 # Full reactor build + Testcontainers integration tests (PostgreSQL, Redis, Kafka, ClickHouse, WireMock)
 ./backend/mvnw -f backend/pom.xml verify
-
-# Live-stack end-to-end commercial smoke test
-bash scripts/e2e/phase2-smoke.sh
 ```
+
+> For reproducible load testing and `async-profiler` flamegraph capture against `backend/gateway`, see [benchmark/README.md](./benchmark/README.md).
 
 ---
 
@@ -248,35 +271,32 @@ curl http://localhost:8080/v1/messages \
 
 | Module | Default Port | Tech Stack & Responsibility |
 | :--- | :---: | :--- |
-| `backend/common` | — | Integer `micro-USD` math, `UuidV7`, `AesGcmCipher`, `HmacSha256`, `ApiKeyGenerator`, `ErrorCode`, shared Kafka/Redis contracts & 12 atomic Lua scripts |
-| `backend/domain` | — | Flyway `V1`–`V8` DDL migrations, monthly partitioned ledger/audit tables, `-Pjooq` generated SQL layer, 35 jOOQ repositories, `PricingResolver` & `EntitlementAllocator` |
-| `backend/protocol` | — | `Canonical IR`, OpenAI/Anthropic protocol adapters, streaming SSE usage extraction, length-based token estimation, native protocol error formatter |
-| `backend/gateway` | `8080` | Reactive WebFlux data plane (`Caffeine L1 + Redis L2`), Debezium broadcast L1 invalidation, multi-strategy routing, Lua Pre-hold/Settle, 4-tier limits & batched Outbox |
+| `backend/common` | — | Integer `micro-USD` math, `UuidV7`, `AesGcmCipher`, `HmacSha256`, `ApiKeyGenerator`, `ErrorCode`, shared Kafka/Redis contracts & preloaded static Lua scripts |
+| `backend/domain` | — | Flyway `V1`–`V9` DDL migrations, monthly partitioned ledger/audit tables, `-Pjooq` generated SQL layer, jOOQ repositories, `PricingResolver` & `EntitlementAllocator` |
+| `backend/protocol` | — | `Canonical IR`, OpenAI/Anthropic/Gemini protocol adapters, streaming SSE usage extraction, O(1) length-based token estimation, native protocol error formatter |
+| `backend/gateway` | `8080` | Reactive WebFlux data plane (`Caffeine L1 + Redis L2`, native Linux Epoll), Debezium broadcast L1 invalidation, multi-strategy routing, Lua Pre-hold/Settle, 4-tier limits & batched Outbox |
 | `backend/console` | `8081` | Developer control plane (MVC + virtual threads), dual-layer RBAC, API keys, live wallet, Stripe/Alipay/WeChat payments, voucher redemption, ClickHouse usage, alerts & OpenAPI 3.1 |
 | `backend/admin` | `8082` | Operator control plane (MVC + virtual threads), TOTP MFA, encrypted channel pools & probes, model/pricing orchestration, margin analytics, ledger consumer, rollup, alerts & reconciliation |
 | `frontend/console` | `3000` | Next.js 16 + React 19 + Tailwind CSS v4 developer portal, model marketplace, SSE Playground, billing & usage analytics UI |
 | `frontend/admin` | `3001` | Next.js 16 + React 19 + Tailwind CSS v4 isolated operator portal for routing, commerce, margin cockpit & financial reconciliation |
+| `benchmark/` | — | Zero-dependency Go 4-protocol mock upstream, SSE/Agent load generator, benchmark seed tool & CPU-pinned ARM64/x86_64 profiling harness |
 | `infra/` | — | Layered Docker Compose profiles, PostgreSQL replication init, Kafka topic init, Debezium connectors, ClickHouse DDL, OTel/Prometheus configs & WireMock stubs |
 
 ---
 
 ## Documentation
 
-### 🚀 Onboarding & API Contracts (Recommended Starting Point)
-- **[Newcomer Takeover & Onboarding Handbook](./docs/onboarding/README.md)** — 8-lesson step-by-step guide teaching every subsystem, Lua script, consistency invariant, BFF pattern, and troubleshooting runbook
+### 🚀 Onboarding & API Contracts
+- **[Newcomer Takeover & Onboarding Handbook](./docs/onboarding/README.md)** — 8-lesson step-by-step guide covering local setup, architecture invariants, storage model, Gateway lifecycle, Redis authority & Lua scripts, control planes, frontend BFF patterns, and troubleshooting runbooks
 - **[OpenAPI 3.1 Specifications](./docs/openapi/README.md)** — Machine-readable API contracts for Swagger UI, Postman, and TypeScript SDK generation:
   - [Gateway Data Plane API (`gateway-api.yaml`)](./docs/openapi/gateway-api.yaml)
   - [Console Developer API (`console-api.yaml`)](./docs/openapi/console-api.yaml)
   - [Admin Operator API (`admin-api.yaml`)](./docs/openapi/admin-api.yaml)
 
-### 📐 Architecture Blueprints & Detailed Design Specs
-- [Product & Architecture Proposal](./docs/PROPOSAL.md) · [Phased Implementation Roadmap](./docs/TODO.md)
-- [Database Entity & Storage Design](./docs/design/01-database-design.md)
-- [Dependencies & Infrastructure Orchestration](./docs/design/02-dependencies-and-infra.md)
-- [Backend Auth, REST & Gateway Contracts](./docs/design/03-phase1-backend-contracts.md)
-- [Phase 2 Commercial Billing, Redis Authority & Pipeline Specs](./docs/design/04-phase2-design.md)
-- [Frontend Engineering & Visual Design Specification](./docs/FRONTEND_DESIGN_SPEC.md)
-- [End-to-End Live Smoke Scripts](./scripts/e2e/README.md)
+### ⚡ Performance Benchmarks & Profiling
+- **[ARM64 KVM P0/P1 Optimization & Regression Report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md)** — Full 2C/4C before-vs-after throughput, TTFT/TPOT latency, GC behavior, capacity projections, and interactive `async-profiler 4.0` HTML flamegraphs
+- **[ARM64 KVM Baseline Benchmark Report](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md)** — Initial baseline profiling methodology, bottleneck discovery, and root-cause flamegraph analysis
+- **[Benchmark & Load-Testing Suite Guide](./benchmark/README.md)** — How to run reproducible CPU-isolated benchmarks and capture flamegraphs
 
 ---
 
