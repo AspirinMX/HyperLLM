@@ -56,6 +56,20 @@ public class GatewayController {
         );
     }
 
+    @PostMapping(value = "/messages/count_tokens", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<Map<String, Object>> anthropicCountTokens(
+            ServerWebExchange exchange,
+            @RequestBody(required = false) byte[] body
+    ) {
+        String version = exchange.getRequest().getHeaders().getFirst("anthropic-version");
+        String beta = exchange.getRequest().getHeaders().getFirst("anthropic-beta");
+        return proxyService.countAnthropicTokens(
+                exchange,
+                InboundRequestContext.forAnthropic(version, beta),
+                body
+        );
+    }
+
     @GetMapping("/models")
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
         return proxyService.listModels(exchange);

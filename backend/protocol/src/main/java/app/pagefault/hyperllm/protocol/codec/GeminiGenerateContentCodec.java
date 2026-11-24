@@ -77,14 +77,30 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         }
 
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
-        List<CanonicalSystemPart> systemParts = decodeSystemInstruction(root.get("systemInstruction"));
+        List<CanonicalSystemPart> systemParts = new ArrayList<>(decodeSystemInstruction(root.get("systemInstruction")));
         List<CanonicalTurn> turns = new ArrayList<>(contentsNode.size());
+        boolean sawNonSystem = false;
 
         for (JsonNode content : contentsNode) {
             if (!content.isObject()) {
                 continue;
             }
             String roleStr = content.path("role").asText("user").toLowerCase(Locale.ROOT);
+            if ("system".equals(roleStr) || "developer".equals(roleStr)) {
+                boolean devPriority = "developer".equals(roleStr);
+                List<CanonicalContentPart> parts = decodeParts(content.get("parts"), unsupported);
+                if (!sawNonSystem) {
+                    for (CanonicalContentPart p : parts) {
+                        if (p instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty()) {
+                            systemParts.add(new CanonicalSystemPart(t.text(), devPriority, null));
+                        }
+                    }
+                } else {
+                    turns.add(new CanonicalTurn(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
+                }
+                continue;
+            }
+            sawNonSystem = true;
             CanonicalRole role = switch (roleStr) {
                 case "model", "assistant" -> CanonicalRole.ASSISTANT;
                 case "function", "tool" -> CanonicalRole.TOOL;
@@ -408,7 +424,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                         }
                     }
                 } else {
-                    unsupported.add(new UnsupportedFeatureFlag("builtin_tool:" + field,
+                    unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + field,
                             "Gemini built-in tool '" + field + "' cannot be translated across vendors"));
                 }
             }
@@ -677,25 +693,26 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
     }
 
     private void encodeToolsAndConfig(ObjectNode root, CanonicalRequest req) {
-        if (!req.tools().isEmpty()) {
-            ArrayNode decls = mapper.createArrayNode();
-            for (CanonicalToolDefinition tool : req.tools()) {
-                ObjectNode d = mapper.createObjectNode();
-                d.put("name", tool.name());
-                if (tool.description() != null) {
-                    d.put("description", tool.description());
-                }
-                if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
-                    d.set("parametersJsonSchema", tool.parametersSchema().deepCopy());
-                }
-                decls.add(d);
-            }
-            ObjectNode toolWrapper = mapper.createObjectNode();
-            toolWrapper.set("functionDeclarations", decls);
-            ArrayNode toolsArr = mapper.createArrayNode();
-            toolsArr.add(toolWrapper);
-            root.set("tools", toolsArr);
+        if (req.tools().isEmpty()) {
+            return;
         }
+        ArrayNode decls = mapper.createArrayNode();
+        for (CanonicalToolDefinition tool : req.tools()) {
+            ObjectNode d = mapper.createObjectNode();
+            d.put("name", tool.name());
+            if (tool.description() != null) {
+                d.put("description", tool.description());
+            }
+            if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
+                d.set("parametersJsonSchema", tool.parametersSchema().deepCopy());
+            }
+            decls.add(d);
+        }
+        ObjectNode toolWrapper = mapper.createObjectNode();
+        toolWrapper.set("functionDeclarations", decls);
+        ArrayNode toolsArr = mapper.createArrayNode();
+        toolsArr.add(toolWrapper);
+        root.set("tools", toolsArr);
 
         CanonicalToolChoice tc = req.toolChoice();
         if (tc.mode() != CanonicalToolChoice.ToolChoiceMode.OMITTED) {

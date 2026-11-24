@@ -7,14 +7,45 @@ public record UpstreamEncodingContext(
         String upstreamModelName,
         Integer modelMaxOutputTokens,
         TranslationPolicy policy,
-        String thinkingStyle
+        String thinkingStyle,
+        String providerCode,
+        boolean supportsThinking,
+        String metadataJson
 ) {
     public UpstreamEncodingContext {
         policy = policy == null ? TranslationPolicy.BEST_EFFORT : policy;
     }
 
+    public UpstreamEncodingContext(
+            String upstreamModelName,
+            Integer modelMaxOutputTokens,
+            TranslationPolicy policy,
+            String thinkingStyle
+    ) {
+        this(upstreamModelName, modelMaxOutputTokens, policy, thinkingStyle, null, false, null);
+    }
+
+    public UpstreamEncodingContext(
+            String upstreamModelName,
+            Integer modelMaxOutputTokens,
+            TranslationPolicy policy,
+            String thinkingStyle,
+            String providerCode
+    ) {
+        this(upstreamModelName, modelMaxOutputTokens, policy, thinkingStyle, providerCode, false, null);
+    }
+
     public static UpstreamEncodingContext simple(String upstreamModelName) {
-        return new UpstreamEncodingContext(upstreamModelName, null, TranslationPolicy.BEST_EFFORT, null);
+        return new UpstreamEncodingContext(upstreamModelName, null, TranslationPolicy.BEST_EFFORT, null, null, false, null);
+    }
+
+    public static UpstreamEncodingContext forProvider(String providerCode, String upstreamModelName) {
+        return new UpstreamEncodingContext(upstreamModelName, null, TranslationPolicy.BEST_EFFORT, null, providerCode, false, null);
+    }
+
+    public ProviderCapabilities capabilitiesFor(ProtocolKind outboundProtocol) {
+        return ProviderCapabilities.resolve(
+                outboundProtocol, providerCode, supportsThinking, thinkingStyle, metadataJson);
     }
 
     public int resolveDefaultMaxOutputTokens(int fallback) {

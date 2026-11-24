@@ -43,10 +43,20 @@ public sealed interface CanonicalContentPart permits
             String text,
             String signature,
             String encryptedContent,
-            ProtocolKind originProtocol
+            ProtocolKind originProtocol,
+            String wireField
     ) implements CanonicalContentPart {
         public ThinkingPart {
             text = text == null ? "" : text;
+        }
+
+        public ThinkingPart(
+                String text,
+                String signature,
+                String encryptedContent,
+                ProtocolKind originProtocol
+        ) {
+            this(text, signature, encryptedContent, originProtocol, null);
         }
     }
 

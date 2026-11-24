@@ -67,9 +67,13 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
         ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
         String model = CodecSupport.requireModel(root);
+        Integer parsedMaxTokens = null;
         JsonNode maxTokensNode = root.get("max_tokens");
-        if (maxTokensNode == null || !maxTokensNode.isIntegralNumber() || maxTokensNode.asInt() <= 0) {
-            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'max_tokens' must be a positive integer");
+        if (maxTokensNode != null && !maxTokensNode.isNull()) {
+            if (!maxTokensNode.isIntegralNumber() || maxTokensNode.asInt() <= 0) {
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'max_tokens' must be a positive integer");
+            }
+            parsedMaxTokens = maxTokensNode.asInt();
         }
         JsonNode messagesNode = root.get("messages");
         if (messagesNode == null || !messagesNode.isArray() || messagesNode.isEmpty()) {
@@ -79,21 +83,37 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         boolean stream = root.path("stream").asBoolean(false);
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
 
-        List<CanonicalSystemPart> systemParts = decodeSystem(root.get("system"));
+        List<CanonicalSystemPart> systemParts = new ArrayList<>(decodeSystem(root.get("system"), false));
         List<CanonicalTurn> turns = new ArrayList<>(messagesNode.size());
+        boolean sawNonSystem = false;
         for (JsonNode msg : messagesNode) {
             if (!msg.isObject()) {
                 continue;
             }
             String roleStr = msg.path("role").asText("user").toLowerCase(Locale.ROOT);
-            CanonicalRole role = switch (roleStr) {
-                case "user" -> CanonicalRole.USER;
-                case "assistant" -> CanonicalRole.ASSISTANT;
+            switch (roleStr) {
+                case "system", "developer" -> {
+                    boolean devPriority = "developer".equals(roleStr);
+                    if (!sawNonSystem) {
+                        systemParts.addAll(decodeSystem(msg.get("content"), devPriority));
+                    } else {
+                        List<CanonicalContentPart> parts = decodeContentBlocks(msg.get("content"), unsupported);
+                        turns.add(new CanonicalTurn(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
+                    }
+                }
+                case "user" -> {
+                    sawNonSystem = true;
+                    List<CanonicalContentPart> parts = decodeContentBlocks(msg.get("content"), unsupported);
+                    turns.add(new CanonicalTurn(CanonicalRole.USER, parts));
+                }
+                case "assistant" -> {
+                    sawNonSystem = true;
+                    List<CanonicalContentPart> parts = decodeContentBlocks(msg.get("content"), unsupported);
+                    turns.add(new CanonicalTurn(CanonicalRole.ASSISTANT, parts));
+                }
                 default -> throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
                         "Unsupported Anthropic role: " + roleStr);
-            };
-            List<CanonicalContentPart> parts = decodeContentBlocks(msg.get("content"), unsupported);
-            turns.add(new CanonicalTurn(role, parts));
+            }
         }
 
         List<CanonicalToolDefinition> tools = decodeTools(root.get("tools"), unsupported);
@@ -111,7 +131,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             }
         }
         CanonicalGenerationConfig generation = new CanonicalGenerationConfig(
-                maxTokensNode.asInt(),
+                parsedMaxTokens,
                 CodecSupport.asNullableDouble(root, "temperature"),
                 CodecSupport.asNullableDouble(root, "top_p"),
                 CodecSupport.asNullableInt(root, "top_k"),
@@ -149,6 +169,10 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
         ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
         CodecSupport.rewriteModelIfPresent(root, context.upstreamModelName());
+        if (!root.hasNonNull("max_tokens")) {
+            root.put("max_tokens", context.resolveDefaultMaxOutputTokens(DEFAULT_MAX_TOKENS));
+        }
+        normalizePassthroughMessages(root);
         return CodecSupport.writeJsonBytes(mapper, root);
     }
 
@@ -326,10 +350,12 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     }
                 }
                 case CanonicalContentPart.TextPart t -> {
-                    ObjectNode block = mapper.createObjectNode();
-                    block.put("type", "text");
-                    block.put("text", t.text());
-                    contentArr.add(block);
+                    if (!t.text().isEmpty()) {
+                        ObjectNode block = mapper.createObjectNode();
+                        block.put("type", "text");
+                        block.put("text", t.text());
+                        contentArr.add(block);
+                    }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
                     ObjectNode block = mapper.createObjectNode();
@@ -390,12 +416,94 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     // ---- Decoding helpers ----
 
-    private List<CanonicalSystemPart> decodeSystem(JsonNode systemNode) {
+    /**
+     * For Anthropic passthrough: hoists leading {@code system}/{@code developer} messages out of
+     * {@code messages[]} into top-level {@code system[]} (since Anthropic requires {@code messages[0]}
+     * to be {@code user}), while preserving mid-conversation {@code role: "system"} (native Anthropic
+     * cache-preserving developer override) and rewriting mid-conversation {@code role: "developer"} to {@code "system"}.
+     */
+    private void normalizePassthroughMessages(ObjectNode root) {
+        JsonNode messagesNode = root.get("messages");
+        if (!(messagesNode instanceof ArrayNode messagesArr) || messagesArr.isEmpty()) {
+            return;
+        }
+        boolean needsRewrite = false;
+        boolean sawNonSystem = false;
+        for (JsonNode msg : messagesArr) {
+            if (!msg.isObject()) {
+                continue;
+            }
+            String role = msg.path("role").asText("").toLowerCase(Locale.ROOT);
+            if (!sawNonSystem && ("system".equals(role) || "developer".equals(role))) {
+                needsRewrite = true;
+                break;
+            }
+            if ("developer".equals(role)) {
+                needsRewrite = true;
+                break;
+            }
+            if (!"system".equals(role)) {
+                sawNonSystem = true;
+            }
+        }
+        if (!needsRewrite) {
+            return;
+        }
+
+        ArrayNode systemArr = mapper.createArrayNode();
+        JsonNode existingSystem = root.get("system");
+        if (existingSystem != null && existingSystem.isTextual() && !existingSystem.asText().isEmpty()) {
+            ObjectNode b = mapper.createObjectNode();
+            b.put("type", "text");
+            b.put("text", existingSystem.asText());
+            systemArr.add(b);
+        } else if (existingSystem instanceof ArrayNode existingArr) {
+            for (JsonNode item : existingArr) {
+                systemArr.add(item.deepCopy());
+            }
+        }
+
+        ArrayNode cleanedMessages = mapper.createArrayNode();
+        sawNonSystem = false;
+        for (JsonNode msg : messagesArr) {
+            if (!msg.isObject()) {
+                continue;
+            }
+            String role = msg.path("role").asText("").toLowerCase(Locale.ROOT);
+            if (!sawNonSystem && ("system".equals(role) || "developer".equals(role))) {
+                for (CanonicalSystemPart sp : decodeSystem(msg.get("content"), false)) {
+                    if (!sp.text().isEmpty()) {
+                        ObjectNode b = mapper.createObjectNode();
+                        b.put("type", "text");
+                        b.put("text", sp.text());
+                        if (sp.cacheControl() != null) {
+                            b.set("cache_control", CodecSupport.encodeCacheControl(mapper, sp.cacheControl()));
+                        }
+                        systemArr.add(b);
+                    }
+                }
+            } else {
+                sawNonSystem = true;
+                ObjectNode copy = (ObjectNode) msg.deepCopy();
+                if ("developer".equals(role)) {
+                    copy.put("role", "system");
+                }
+                cleanedMessages.add(copy);
+            }
+        }
+
+        if (!systemArr.isEmpty()) {
+            root.set("system", systemArr);
+        }
+        root.set("messages", cleanedMessages);
+    }
+
+    private List<CanonicalSystemPart> decodeSystem(JsonNode systemNode, boolean developerPriority) {
         if (systemNode == null || systemNode.isNull()) {
             return List.of();
         }
         if (systemNode.isTextual()) {
-            return List.of(new CanonicalSystemPart(systemNode.asText(), false, null));
+            return List.of(new CanonicalSystemPart(systemNode.asText(), developerPriority, null));
         }
         if (systemNode.isArray()) {
             List<CanonicalSystemPart> out = new ArrayList<>(systemNode.size());
@@ -403,11 +511,11 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 if (block.isObject() && block.hasNonNull("text")) {
                     out.add(new CanonicalSystemPart(
                             block.get("text").asText(),
-                            false,
+                            developerPriority,
                             CodecSupport.parseCacheControl(block.get("cache_control"))
                     ));
                 } else if (block.isTextual()) {
-                    out.add(new CanonicalSystemPart(block.asText(), false, null));
+                    out.add(new CanonicalSystemPart(block.asText(), developerPriority, null));
                 }
             }
             return out;
@@ -459,7 +567,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     List<CanonicalContentPart> nested = decodeContentBlocks(block.get("content"), unsupported);
                     out.add(new CanonicalContentPart.ToolResultPart(toolUseId, null, nested, isError, cc));
                 }
-                default -> unsupported.add(new UnsupportedFeatureFlag("content_block:" + type,
+                default -> unsupported.add(UnsupportedFeatureFlag.degradable("content_block:" + type,
                         "Anthropic content block '" + type + "' is not supported across protocol translation"));
             }
         }
@@ -509,7 +617,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         for (JsonNode tool : toolsNode) {
             String type = CodecSupport.asNullableText(tool, "type");
             if (type != null && !type.isBlank() && !"custom".equals(type)) {
-                unsupported.add(new UnsupportedFeatureFlag("builtin_tool:" + type,
+                unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + type,
                         "Anthropic built-in/server tool '" + type + "' cannot be translated across vendors"));
                 continue;
             }
@@ -685,7 +793,11 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         } else {
             for (CanonicalContentPart p : turn.parts()) {
                 switch (p) {
-                    case CanonicalContentPart.TextPart t -> blocks.add(encodeTextBlock(t.text(), t.cacheControl()));
+                    case CanonicalContentPart.TextPart t -> {
+                        if (!t.text().isEmpty()) {
+                            blocks.add(encodeTextBlock(t.text(), t.cacheControl()));
+                        }
+                    }
                     case CanonicalContentPart.ImagePart img -> blocks.add(encodeImageBlock(img));
                     case CanonicalContentPart.ToolResultPart tr -> blocks.add(encodeToolResultBlock(tr));
                     default -> {}
@@ -738,18 +850,26 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         if (tr.isError()) {
             b.put("is_error", true);
         }
-        if (tr.content().size() == 1 && tr.content().getFirst() instanceof CanonicalContentPart.TextPart t) {
+        if (tr.content().isEmpty()) {
+            b.put("content", "");
+        } else if (tr.content().size() == 1 && tr.content().getFirst() instanceof CanonicalContentPart.TextPart t) {
             b.put("content", t.text());
         } else {
             ArrayNode arr = mapper.createArrayNode();
             for (CanonicalContentPart child : tr.content()) {
                 if (child instanceof CanonicalContentPart.TextPart t) {
-                    arr.add(encodeTextBlock(t.text(), null));
+                    if (!t.text().isEmpty()) {
+                        arr.add(encodeTextBlock(t.text(), null));
+                    }
                 } else if (child instanceof CanonicalContentPart.ImagePart img) {
                     arr.add(encodeImageBlock(img));
                 }
             }
-            b.set("content", arr);
+            if (arr.isEmpty()) {
+                b.put("content", "");
+            } else {
+                b.set("content", arr);
+            }
         }
         if (tr.cacheControl() != null) {
             b.set("cache_control", CodecSupport.encodeCacheControl(mapper, tr.cacheControl()));
@@ -758,32 +878,33 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     }
 
     private void encodeTools(ObjectNode root, CanonicalRequest req, boolean thinkingEnabled, TranslationPolicy policy) {
-        if (!req.tools().isEmpty()) {
-            ArrayNode arr = mapper.createArrayNode();
-            for (CanonicalToolDefinition tool : req.tools()) {
-                ObjectNode t = mapper.createObjectNode();
-                t.put("name", tool.name());
-                if (tool.description() != null) {
-                    t.put("description", tool.description());
-                }
-                if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
-                    t.set("input_schema", tool.parametersSchema().deepCopy());
-                } else {
-                    ObjectNode emptySchema = mapper.createObjectNode();
-                    emptySchema.put("type", "object");
-                    emptySchema.set("properties", mapper.createObjectNode());
-                    t.set("input_schema", emptySchema);
-                }
-                if (tool.strict() != null) {
-                    t.put("strict", tool.strict());
-                }
-                if (tool.cacheControl() != null) {
-                    t.set("cache_control", CodecSupport.encodeCacheControl(mapper, tool.cacheControl()));
-                }
-                arr.add(t);
-            }
-            root.set("tools", arr);
+        if (req.tools().isEmpty()) {
+            return;
         }
+        ArrayNode arr = mapper.createArrayNode();
+        for (CanonicalToolDefinition tool : req.tools()) {
+            ObjectNode t = mapper.createObjectNode();
+            t.put("name", tool.name());
+            if (tool.description() != null) {
+                t.put("description", tool.description());
+            }
+            if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
+                t.set("input_schema", tool.parametersSchema().deepCopy());
+            } else {
+                ObjectNode emptySchema = mapper.createObjectNode();
+                emptySchema.put("type", "object");
+                emptySchema.set("properties", mapper.createObjectNode());
+                t.set("input_schema", emptySchema);
+            }
+            if (tool.strict() != null) {
+                t.put("strict", tool.strict());
+            }
+            if (tool.cacheControl() != null) {
+                t.set("cache_control", CodecSupport.encodeCacheControl(mapper, tool.cacheControl()));
+            }
+            arr.add(t);
+        }
+        root.set("tools", arr);
 
         CanonicalToolChoice tc = req.toolChoice();
         if (tc.mode() == CanonicalToolChoice.ToolChoiceMode.OMITTED && tc.parallelToolCalls() == null) {

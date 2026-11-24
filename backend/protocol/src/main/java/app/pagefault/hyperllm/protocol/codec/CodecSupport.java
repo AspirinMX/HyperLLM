@@ -343,32 +343,11 @@ public final class CodecSupport {
     }
 
     public static boolean isAnthropicAdaptiveStyle(String thinkingStyle, String upstreamModel) {
-        if ("ANTHROPIC_ADAPTIVE".equalsIgnoreCase(thinkingStyle)) {
-            return true;
-        }
-        if ("ANTHROPIC_BUDGET".equalsIgnoreCase(thinkingStyle)) {
-            return false;
-        }
-        if (upstreamModel == null) {
-            return false;
-        }
-        String lower = upstreamModel.toLowerCase(Locale.ROOT);
-        return lower.contains("claude-opus-4-6") || lower.contains("claude-sonnet-4-6")
-                || lower.contains("claude-4-6") || lower.contains("claude-4.6");
+        return "ANTHROPIC_ADAPTIVE".equalsIgnoreCase(thinkingStyle);
     }
 
     public static boolean isGeminiLevelStyle(String thinkingStyle, String upstreamModel) {
-        if ("GEMINI_LEVEL".equalsIgnoreCase(thinkingStyle)) {
-            return true;
-        }
-        if ("GEMINI_BUDGET".equalsIgnoreCase(thinkingStyle)) {
-            return false;
-        }
-        if (upstreamModel == null) {
-            return false;
-        }
-        String lower = upstreamModel.toLowerCase(Locale.ROOT);
-        return lower.contains("gemini-3") || lower.contains("gemini-4");
+        return "GEMINI_LEVEL".equalsIgnoreCase(thinkingStyle);
     }
 
     public static Double asNullableDouble(JsonNode parent, String field) {

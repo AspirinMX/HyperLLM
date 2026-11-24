@@ -94,7 +94,7 @@ public final class ProtocolTranslator {
             return new PreparedUpstreamRequest(decoded, outboundProtocol, passthroughBody, true);
         }
         CanonicalRequest normalized = CanonicalRequestNormalizer.normalizeForTranslation(
-                decoded, outboundProtocol, context.policy());
+                decoded, outboundProtocol, context);
         byte[] translatedBody = outboundCodec.encodeRequest(normalized, context);
         return new PreparedUpstreamRequest(normalized, outboundProtocol, translatedBody, false);
     }

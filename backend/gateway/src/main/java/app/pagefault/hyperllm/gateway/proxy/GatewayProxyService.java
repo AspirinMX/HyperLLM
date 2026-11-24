@@ -160,6 +160,32 @@ public class GatewayProxyService {
                         }));
     }
 
+    public Mono<Map<String, Object>> countAnthropicTokens(
+            ServerWebExchange exchange,
+            InboundRequestContext inboundContext,
+            byte[] rawBody
+    ) {
+        String rawToken = extractToken(exchange.getRequest(), ProtocolKind.ANTHROPIC_MESSAGES);
+        String clientIp = extractClientIp(exchange.getRequest());
+        CanonicalRequest canonical = protocolTranslator.parseRequest(
+                ProtocolKind.ANTHROPIC_MESSAGES, rawBody, inboundContext);
+        return authenticateCaller(rawToken, clientIp)
+                .flatMap(caller -> {
+                    if (!isModelAllowed(caller, canonical.model())) {
+                        return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
+                    }
+                    return cacheService.resolveModelRoute(canonical.model())
+                            .switchIfEmpty(Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
+                            .flatMap(route -> {
+                                if (route.model().status() != ModelStatus.ACTIVE) {
+                                    return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
+                                }
+                                int estimated = Math.max(0, tokenEstimator.estimatePromptTokens(canonical));
+                                return Mono.just(Map.<String, Object>of("input_tokens", estimated));
+                            });
+                });
+    }
+
     public Mono<ResponseEntity<Flux<DataBuffer>>> proxyChatOrMessages(
             ServerWebExchange exchange,
             ProtocolKind protocolKind,
@@ -253,7 +279,10 @@ public class GatewayProxyService {
                     candidate.upstreamModelName(),
                     route.model().maxOutputTokens(),
                     policy,
-                    thinkingStyle
+                    thinkingStyle,
+                    candidate.providerCode(),
+                    route.model().supportsThinking(),
+                    route.model().metadataJson()
             );
             PreparedUpstreamRequest prepared = protocolTranslator.prepareUpstreamRequest(
                     rawBody, canonical, outboundProtocol, encodingContext);

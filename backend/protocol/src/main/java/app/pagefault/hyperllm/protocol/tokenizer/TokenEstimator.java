@@ -170,15 +170,7 @@ public final class TokenEstimator {
             if (matched.isPresent()) {
                 return matched.get();
             }
-            if (normalized.startsWith("gpt-4o")
-                    || normalized.startsWith("gpt-4.1")
-                    || normalized.startsWith("gpt-5")
-                    || normalized.startsWith("o1")
-                    || normalized.startsWith("o3")
-                    || normalized.startsWith("o4")) {
-                return registry.getEncoding(EncodingType.O200K_BASE);
-            }
         }
-        return registry.getEncoding(EncodingType.CL100K_BASE);
+        return registry.getEncoding(EncodingType.O200K_BASE);
     }
 }

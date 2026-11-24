@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 
 @Slf4j
@@ -31,6 +32,27 @@ public class GatewayExceptionHandler {
             response.header(HttpHeaders.RETRY_AFTER, Long.toString(admission.getRetryAfterSeconds()));
         }
         return response.body(body);
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<String> handleResponseStatus(ResponseStatusException ex, ServerWebExchange exchange) {
+        ProtocolKind kind = resolveProtocol(exchange);
+        int status = ex.getStatusCode().value();
+        ErrorCode mapped = switch (status) {
+            case 404 -> ErrorCode.MODEL_NOT_FOUND;
+            case 401 -> ErrorCode.AUTH_INVALID_KEY;
+            case 403 -> ErrorCode.AUTH_FORBIDDEN;
+            case 429 -> ErrorCode.RATE_LIMITED;
+            default -> status >= 400 && status < 500
+                    ? ErrorCode.PROTOCOL_INVALID_REQUEST
+                    : ErrorCode.UPSTREAM_ERROR;
+        };
+        String message = ex.getReason() != null && !ex.getReason().isBlank()
+                ? ex.getReason() : ex.getMessage();
+        String body = errorFormatter.formatErrorJson(kind, mapped, message);
+        return ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     @ExceptionHandler(Exception.class)

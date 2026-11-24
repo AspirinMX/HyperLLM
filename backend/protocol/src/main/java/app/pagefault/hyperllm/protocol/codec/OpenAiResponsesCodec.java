@@ -22,7 +22,9 @@ import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
+import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
@@ -64,15 +66,15 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
         if (root.hasNonNull("previous_response_id") && !root.get("previous_response_id").asText("").isBlank()) {
-            unsupported.add(new UnsupportedFeatureFlag("previous_response_id",
+            unsupported.add(UnsupportedFeatureFlag.hard("previous_response_id",
                     "Server-side response chaining requires OpenAI Responses passthrough"));
         }
         if (root.hasNonNull("conversation")) {
-            unsupported.add(new UnsupportedFeatureFlag("conversation",
+            unsupported.add(UnsupportedFeatureFlag.hard("conversation",
                     "Server-side conversation state requires OpenAI Responses passthrough"));
         }
         if (root.path("background").asBoolean(false)) {
-            unsupported.add(new UnsupportedFeatureFlag("background",
+            unsupported.add(UnsupportedFeatureFlag.hard("background",
                     "Asynchronous background execution requires OpenAI Responses passthrough"));
         }
 
@@ -164,15 +166,19 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
         root.set("input", inputArr);
 
+        ProviderCapabilities caps = context.capabilitiesFor(ProtocolKind.OPENAI_RESPONSES);
         CanonicalGenerationConfig g = req.generation();
         if (g.maxOutputTokens() != null && g.maxOutputTokens() > 0) {
             root.put("max_output_tokens", g.maxOutputTokens());
         }
-        if (g.temperature() != null) {
-            root.put("temperature", g.temperature());
-        }
-        if (g.topP() != null) {
-            root.put("top_p", g.topP());
+        boolean allowSampling = !(caps.forbidsSamplingWithReasoning() && context.policy() != TranslationPolicy.STRICT);
+        if (allowSampling) {
+            if (g.temperature() != null) {
+                root.put("temperature", g.temperature());
+            }
+            if (g.topP() != null) {
+                root.put("top_p", g.topP());
+            }
         }
 
         encodeTools(root, req);
@@ -359,12 +365,16 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 String role = item.path("role").asText("user").toLowerCase(Locale.ROOT);
                 switch (role) {
                     case "system", "developer" -> {
+                        boolean devPriority = "developer".equals(role);
                         flushPendingAssistant(pendingAssistant, turns);
                         String text = extractTextFromContent(item.get("content"));
                         if (!sawNonSystem) {
-                            systemParts.add(new CanonicalSystemPart(text, "developer".equals(role), null));
+                            systemParts.add(new CanonicalSystemPart(text, devPriority, null));
                         } else {
-                            turns.add(new CanonicalTurn(CanonicalRole.DEVELOPER, List.of(new CanonicalContentPart.TextPart(text))));
+                            turns.add(new CanonicalTurn(
+                                    devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM,
+                                    List.of(new CanonicalContentPart.TextPart(text))
+                            ));
                         }
                     }
                     case "user" -> {
@@ -376,6 +386,20 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     case "assistant" -> {
                         sawNonSystem = true;
                         pendingAssistant.addAll(decodeMessageContent(item.get("content"), unsupported));
+                    }
+                    case "tool" -> {
+                        sawNonSystem = true;
+                        flushPendingAssistant(pendingAssistant, turns);
+                        String callId = CodecSupport.asNullableText(item, "call_id");
+                        if (callId == null) {
+                            callId = CodecSupport.asNullableText(item, "tool_call_id");
+                        }
+                        String name = CodecSupport.asNullableText(item, "name");
+                        List<CanonicalContentPart> parts = decodeMessageContent(item.get("content"), unsupported);
+                        turns.add(new CanonicalTurn(
+                                CanonicalRole.TOOL,
+                                List.of(new CanonicalContentPart.ToolResultPart(callId, name, parts, false, null))
+                        ));
                     }
                     default -> throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
                             "Unsupported Responses message role: " + role);
@@ -408,7 +432,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 sawNonSystem = true;
                 decodeReasoningItem(item, pendingAssistant);
             } else {
-                unsupported.add(new UnsupportedFeatureFlag("input_item:" + type,
+                unsupported.add(UnsupportedFeatureFlag.degradable("input_item:" + type,
                         "Responses input item type '" + type + "' is not supported across protocol translation"));
             }
         }
@@ -462,7 +486,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                                 "input_image requires either 'image_url' or 'file_id'");
                     }
                 }
-                default -> unsupported.add(new UnsupportedFeatureFlag("content_part:" + type,
+                default -> unsupported.add(UnsupportedFeatureFlag.degradable("content_part:" + type,
                         "Responses content part '" + type + "' is not supported across protocol translation"));
             }
         }
@@ -549,7 +573,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         for (JsonNode tool : toolsNode) {
             String type = tool.path("type").asText("");
             if (!"function".equals(type)) {
-                unsupported.add(new UnsupportedFeatureFlag("builtin_tool:" + type,
+                unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + type,
                         "OpenAI Responses built-in tool '" + type + "' cannot be translated across vendors"));
                 continue;
             }
@@ -638,7 +662,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     private void encodeTurn(ArrayNode inputArr, CanonicalTurn turn) {
         switch (turn.role()) {
-            case DEVELOPER -> {
+            case SYSTEM, DEVELOPER -> {
                 ArrayNode content = mapper.createArrayNode();
                 for (CanonicalContentPart p : turn.parts()) {
                     if (p instanceof CanonicalContentPart.TextPart t) {
@@ -650,7 +674,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 }
                 ObjectNode msg = mapper.createObjectNode();
                 msg.put("type", "message");
-                msg.put("role", "developer");
+                msg.put("role", turn.role() == CanonicalRole.SYSTEM ? "system" : "developer");
                 msg.set("content", content);
                 inputArr.add(msg);
             }
@@ -813,25 +837,32 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
     }
 
     private void encodeTools(ObjectNode root, CanonicalRequest req) {
-        if (!req.tools().isEmpty()) {
-            ArrayNode arr = mapper.createArrayNode();
-            for (CanonicalToolDefinition tool : req.tools()) {
-                ObjectNode t = mapper.createObjectNode();
-                t.put("type", "function");
-                t.put("name", tool.name());
-                if (tool.description() != null) {
-                    t.put("description", tool.description());
-                }
-                if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
-                    t.set("parameters", tool.parametersSchema().deepCopy());
-                }
-                if (tool.strict() != null) {
-                    t.put("strict", tool.strict());
-                }
-                arr.add(t);
-            }
-            root.set("tools", arr);
+        if (req.tools().isEmpty()) {
+            return;
         }
+        ArrayNode arr = mapper.createArrayNode();
+        for (CanonicalToolDefinition tool : req.tools()) {
+            ObjectNode t = mapper.createObjectNode();
+            t.put("type", "function");
+            t.put("name", tool.name());
+            if (tool.description() != null) {
+                t.put("description", tool.description());
+            }
+            if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
+                t.set("parameters", tool.parametersSchema().deepCopy());
+            } else {
+                ObjectNode emptySchema = mapper.createObjectNode();
+                emptySchema.put("type", "object");
+                emptySchema.set("properties", mapper.createObjectNode());
+                t.set("parameters", emptySchema);
+            }
+            if (tool.strict() != null) {
+                t.put("strict", tool.strict());
+            }
+            arr.add(t);
+        }
+        root.set("tools", arr);
+
         CanonicalToolChoice tc = req.toolChoice();
         switch (tc.mode()) {
             case NONE -> root.put("tool_choice", "none");
@@ -845,7 +876,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             }
             case OMITTED -> {}
         }
-        if (tc.parallelToolCalls() != null && !req.tools().isEmpty()) {
+        if (tc.parallelToolCalls() != null) {
             root.put("parallel_tool_calls", tc.parallelToolCalls());
         }
     }
