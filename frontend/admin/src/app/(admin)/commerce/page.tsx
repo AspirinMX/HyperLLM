@@ -25,13 +25,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -592,18 +585,15 @@ export default function AdminCommercePage() {
         </TabsContent>
       </Tabs>
 
-      {/* SKU Create/Edit Sheet */}
-      <Sheet open={skuSheetOpen} onOpenChange={setSkuSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>
+      {/* SKU Create/Edit Dialog */}
+      <Dialog open={skuSheetOpen} onOpenChange={setSkuSheetOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
               {editingSku ? "编辑资源包 SKU" : "新增资源包 SKU"}
-            </SheetTitle>
-          </SheetHeader>
-          <form
-            onSubmit={handleSubmitSku}
-            className="flex flex-1 flex-col gap-4 px-6 pb-6"
-          >
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSubmitSku} className="flex flex-col gap-4">
             <ApiErrorAlert error={skuError} />
             {!editingSku ? (
               <div className="flex flex-col gap-1.5">
@@ -742,28 +732,32 @@ export default function AdminCommercePage() {
                 </SelectContent>
               </Select>
             </div>
-            <SheetFooter className="px-0 pt-2">
-              <Button type="submit" disabled={savingSku} className="w-full">
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setSkuSheetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={savingSku}>
                 {savingSku ? (
                   <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                 ) : null}
                 <span>{editingSku ? "保存商品" : "创建商品"}</span>
               </Button>
-            </SheetFooter>
+            </DialogFooter>
           </form>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
-      {/* Voucher Create Sheet */}
-      <Sheet open={voucherSheetOpen} onOpenChange={setVoucherSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>新建代金券活动</SheetTitle>
-          </SheetHeader>
-          <form
-            onSubmit={handleCreateVoucher}
-            className="flex flex-1 flex-col gap-4 px-6 pb-6"
-          >
+      {/* Voucher Create Dialog */}
+      <Dialog open={voucherSheetOpen} onOpenChange={setVoucherSheetOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>新建代金券活动</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreateVoucher} className="flex flex-col gap-4">
             <ApiErrorAlert error={voucherError} />
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="v-name">活动名称</Label>
@@ -885,17 +879,24 @@ export default function AdminCommercePage() {
                 className="font-mono text-xs"
               />
             </div>
-            <SheetFooter className="px-0 pt-2">
-              <Button type="submit" disabled={savingVoucher} className="w-full">
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setVoucherSheetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={savingVoucher}>
                 {savingVoucher ? (
                   <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                 ) : null}
                 <span>创建活动</span>
               </Button>
-            </SheetFooter>
+            </DialogFooter>
           </form>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       {/* Batch Redemption Codes Dialog */}
       <Dialog

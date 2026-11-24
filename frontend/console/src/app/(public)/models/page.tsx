@@ -28,11 +28,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -480,14 +480,14 @@ export default function ModelsPage() {
         )}
       </div>
 
-      {/* Cost Calculator Sheet */}
-      <Sheet open={calcOpen} onOpenChange={setCalcOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>费用试算</SheetTitle>
-          </SheetHeader>
+      {/* Cost Calculator Dialog */}
+      <Dialog open={calcOpen} onOpenChange={setCalcOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>费用试算</DialogTitle>
+          </DialogHeader>
 
-          <div className="flex flex-col gap-5 px-6 pb-6">
+          <div className="flex flex-col gap-5">
             <div className="flex flex-col gap-2">
               <Label>选择模型</Label>
               <Select
@@ -676,8 +676,8 @@ export default function ModelsPage() {
               </div>
             </div>
           </div>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

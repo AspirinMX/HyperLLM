@@ -27,12 +27,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -1014,16 +1014,13 @@ function ModelWorkbenchContent({
         </TabsContent>
       </Tabs>
 
-      {/* Publish Pricing Rule Sheet */}
-      <Sheet open={priceSheetOpen} onOpenChange={setPriceSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>发布新定价版本</SheetTitle>
-          </SheetHeader>
-          <form
-            onSubmit={handlePublishPricing}
-            className="flex flex-1 flex-col gap-4 px-6 pb-6"
-          >
+      {/* Publish Pricing Rule Dialog */}
+      <Dialog open={priceSheetOpen} onOpenChange={setPriceSheetOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>发布新定价版本</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handlePublishPricing} className="flex flex-col gap-4">
             <ApiErrorAlert error={priceError} />
 
             <div className="flex flex-col gap-1.5">
@@ -1114,21 +1111,24 @@ function ModelWorkbenchContent({
               </div>
             </div>
 
-            <SheetFooter className="px-0 pt-2">
+            <DialogFooter>
               <Button
-                type="submit"
-                disabled={publishingPrice}
-                className="w-full"
+                type="button"
+                variant="outline"
+                onClick={() => setPriceSheetOpen(false)}
               >
+                取消
+              </Button>
+              <Button type="submit" disabled={publishingPrice}>
                 {publishingPrice ? (
                   <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                 ) : null}
                 <span>发布定价</span>
               </Button>
-            </SheetFooter>
+            </DialogFooter>
           </form>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Model Confirmation */}
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>

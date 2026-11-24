@@ -24,12 +24,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -506,16 +506,13 @@ export default function AdminChannelsPage() {
         </div>
       ) : null}
 
-      {/* Create / Edit Channel Sheet */}
-      <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>{editing ? "编辑渠道" : "新增上游渠道"}</SheetTitle>
-          </SheetHeader>
-          <form
-            onSubmit={handleSubmit}
-            className="flex flex-1 flex-col gap-4 px-6 pb-6"
-          >
+      {/* Create / Edit Channel Dialog */}
+      <Dialog open={sheetOpen} onOpenChange={setSheetOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editing ? "编辑渠道" : "新增上游渠道"}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <ApiErrorAlert error={formError} />
 
             {!editing ? (
@@ -695,17 +692,24 @@ export default function AdminChannelsPage() {
               </div>
             ) : null}
 
-            <SheetFooter className="px-0 pt-2">
-              <Button type="submit" disabled={saving} className="w-full">
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setSheetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={saving}>
                 {saving ? (
                   <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                 ) : null}
                 <span>{editing ? "保存渠道" : "创建渠道"}</span>
               </Button>
-            </SheetFooter>
+            </DialogFooter>
           </form>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation */}
       <AlertDialog

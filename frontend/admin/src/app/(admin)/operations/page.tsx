@@ -32,13 +32,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -843,25 +836,25 @@ export default function AdminOperationsPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Reconciliation Inspection Sheet */}
-      <Sheet
+      {/* Reconciliation Inspection Dialog */}
+      <Dialog
         open={Boolean(inspectFinding)}
         onOpenChange={(open) => {
           if (!open) setInspectFinding(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="size-4 text-amber-500" />
               <span>对账异常详情</span>
-            </SheetTitle>
-          </SheetHeader>
+            </DialogTitle>
+          </DialogHeader>
 
           {inspectFinding ? (
             <form
               onSubmit={handleResolveFinding}
-              className="flex flex-1 flex-col gap-4 px-6 pb-6"
+              className="flex flex-col gap-4"
             >
               <div className="grid grid-cols-3 gap-2 rounded-lg bg-muted/45 p-3 text-xs tabular-nums">
                 <div>
@@ -910,18 +903,21 @@ export default function AdminOperationsPage() {
                       placeholder="记录核查原因与处置结论…"
                     />
                   </div>
-                  <SheetFooter className="px-0 pt-2">
+                  <DialogFooter>
                     <Button
-                      type="submit"
-                      disabled={resolvingFinding}
-                      className="w-full"
+                      type="button"
+                      variant="outline"
+                      onClick={() => setInspectFinding(null)}
                     >
+                      取消
+                    </Button>
+                    <Button type="submit" disabled={resolvingFinding}>
                       {resolvingFinding ? (
                         <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                       ) : null}
                       <span>关闭工单</span>
                     </Button>
-                  </SheetFooter>
+                  </DialogFooter>
                 </>
               ) : inspectFinding.resolutionNote ? (
                 <div className="rounded-lg bg-muted/40 p-3 text-xs">
@@ -931,25 +927,25 @@ export default function AdminOperationsPage() {
               ) : null}
             </form>
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
-      {/* Payment Anomaly Inspection Sheet */}
-      <Sheet
+      {/* Payment Anomaly Inspection Dialog */}
+      <Dialog
         open={Boolean(inspectAnomaly)}
         onOpenChange={(open) => {
           if (!open) setInspectAnomaly(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>支付异常核查</SheetTitle>
-          </SheetHeader>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>支付异常核查</DialogTitle>
+          </DialogHeader>
 
           {inspectAnomaly ? (
             <form
               onSubmit={handleResolveAnomaly}
-              className="flex flex-1 flex-col gap-4 px-6 pb-6"
+              className="flex flex-col gap-4"
             >
               <div className="flex items-center justify-between rounded-lg bg-muted/45 px-3 py-2.5 text-xs">
                 <span className="font-medium">
@@ -1003,42 +999,45 @@ export default function AdminOperationsPage() {
                       placeholder="填写渠道对账核查结论…"
                     />
                   </div>
-                  <SheetFooter className="px-0 pt-2">
+                  <DialogFooter>
                     <Button
-                      type="submit"
-                      disabled={resolvingAnomaly}
-                      className="w-full"
+                      type="button"
+                      variant="outline"
+                      onClick={() => setInspectAnomaly(null)}
                     >
+                      取消
+                    </Button>
+                    <Button type="submit" disabled={resolvingAnomaly}>
                       {resolvingAnomaly ? (
                         <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                       ) : null}
                       <span>提交处置</span>
                     </Button>
-                  </SheetFooter>
+                  </DialogFooter>
                 </>
               ) : null}
             </form>
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
-      {/* Audit Log Inspection Sheet */}
-      <Sheet
+      {/* Audit Log Inspection Dialog */}
+      <Dialog
         open={Boolean(inspectAudit)}
         onOpenChange={(open) => {
           if (!open) setInspectAudit(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
               <FileClock className="size-4 text-muted-foreground" />
               <span>审计日志详情</span>
-            </SheetTitle>
-          </SheetHeader>
+            </DialogTitle>
+          </DialogHeader>
 
           {inspectAudit ? (
-            <div className="flex flex-col gap-4 px-6 pb-6 text-xs">
+            <div className="flex flex-col gap-4 text-xs">
               <div className="grid grid-cols-2 gap-3 rounded-lg bg-muted/45 p-3">
                 <div className="col-span-2">
                   <div className="text-muted-foreground">操作</div>
@@ -1112,8 +1111,8 @@ export default function AdminOperationsPage() {
               </div>
             </div>
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       {/* Budget Month Resolution Dialog */}
       <Dialog open={budgetDialogOpen} onOpenChange={setBudgetDialogOpen}>

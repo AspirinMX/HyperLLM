@@ -28,12 +28,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -370,16 +370,13 @@ export default function AdminModelsPage() {
         </div>
       ) : null}
 
-      {/* Create Model Sheet */}
-      <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>新建虚拟模型</SheetTitle>
-          </SheetHeader>
-          <form
-            onSubmit={handleCreate}
-            className="flex flex-1 flex-col gap-4 px-6 pb-6"
-          >
+      {/* Create Model Dialog */}
+      <Dialog open={sheetOpen} onOpenChange={setSheetOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>新建虚拟模型</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreate} className="flex flex-col gap-4">
             <ApiErrorAlert error={formError} />
 
             <div className="grid grid-cols-2 gap-3">
@@ -617,17 +614,24 @@ export default function AdminModelsPage() {
               </div>
             </div>
 
-            <SheetFooter className="px-0 pt-2">
-              <Button type="submit" disabled={saving} className="w-full">
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setSheetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={saving}>
                 {saving ? (
                   <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
                 ) : null}
                 <span>创建模型</span>
               </Button>
-            </SheetFooter>
+            </DialogFooter>
           </form>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
