@@ -14,6 +14,12 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Mono;
+import reactor.netty.channel.AbortedException;
+
+import java.io.IOException;
+import java.nio.channels.ClosedChannelException;
+import java.util.Locale;
 
 @Slf4j
 @RestControllerAdvice
@@ -23,7 +29,12 @@ public class GatewayExceptionHandler {
     private final ProtocolErrorFormatter errorFormatter;
 
     @ExceptionHandler(HyperLlmException.class)
-    public ResponseEntity<String> handleHyperLlm(HyperLlmException ex, ServerWebExchange exchange) {
+    public Mono<ResponseEntity<String>> handleHyperLlm(HyperLlmException ex, ServerWebExchange exchange) {
+        if (exchange.getResponse().isCommitted()) {
+            log.debug("Ignoring HyperLlmException after response committed on {}: {}",
+                    exchange.getRequest().getURI().getPath(), ex.getMessage());
+            return Mono.empty();
+        }
         ProtocolKind kind = resolveProtocol(exchange);
         String body = errorFormatter.formatErrorJson(kind, ex.getErrorCode(), ex.getMessage());
         var response = ResponseEntity.status(ex.getErrorCode().httpStatus())
@@ -31,11 +42,16 @@ public class GatewayExceptionHandler {
         if (ex instanceof BillingAdmissionException admission) {
             response.header(HttpHeaders.RETRY_AFTER, Long.toString(admission.getRetryAfterSeconds()));
         }
-        return response.body(body);
+        return Mono.just(response.body(body));
     }
 
     @ExceptionHandler(ResponseStatusException.class)
-    public ResponseEntity<String> handleResponseStatus(ResponseStatusException ex, ServerWebExchange exchange) {
+    public Mono<ResponseEntity<String>> handleResponseStatus(ResponseStatusException ex, ServerWebExchange exchange) {
+        if (exchange.getResponse().isCommitted()) {
+            log.debug("Ignoring ResponseStatusException after response committed on {}: {}",
+                    exchange.getRequest().getURI().getPath(), ex.getMessage());
+            return Mono.empty();
+        }
         ProtocolKind kind = resolveProtocol(exchange);
         int status = ex.getStatusCode().value();
         ErrorCode mapped = switch (status) {
@@ -50,19 +66,52 @@ public class GatewayExceptionHandler {
         String message = ex.getReason() != null && !ex.getReason().isBlank()
                 ? ex.getReason() : ex.getMessage();
         String body = errorFormatter.formatErrorJson(kind, mapped, message);
-        return ResponseEntity.status(status)
+        return Mono.just(ResponseEntity.status(status)
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(body);
+                .body(body));
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<String> handleUnexpected(Exception ex, ServerWebExchange exchange) {
+    public Mono<ResponseEntity<String>> handleUnexpected(Exception ex, ServerWebExchange exchange) {
+        if (isClientDisconnect(ex)) {
+            log.debug("Client disconnected mid-request on {}: {}",
+                    exchange.getRequest().getURI().getPath(), ex.getMessage());
+            return Mono.empty();
+        }
+        if (exchange.getResponse().isCommitted()) {
+            log.warn("Error after response already committed on {}: {}",
+                    exchange.getRequest().getURI().getPath(), ex.toString());
+            return Mono.empty();
+        }
         log.error("Unhandled gateway exception", ex);
         ProtocolKind kind = resolveProtocol(exchange);
         String body = errorFormatter.formatErrorJson(kind, ErrorCode.UPSTREAM_ERROR, "Internal gateway error");
-        return ResponseEntity.internalServerError()
+        return Mono.just(ResponseEntity.internalServerError()
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(body);
+                .body(body));
+    }
+
+    static boolean isClientDisconnect(Throwable ex) {
+        Throwable cursor = ex;
+        int depth = 0;
+        while (cursor != null && depth++ < 16) {
+            if (cursor instanceof AbortedException || cursor instanceof ClosedChannelException) {
+                return true;
+            }
+            if (cursor instanceof IOException) {
+                String msg = cursor.getMessage();
+                if (msg != null) {
+                    String lower = msg.toLowerCase(Locale.ROOT);
+                    if (lower.contains("broken pipe")
+                            || lower.contains("connection reset")
+                            || lower.contains("connection prematurely closed")) {
+                        return true;
+                    }
+                }
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
     }
 
     private static ProtocolKind resolveProtocol(ServerWebExchange exchange) {
