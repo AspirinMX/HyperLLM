@@ -83,6 +83,8 @@ public class GatewayProperties {
         private int safetyFactorBps = 11500;
         private int defaultOutputTokens = 8192;
         private int lazyReclaimBatch = 3;
+        /** Minimum interval between hot-path lazy reclaim probes on this gateway instance. */
+        private long lazyReclaimMinIntervalMs = 1_000;
         private long packAvailabilityTtlSeconds = 300;
         /** How long a project month survives without a touch; long enough to outlive the month. */
         private long budgetTtlDays = 40;

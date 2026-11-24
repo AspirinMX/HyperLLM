@@ -111,7 +111,7 @@ local from = nowSec - window + 1
 
 -- Evicts buckets that left the window, then sums what remains. The eviction happens before the
 -- limit check and only removes data that can no longer contribute, so a rejection changes no usage.
-local function windowState(zset, counts, tokens)
+local function windowState(zset, counts, tokens, readTokens)
     local expired = redis.call('ZRANGEBYSCORE', zset, '-inf', from - 1)
     if #expired > 0 then
         redis.call('ZREM', zset, unpack(expired))
@@ -127,33 +127,41 @@ local function windowState(zset, counts, tokens)
     local requests, used = 0, 0
     if #fields > 0 then
         local countValues = redis.call('HMGET', counts, unpack(fields))
-        local tokenValues = redis.call('HMGET', tokens, unpack(fields))
+        local tokenValues = readTokens and redis.call('HMGET', tokens, unpack(fields)) or nil
         for i = 1, #fields do
             requests = requests + (tonumber(countValues[i]) or 0)
-            used = used + (tonumber(tokenValues[i]) or 0)
+            if tokenValues then
+                used = used + (tonumber(tokenValues[i]) or 0)
+            end
         end
     end
     return requests, used
 end
 
 local estimated = math.max(0, tonumber(ARGV[23]) or 0)
-local keyRequests, keyTokens = windowState(KEYS[5], KEYS[6], KEYS[7])
-local projectRequests, projectTokens = windowState(KEYS[8], KEYS[9], KEYS[10])
 local keyRpmLimit = tonumber(ARGV[13]) or 0
 local projectRpmLimit = tonumber(ARGV[14]) or 0
 local keyTpmLimit = tonumber(ARGV[21]) or 0
 local projectTpmLimit = tonumber(ARGV[22]) or 0
-if keyRpmLimit > 0 and keyRequests + 1 > keyRpmLimit then
-    return 'RATE_LIMIT'
+local trackKeyWindow = keyRpmLimit > 0 or keyTpmLimit > 0
+local trackProjectWindow = projectRpmLimit > 0 or projectTpmLimit > 0
+if trackKeyWindow then
+    local keyRequests, keyTokens = windowState(KEYS[5], KEYS[6], KEYS[7], keyTpmLimit > 0)
+    if keyRpmLimit > 0 and keyRequests + 1 > keyRpmLimit then
+        return 'RATE_LIMIT'
+    end
+    if keyTpmLimit > 0 and keyTokens + estimated > keyTpmLimit then
+        return 'RATE_LIMIT'
+    end
 end
-if projectRpmLimit > 0 and projectRequests + 1 > projectRpmLimit then
-    return 'RATE_LIMIT'
-end
-if keyTpmLimit > 0 and keyTokens + estimated > keyTpmLimit then
-    return 'RATE_LIMIT'
-end
-if projectTpmLimit > 0 and projectTokens + estimated > projectTpmLimit then
-    return 'RATE_LIMIT'
+if trackProjectWindow then
+    local projectRequests, projectTokens = windowState(KEYS[8], KEYS[9], KEYS[10], projectTpmLimit > 0)
+    if projectRpmLimit > 0 and projectRequests + 1 > projectRpmLimit then
+        return 'RATE_LIMIT'
+    end
+    if projectTpmLimit > 0 and projectTokens + estimated > projectTpmLimit then
+        return 'RATE_LIMIT'
+    end
 end
 
 local budgetMonth = ARGV[25] or ''
@@ -201,18 +209,30 @@ for i = 1, 3 do
 end
 
 local windowTtl = (window + 60) * 1000
-local function admitWindow(zset, counts, tokens)
+local function admitWindow(zset, counts, tokens, trackTokens)
     redis.call('ZADD', zset, nowSec, nowSec)
     redis.call('HINCRBY', counts, nowSec, 1)
-    if estimated > 0 then
-        redis.call('HINCRBY', tokens, nowSec, estimated)
-    end
     redis.call('PEXPIRE', zset, windowTtl)
     redis.call('PEXPIRE', counts, windowTtl)
-    redis.call('PEXPIRE', tokens, windowTtl)
+    if trackTokens and estimated > 0 then
+        redis.call('HINCRBY', tokens, nowSec, estimated)
+        redis.call('PEXPIRE', tokens, windowTtl)
+    end
 end
-admitWindow(KEYS[5], KEYS[6], KEYS[7])
-admitWindow(KEYS[8], KEYS[9], KEYS[10])
+if trackKeyWindow then
+    admitWindow(KEYS[5], KEYS[6], KEYS[7], keyTpmLimit > 0)
+end
+if trackProjectWindow then
+    admitWindow(KEYS[8], KEYS[9], KEYS[10], projectTpmLimit > 0)
+end
+
+local trackedTokenKeys = {}
+if keyTpmLimit > 0 then
+    table.insert(trackedTokenKeys, KEYS[7])
+end
+if projectTpmLimit > 0 then
+    table.insert(trackedTokenKeys, KEYS[10])
+end
 
 local holdId = ARGV[1]
 local ttlMs = tonumber(ARGV[3])
@@ -227,7 +247,7 @@ redis.call('HSET', KEYS[3],
         'fallback_legs', ARGV[19],
         'fallback_detail', ARGV[20],
         'concurrency_keys', table.concat(acquired, '|'),
-        'rate_tokens', KEYS[7] .. '|' .. KEYS[10],
+        'rate_tokens', table.concat(trackedTokenKeys, '|'),
         'rate_second', tostring(nowSec),
         'rate_estimate', tostring(estimated),
         'served', '0',

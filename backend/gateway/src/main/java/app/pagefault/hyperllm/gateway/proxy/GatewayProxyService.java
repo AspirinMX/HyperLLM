@@ -78,6 +78,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -139,6 +140,7 @@ public class GatewayProxyService {
     private final app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService;
     private final ObjectMapper objectMapper;
     private final TokenEstimator tokenEstimator;
+    private final AtomicLong nextLazyReclaimNanos = new AtomicLong(0L);
 
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
         String rawToken = extractToken(exchange.getRequest(), ProtocolKind.OPENAI_CHAT);
@@ -334,11 +336,14 @@ public class GatewayProxyService {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
         AtomicBoolean capacityReleased = new AtomicBoolean(false);
-        Runnable releaseCapacity = () -> {
-            if (capacityReleased.compareAndSet(false, true)) {
-                channelCapacity.release(candidate.channelId(), attemptId).subscribe();
-            }
-        };
+        boolean releaseChannelCapacity = channelCapacity.hasConcurrencyLimit(candidate);
+        Runnable releaseCapacity = releaseChannelCapacity
+                ? () -> {
+                    if (capacityReleased.compareAndSet(false, true)) {
+                        channelCapacity.release(candidate.channelId(), attemptId, candidate).subscribe();
+                    }
+                }
+                : () -> {};
 
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
@@ -728,13 +733,30 @@ public class GatewayProxyService {
                     long floorCost = CostMath.discountedCostMicros(CostMath.rawCostMicros(
                             promptEstimate, 0L, 0L, 0L, 0L,
                             resolved.inputPriceMicros1m(), 0L, 0L, 0L, 0L), resolved.discountBps());
-                    return preHoldService.reclaimExpired(billing.getLazyReclaimBatch())
-                            .onErrorResume(ex -> Mono.just(0))
+                    return maybeLazyReclaim(billing)
                             .then(mirrorService.read(caller.orgId(), modelCode, true))
                             .flatMap(mirror -> admitWithEstimate(
                                     caller, modelCode, target, billable, mirror.snapshot(),
                                     requestId, promptEstimate, floorCost, resolved));
                 });
+    }
+
+    private Mono<Void> maybeLazyReclaim(GatewayProperties.Billing billing) {
+        int batch = billing.getLazyReclaimBatch();
+        if (batch <= 0) {
+            return Mono.empty();
+        }
+        long intervalMs = billing.getLazyReclaimMinIntervalMs();
+        if (intervalMs > 0L) {
+            long now = System.nanoTime();
+            long next = nextLazyReclaimNanos.get();
+            if (now < next || !nextLazyReclaimNanos.compareAndSet(next, now + TimeUnit.MILLISECONDS.toNanos(intervalMs))) {
+                return Mono.empty();
+            }
+        }
+        return preHoldService.reclaimExpired(batch)
+                .onErrorResume(ex -> Mono.just(0))
+                .then();
     }
 
     private Mono<PreHoldService.Lease> admitWithEstimate(

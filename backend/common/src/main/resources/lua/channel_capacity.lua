@@ -18,52 +18,61 @@ if ARGV[9] == '1' then
     return 'RELEASED'
 end
 
+local trackWindow = rpmLimit > 0 or tpmLimit > 0
 local nowSec = math.floor(nowMs / 1000)
-local from = nowSec - windowSeconds + 1
-local expired = redis.call('ZRANGEBYSCORE', window, '-inf', from - 1)
-if #expired > 0 then
-    redis.call('ZREM', window, unpack(expired))
-    for _, member in ipairs(expired) do
-        redis.call('HDEL', counts, member)
-        redis.call('HDEL', tokens, member)
+
+if trackWindow then
+    local from = nowSec - windowSeconds + 1
+    local expired = redis.call('ZRANGEBYSCORE', window, '-inf', from - 1)
+    if #expired > 0 then
+        redis.call('ZREM', window, unpack(expired))
+        for _, member in ipairs(expired) do
+            redis.call('HDEL', counts, member)
+            redis.call('HDEL', tokens, member)
+        end
+    end
+
+    local fields, requests, used = {}, 0, 0
+    for second = from, nowSec do
+        fields[#fields + 1] = tostring(second)
+    end
+    if #fields > 0 then
+        local countValues = redis.call('HMGET', counts, unpack(fields))
+        local tokenValues = tpmLimit > 0 and redis.call('HMGET', tokens, unpack(fields)) or nil
+        for i = 1, #fields do
+            requests = requests + (tonumber(countValues[i]) or 0)
+            if tokenValues then
+                used = used + (tonumber(tokenValues[i]) or 0)
+            end
+        end
+    end
+
+    if rpmLimit > 0 and requests + 1 > rpmLimit then
+        return 'RATE_LIMIT'
+    end
+    if tpmLimit > 0 and used + estimated > tpmLimit then
+        return 'RATE_LIMIT'
     end
 end
 
-local fields, requests, used = {}, 0, 0
-for second = from, nowSec do
-    fields[#fields + 1] = tostring(second)
-end
-if #fields > 0 then
-    local countValues = redis.call('HMGET', counts, unpack(fields))
-    local tokenValues = redis.call('HMGET', tokens, unpack(fields))
-    for i = 1, #fields do
-        requests = requests + (tonumber(countValues[i]) or 0)
-        used = used + (tonumber(tokenValues[i]) or 0)
-    end
-end
-
-if rpmLimit > 0 and requests + 1 > rpmLimit then
-    return 'RATE_LIMIT'
-end
-if tpmLimit > 0 and used + estimated > tpmLimit then
-    return 'RATE_LIMIT'
-end
 if concurrencyLimit > 0 then
     local current = redis.call('INCR', concurrency)
     if current > concurrencyLimit then
         redis.call('DECR', concurrency)
         return 'CONCURRENCY_LIMIT'
     end
+    redis.call('PEXPIRE', concurrency, ttlMs)
 end
-redis.call('PEXPIRE', concurrency, ttlMs)
 
-redis.call('ZADD', window, nowSec, nowSec)
-redis.call('HINCRBY', counts, nowSec, 1)
-if estimated > 0 then
-    redis.call('HINCRBY', tokens, nowSec, estimated)
+if trackWindow then
+    local windowTtl = (windowSeconds + 60) * 1000
+    redis.call('ZADD', window, nowSec, nowSec)
+    redis.call('HINCRBY', counts, nowSec, 1)
+    redis.call('PEXPIRE', window, windowTtl)
+    redis.call('PEXPIRE', counts, windowTtl)
+    if tpmLimit > 0 and estimated > 0 then
+        redis.call('HINCRBY', tokens, nowSec, estimated)
+        redis.call('PEXPIRE', tokens, windowTtl)
+    end
 end
-local windowTtl = (windowSeconds + 60) * 1000
-redis.call('PEXPIRE', window, windowTtl)
-redis.call('PEXPIRE', counts, windowTtl)
-redis.call('PEXPIRE', tokens, windowTtl)
 return 'OK'

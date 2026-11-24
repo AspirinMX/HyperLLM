@@ -25,8 +25,24 @@ public class ChannelCapacityService {
     private final ReactiveStringRedisTemplate redis;
     private final GatewayProperties properties;
 
+    public boolean hasLimits(GatewayChannelCandidate candidate) {
+        return candidate != null && (
+                (candidate.channelRpmLimit() != null && candidate.channelRpmLimit() > 0)
+                        || (candidate.channelTpmLimit() != null && candidate.channelTpmLimit() > 0)
+                        || (candidate.channelMaxConcurrency() != null && candidate.channelMaxConcurrency() > 0));
+    }
+
+    public boolean hasConcurrencyLimit(GatewayChannelCandidate candidate) {
+        return candidate != null
+                && candidate.channelMaxConcurrency() != null
+                && candidate.channelMaxConcurrency() > 0;
+    }
+
     public Mono<String> acquire(UUID channelId, String attemptId, GatewayChannelCandidate candidate,
                                 long estimatedTokens) {
+        if (!hasLimits(candidate)) {
+            return Mono.just("OK");
+        }
         long ttlMillis = Duration.ofSeconds(properties.getBilling().getLeaseTtlSeconds()).toMillis();
         List<String> keys = List.of(
                 GatewayRedisKeys.channelRateWindow(channelId),
@@ -49,6 +65,13 @@ public class ChannelCapacityService {
                 GatewayRedisKeys.channelConcurrency(channelId));
         List<String> args = List.of(attemptId, "0", "0", "0", "0", "0", "0", "60", "1");
         return redis.execute(CAPACITY, keys, args).then();
+    }
+
+    public Mono<Void> release(UUID channelId, String attemptId, GatewayChannelCandidate candidate) {
+        if (!hasConcurrencyLimit(candidate)) {
+            return Mono.empty();
+        }
+        return release(channelId, attemptId);
     }
 
     private static String limit(Integer value) {
