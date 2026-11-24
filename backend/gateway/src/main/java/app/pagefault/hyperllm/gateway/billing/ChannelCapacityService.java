@@ -1,10 +1,10 @@
 package app.pagefault.hyperllm.gateway.billing;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.cache.LuaScripts;
 import app.pagefault.hyperllm.domain.model.routing.GatewayChannelCandidate;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -20,7 +20,7 @@ import java.util.UUID;
 public class ChannelCapacityService {
 
     private static final RedisScript<String> CAPACITY =
-            RedisScript.of(new ClassPathResource("lua/channel_capacity.lua"), String.class);
+            LuaScripts.loadClasspath("lua/channel_capacity.lua", String.class);
 
     private final ReactiveStringRedisTemplate redis;
     private final GatewayProperties properties;

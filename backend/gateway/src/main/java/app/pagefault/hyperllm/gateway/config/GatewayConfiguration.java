@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.gateway.config;
 
+import app.pagefault.hyperllm.common.cache.LuaScripts;
 import app.pagefault.hyperllm.common.crypto.AesGcmCipher;
 import app.pagefault.hyperllm.protocol.adapter.ProtocolRegistry;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
@@ -13,7 +14,6 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.script.RedisScript;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
@@ -81,39 +81,39 @@ public class GatewayConfiguration {
     @SuppressWarnings("rawtypes")
     @Bean(name = "preholdSnapshotLuaScript")
     public RedisScript<java.util.List> preholdSnapshotLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_snapshot.lua"), java.util.List.class);
+        return LuaScripts.loadClasspath("lua/prehold_snapshot.lua", java.util.List.class);
     }
 
     @SuppressWarnings("rawtypes")
     @Bean(name = "loadTenantLuaScript")
     public RedisScript<java.util.List> loadTenantLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/load_tenant.lua"), java.util.List.class);
+        return LuaScripts.loadClasspath("lua/load_tenant.lua", java.util.List.class);
     }
 
     @Bean(name = "preholdAdmitLuaScript")
     public RedisScript<String> preholdAdmitLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_admit.lua"), String.class);
+        return LuaScripts.loadClasspath("lua/prehold_admit.lua", String.class);
     }
 
     @Bean(name = "preholdRenewLuaScript")
     public RedisScript<Long> preholdRenewLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_renew.lua"), Long.class);
+        return LuaScripts.loadClasspath("lua/prehold_renew.lua", Long.class);
     }
 
     @SuppressWarnings("rawtypes")
     @Bean(name = "preholdSettleLuaScript")
     public RedisScript<java.util.List> preholdSettleLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_settle.lua"), java.util.List.class);
+        return LuaScripts.loadClasspath("lua/prehold_settle.lua", java.util.List.class);
     }
 
     @Bean(name = "preholdServedLuaScript")
     public RedisScript<Long> preholdServedLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_mark_served.lua"), Long.class);
+        return LuaScripts.loadClasspath("lua/prehold_mark_served.lua", Long.class);
     }
 
     @Bean(name = "budgetInitLuaScript")
     public RedisScript<String> budgetInitLuaScript() {
-        return RedisScript.of(new ClassPathResource("lua/budget_init.lua"), String.class);
+        return LuaScripts.loadClasspath("lua/budget_init.lua", String.class);
     }
 
 }

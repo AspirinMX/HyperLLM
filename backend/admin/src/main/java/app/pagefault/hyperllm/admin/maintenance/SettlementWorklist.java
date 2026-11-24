@@ -1,8 +1,8 @@
 package app.pagefault.hyperllm.admin.maintenance;
 
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.cache.LuaScripts;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -18,12 +18,12 @@ import java.util.UUID;
 public class SettlementWorklist {
 
     private static final RedisScript<Long> UPDATE =
-            RedisScript.of(new ClassPathResource("lua/settlement_worklist.lua"), Long.class);
+            LuaScripts.loadClasspath("lua/settlement_worklist.lua", Long.class);
     private static final RedisScript<Long> CHECK_PROOF =
-            RedisScript.of(new ClassPathResource("lua/settlement_check_proof.lua"), Long.class);
+            LuaScripts.loadClasspath("lua/settlement_check_proof.lua", Long.class);
 
-    private static final RedisScript<Long> FENCE_SNAPSHOT = RedisScript.of(new ClassPathResource(
-            "lua/settlement_fence_snapshot.lua"), Long.class);
+    private static final RedisScript<Long> FENCE_SNAPSHOT =
+            LuaScripts.loadClasspath("lua/settlement_fence_snapshot.lua", Long.class);
 
     private final StringRedisTemplate redis;
 

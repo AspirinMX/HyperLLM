@@ -2,11 +2,11 @@ package app.pagefault.hyperllm.admin.consumer;
 
 import app.pagefault.hyperllm.common.billing.LegacyBonusBatch;
 import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
+import app.pagefault.hyperllm.common.cache.LuaScripts;
 import app.pagefault.hyperllm.common.messaging.BillingMoneyEvent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -20,7 +20,7 @@ import java.util.UUID;
 public class WalletCreditProjection {
 
     private static final RedisScript<String> CREDIT =
-            RedisScript.of(new ClassPathResource("lua/wallet_credit.lua"), String.class);
+            LuaScripts.loadClasspath("lua/wallet_credit.lua", String.class);
 
     private final StringRedisTemplate redis;
     private final ObjectMapper mapper;

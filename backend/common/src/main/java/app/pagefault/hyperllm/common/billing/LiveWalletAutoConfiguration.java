@@ -1,10 +1,10 @@
 package app.pagefault.hyperllm.common.billing;
 
+import app.pagefault.hyperllm.common.cache.LuaScripts;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 
@@ -24,7 +24,7 @@ public class LiveWalletAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "walletSnapshotScript")
     public RedisScript<List> walletSnapshotScript() {
-        return RedisScript.of(new ClassPathResource("lua/prehold_snapshot.lua"), List.class);
+        return LuaScripts.loadClasspath("lua/prehold_snapshot.lua", List.class);
     }
 
     /** Skipped wherever there is no Redis client, so a module without one still boots. */
