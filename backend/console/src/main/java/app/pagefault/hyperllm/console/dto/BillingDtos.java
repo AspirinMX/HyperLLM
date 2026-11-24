@@ -1,12 +1,16 @@
 package app.pagefault.hyperllm.console.dto;
 
 import app.pagefault.hyperllm.domain.model.enums.BillingMode;
+import app.pagefault.hyperllm.domain.model.enums.EntitlementStatus;
+import app.pagefault.hyperllm.domain.model.enums.GrantSource;
 import app.pagefault.hyperllm.domain.model.enums.LedgerType;
 import app.pagefault.hyperllm.domain.model.enums.ModelCapability;
+import app.pagefault.hyperllm.domain.model.enums.PackUnitType;
 import app.pagefault.hyperllm.domain.model.enums.ProtocolFamily;
 import jakarta.validation.constraints.NotNull;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 public final class BillingDtos {
@@ -92,6 +96,31 @@ public final class BillingDtos {
             String token,
             int ttlSeconds,
             OffsetDateTime expiresAt
+    ) {
+    }
+
+    public record ResourcePackDto(
+            UUID id,
+            String packName,
+            PackUnitType unitType,
+            List<String> applicableModels,
+            long totalUnits,
+            long remainingUnits,
+            OffsetDateTime expiresAt,
+            EntitlementStatus status,
+            OffsetDateTime createdAt
+    ) {
+    }
+
+    public record BonusGrantDto(
+            UUID id,
+            GrantSource grantSource,
+            List<String> applicableModels,
+            long initialMicros,
+            long remainingMicros,
+            OffsetDateTime expiresAt,
+            EntitlementStatus status,
+            OffsetDateTime createdAt
     ) {
     }
 }

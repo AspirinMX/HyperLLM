@@ -9,17 +9,23 @@ import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
 import app.pagefault.hyperllm.console.config.ConsoleCacheSyncService;
 import app.pagefault.hyperllm.console.dto.BillingDtos.ActivePricingDto;
+import app.pagefault.hyperllm.console.dto.BillingDtos.BonusGrantDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.EphemeralTokenRequest;
 import app.pagefault.hyperllm.console.dto.BillingDtos.EphemeralTokenResponse;
 import app.pagefault.hyperllm.console.dto.BillingDtos.PublicModelCatalogDto;
+import app.pagefault.hyperllm.console.dto.BillingDtos.ResourcePackDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.WalletDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.WalletLedgerDto;
+import app.pagefault.hyperllm.domain.model.billing.BonusGrant;
+import app.pagefault.hyperllm.domain.model.billing.ResourcePack;
 import app.pagefault.hyperllm.domain.model.billing.Wallet;
 import app.pagefault.hyperllm.domain.model.billing.WalletLedgerEntry;
 import app.pagefault.hyperllm.domain.model.enums.OrgRole;
 import app.pagefault.hyperllm.domain.model.routing.PricingRule;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
+import app.pagefault.hyperllm.domain.repository.BonusGrantRepository;
 import app.pagefault.hyperllm.domain.repository.PricingRuleRepository;
+import app.pagefault.hyperllm.domain.repository.ResourcePackRepository;
 import app.pagefault.hyperllm.domain.repository.VirtualModelRepository;
 import app.pagefault.hyperllm.domain.repository.WalletLedgerRepository;
 import app.pagefault.hyperllm.domain.repository.WalletRepository;
@@ -44,6 +50,8 @@ public class ConsoleCatalogAndWalletService {
     private final PricingRuleRepository pricingRuleRepository;
     private final WalletRepository walletRepository;
     private final WalletLedgerRepository walletLedgerRepository;
+    private final ResourcePackRepository resourcePackRepository;
+    private final BonusGrantRepository bonusGrantRepository;
     private final app.pagefault.hyperllm.common.billing.LiveWalletReader liveWalletReader;
 
     public List<PublicModelCatalogDto> listPublicModels() {
@@ -86,6 +94,30 @@ public class ConsoleCatalogAndWalletService {
                         e.cashDeltaMicros(), e.bonusDeltaMicros(), e.packDeltaUnits(),
                         e.cashBalanceAfterMicros(), e.bonusBalanceAfterMicros(),
                         e.refRequestId(), e.description(), e.createdAt()
+                )).toList(),
+                page.page(), page.pageSize(), page.total()
+        );
+    }
+
+    public PageResponse<ResourcePackDto> listResourcePacks(UUID orgId, UUID userId, PageQuery pageQuery) {
+        rbac.requireOrgRole(orgId, userId, OrgRole.OWNER, OrgRole.ADMIN, OrgRole.BILLING);
+        PageResponse<ResourcePack> page = resourcePackRepository.listByOrg(orgId, pageQuery);
+        return new PageResponse<>(
+                page.items().stream().map(p -> new ResourcePackDto(
+                        p.id(), p.packName(), p.unitType(), p.applicableModels(),
+                        p.totalUnits(), p.remainingUnits(), p.expiresAt(), p.status(), p.createdAt()
+                )).toList(),
+                page.page(), page.pageSize(), page.total()
+        );
+    }
+
+    public PageResponse<BonusGrantDto> listBonusGrants(UUID orgId, UUID userId, PageQuery pageQuery) {
+        rbac.requireOrgRole(orgId, userId, OrgRole.OWNER, OrgRole.ADMIN, OrgRole.BILLING);
+        PageResponse<BonusGrant> page = bonusGrantRepository.listByOrg(orgId, pageQuery);
+        return new PageResponse<>(
+                page.items().stream().map(g -> new BonusGrantDto(
+                        g.id(), g.grantSource(), g.applicableModels(),
+                        g.initialMicros(), g.remainingMicros(), g.expiresAt(), g.status(), g.createdAt()
                 )).toList(),
                 page.page(), page.pageSize(), page.total()
         );

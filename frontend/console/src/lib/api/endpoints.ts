@@ -3,6 +3,7 @@ import type {
   AlertRuleDto,
   ApiKeyDto,
   AuthTokenResponse,
+  BonusGrantDto,
   CreateAlertRuleRequest,
   CreateApiKeyRequest,
   CreateEndpointRequest,
@@ -27,6 +28,7 @@ import type {
   PublicModelCatalogDto,
   RedemptionDto,
   RegisterRequest,
+  ResourcePackDto,
   SendEmailCodeRequest,
   SendEmailCodeResponse,
   UpdateApiKeyRequest,
@@ -259,6 +261,18 @@ export const billingApi = {
     return apiRequest<PackSkuDto[]>(`/api/v1/orgs/${orgId}/resource-pack-skus`, {
       signal,
     });
+  },
+  listResourcePacks(orgId: string, page = 1, pageSize = 20, signal?: AbortSignal) {
+    return apiRequest<PageResponse<ResourcePackDto>>(
+      `/api/v1/orgs/${orgId}/resource-packs${buildQuery({ page, pageSize })}`,
+      { signal },
+    );
+  },
+  listBonusGrants(orgId: string, page = 1, pageSize = 20, signal?: AbortSignal) {
+    return apiRequest<PageResponse<BonusGrantDto>>(
+      `/api/v1/orgs/${orgId}/bonus-grants${buildQuery({ page, pageSize })}`,
+      { signal },
+    );
   },
   redeemVoucher(orgId: string, code: string) {
     return apiRequest<RedemptionDto>(`/api/v1/orgs/${orgId}/redemptions`, {

@@ -1,6 +1,8 @@
 import type {
   AlertType,
   ApiKeyStatus,
+  EntitlementStatus,
+  GrantSource,
   LedgerType,
   ModelCapability,
   NotificationChannelType,
@@ -102,6 +104,20 @@ export const PAYMENT_CHANNEL_LABEL: Record<PaymentChannel, string> = {
 export const PACK_UNIT_LABEL: Record<PackUnitType, string> = {
   TOKENS: "Token",
   CALLS: "次调用",
+};
+
+export const ENTITLEMENT_STATUS_LABEL: Record<EntitlementStatus, string> = {
+  ACTIVE: "生效中",
+  EXHAUSTED: "已耗尽",
+  EXPIRED: "已过期",
+  REVOKED: "已撤销",
+};
+
+export const GRANT_SOURCE_LABEL: Record<GrantSource, string> = {
+  SIGNUP: "注册体验金",
+  REDEMPTION: "兑换码核销",
+  ADMIN_GRANT: "运营发放",
+  CAMPAIGN: "营销活动",
 };
 
 export const ALERT_TYPE_LABEL: Record<AlertType, string> = {

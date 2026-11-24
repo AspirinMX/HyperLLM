@@ -2,9 +2,11 @@ package app.pagefault.hyperllm.console.controller;
 
 import app.pagefault.hyperllm.common.page.PageQuery;
 import app.pagefault.hyperllm.common.page.PageResponse;
+import app.pagefault.hyperllm.console.dto.BillingDtos.BonusGrantDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.EphemeralTokenRequest;
 import app.pagefault.hyperllm.console.dto.BillingDtos.EphemeralTokenResponse;
 import app.pagefault.hyperllm.console.dto.BillingDtos.PublicModelCatalogDto;
+import app.pagefault.hyperllm.console.dto.BillingDtos.ResourcePackDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.WalletDto;
 import app.pagefault.hyperllm.console.dto.BillingDtos.WalletLedgerDto;
 import app.pagefault.hyperllm.console.service.ConsoleCatalogAndWalletService;
@@ -50,6 +52,30 @@ public class ConsoleCatalogAndWalletController {
             HttpServletRequest request
     ) {
         return service.listWalletLedger(
+                orgId, ConsoleRequestContext.requirePrincipal(request).userId(), PageQuery.of(page, pageSize)
+        );
+    }
+
+    @GetMapping("/orgs/{orgId}/resource-packs")
+    public PageResponse<ResourcePackDto> listResourcePacks(
+            @PathVariable UUID orgId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int pageSize,
+            HttpServletRequest request
+    ) {
+        return service.listResourcePacks(
+                orgId, ConsoleRequestContext.requirePrincipal(request).userId(), PageQuery.of(page, pageSize)
+        );
+    }
+
+    @GetMapping("/orgs/{orgId}/bonus-grants")
+    public PageResponse<BonusGrantDto> listBonusGrants(
+            @PathVariable UUID orgId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int pageSize,
+            HttpServletRequest request
+    ) {
+        return service.listBonusGrants(
                 orgId, ConsoleRequestContext.requirePrincipal(request).userId(), PageQuery.of(page, pageSize)
         );
     }

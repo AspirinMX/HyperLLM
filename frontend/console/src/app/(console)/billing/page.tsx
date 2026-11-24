@@ -57,6 +57,7 @@ import { useAsyncData } from "@/hooks/use-async-data";
 import { billingApi } from "@/lib/api/endpoints";
 import { createIdempotencyKey } from "@/lib/api/client";
 import type {
+  EntitlementStatus,
   OrderStatus,
   PackSkuDto,
   PaymentChannel,
@@ -67,6 +68,7 @@ import type {
 import {
   formatCompactNumber,
   formatDateTime,
+  formatFullDateTime,
   formatMicroUsd,
   formatMinorCurrency,
   parseMajorToMinor,
@@ -74,7 +76,9 @@ import {
 import {
   canPayOrRedeem,
   canViewWallet,
+  ENTITLEMENT_STATUS_LABEL,
   FULFILLMENT_STATUS_LABEL,
+  GRANT_SOURCE_LABEL,
   LEDGER_TYPE_LABEL,
   ORDER_STATUS_LABEL,
   ORDER_TYPE_LABEL,
@@ -93,6 +97,13 @@ const ORDER_TONE: Record<OrderStatus, StatusTone> = {
   FAILED: "danger",
   CLOSED: "muted",
   REFUNDED: "info",
+};
+
+const ENTITLEMENT_TONE: Record<EntitlementStatus, StatusTone> = {
+  ACTIVE: "success",
+  EXHAUSTED: "muted",
+  EXPIRED: "warning",
+  REVOKED: "danger",
 };
 
 function submitFormInstruction(instruction: PaymentInstructionDto) {
@@ -121,6 +132,8 @@ export default function BillingPage() {
 
   const [ledgerPage, setLedgerPage] = useState(1);
   const [ordersPage, setOrdersPage] = useState(1);
+  const [packsPage, setPacksPage] = useState(1);
+  const [grantsPage, setGrantsPage] = useState(1);
 
   const walletState = useAsyncData(
     (signal) => billingApi.getWallet(orgId!, signal),
@@ -143,6 +156,18 @@ export default function BillingPage() {
   const skusState = useAsyncData(
     (signal) => billingApi.listPackSkus(orgId!, signal),
     [orgId],
+    Boolean(orgId) && allowedView,
+  );
+
+  const ownedPacksState = useAsyncData(
+    (signal) => billingApi.listResourcePacks(orgId!, packsPage, 10, signal),
+    [orgId, packsPage],
+    Boolean(orgId) && allowedView,
+  );
+
+  const bonusGrantsState = useAsyncData(
+    (signal) => billingApi.listBonusGrants(orgId!, grantsPage, 10, signal),
+    [orgId, grantsPage],
     Boolean(orgId) && allowedView,
   );
 
@@ -184,6 +209,8 @@ export default function BillingPage() {
             walletState.reload();
             ledgerState.reload();
             ordersState.reload();
+            ownedPacksState.reload();
+            bonusGrantsState.reload();
             void refreshWallet();
           }
         })
@@ -300,6 +327,7 @@ export default function BillingPage() {
       toast.success(`兑换成功，赠金 ${formatMicroUsd(res.amountMicros)} 即将入账`);
       walletState.reload();
       ledgerState.reload();
+      bonusGrantsState.reload();
       void refreshWallet();
     } catch (err) {
       setRedeemError(err);
@@ -342,6 +370,8 @@ export default function BillingPage() {
             walletState.reload();
             ledgerState.reload();
             ordersState.reload();
+            ownedPacksState.reload();
+            bonusGrantsState.reload();
             void refreshWallet();
           }}
         >
@@ -516,10 +546,259 @@ export default function BillingPage() {
       <Tabs defaultValue="ledger" className="gap-4">
         <TabsList>
           <TabsTrigger value="ledger">资金流水</TabsTrigger>
+          <TabsTrigger value="entitlements">已持有权益</TabsTrigger>
           <TabsTrigger value="orders">支付订单</TabsTrigger>
           <TabsTrigger value="packs">资源包商城</TabsTrigger>
           {allowedPay ? <TabsTrigger value="redeem">兑换码</TabsTrigger> : null}
         </TabsList>
+
+        {/* Tab: Owned Resource Packs & Bonus Grant Batches */}
+        <TabsContent value="entitlements" className="flex flex-col gap-5">
+          {/* Owned Resource Packs */}
+          <div className="squircle-md overflow-hidden rounded-xl border border-border bg-card">
+            <div className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Package className="size-4" />
+                <span>定向资源包余量</span>
+              </div>
+              <Badge variant="secondary" className="tabular-nums">
+                {ownedPacksState.data?.total ?? 0}
+              </Badge>
+            </div>
+            {ownedPacksState.loading ? (
+              <div className="flex flex-col gap-3 p-5">
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-9 w-full" />
+              </div>
+            ) : (ownedPacksState.data?.items ?? []).length === 0 ? (
+              <EmptyState
+                icon={<Package className="size-4" />}
+                title="暂无已购资源包"
+              />
+            ) : (
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/35 hover:bg-muted/35">
+                      <TableHead>资源包</TableHead>
+                      <TableHead>适用模型</TableHead>
+                      <TableHead className="w-48">余量进度</TableHead>
+                      <TableHead>到期时间</TableHead>
+                      <TableHead>状态</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(ownedPacksState.data?.items ?? []).map((pack) => {
+                      const used = Math.max(0, pack.totalUnits - pack.remainingUnits);
+                      return (
+                        <TableRow key={pack.id}>
+                          <TableCell>
+                            <div className="font-medium">{pack.packName}</div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {PACK_UNIT_LABEL[pack.unitType]}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {pack.applicableModels.map((m) => (
+                                <Badge key={m} variant="outline" className="font-mono text-[10px]">
+                                  {m}
+                                </Badge>
+                              ))}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col gap-1 text-xs tabular-nums">
+                              <span className="font-mono">
+                                剩 {formatCompactNumber(pack.remainingUnits)} / {formatCompactNumber(pack.totalUnits)}
+                              </span>
+                              <ProportionBar
+                                heightClass="h-1.5"
+                                total={Math.max(1, pack.totalUnits)}
+                                segments={[
+                                  {
+                                    key: "remaining",
+                                    label: "剩余",
+                                    value: pack.remainingUnits,
+                                    displayValue: formatCompactNumber(pack.remainingUnits),
+                                    colorClass: "bg-[var(--chart-2)]",
+                                  },
+                                  {
+                                    key: "used",
+                                    label: "已用",
+                                    value: used,
+                                    displayValue: formatCompactNumber(used),
+                                    colorClass: "bg-muted",
+                                  },
+                                ]}
+                              />
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground tabular-nums">
+                            {formatFullDateTime(pack.expiresAt)}
+                          </TableCell>
+                          <TableCell>
+                            <StatusDot
+                              tone={ENTITLEMENT_TONE[pack.status]}
+                              label={ENTITLEMENT_STATUS_LABEL[pack.status]}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+                {(ownedPacksState.data?.total ?? 0) > 10 ? (
+                  <div className="flex items-center justify-between border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+                    <span>第 {packsPage} 页</span>
+                    <div className="flex gap-1.5">
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={packsPage <= 1}
+                        onClick={() => setPacksPage((p) => Math.max(1, p - 1))}
+                      >
+                        上一页
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={packsPage * 10 >= (ownedPacksState.data?.total ?? 0)}
+                        onClick={() => setPacksPage((p) => p + 1)}
+                      >
+                        下一页
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+
+          {/* Bonus Grant Batches */}
+          <div className="squircle-md overflow-hidden rounded-xl border border-border bg-card">
+            <div className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Gift className="size-4" />
+                <span>赠金批次明细</span>
+              </div>
+              <Badge variant="secondary" className="tabular-nums">
+                {bonusGrantsState.data?.total ?? 0}
+              </Badge>
+            </div>
+            {bonusGrantsState.loading ? (
+              <div className="flex flex-col gap-3 p-5">
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-9 w-full" />
+              </div>
+            ) : (bonusGrantsState.data?.items ?? []).length === 0 ? (
+              <EmptyState
+                icon={<Gift className="size-4" />}
+                title="暂无赠金批次记录"
+              />
+            ) : (
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/35 hover:bg-muted/35">
+                      <TableHead>来源</TableHead>
+                      <TableHead>适用范围</TableHead>
+                      <TableHead className="w-48">余量进度</TableHead>
+                      <TableHead>到期时间</TableHead>
+                      <TableHead>状态</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(bonusGrantsState.data?.items ?? []).map((grant) => {
+                      const used = Math.max(0, grant.initialMicros - grant.remainingMicros);
+                      return (
+                        <TableRow key={grant.id}>
+                          <TableCell className="text-sm font-medium">
+                            {GRANT_SOURCE_LABEL[grant.grantSource]}
+                          </TableCell>
+                          <TableCell>
+                            {grant.applicableModels && grant.applicableModels.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {grant.applicableModels.map((m) => (
+                                  <Badge key={m} variant="outline" className="font-mono text-[10px]">
+                                    {m}
+                                  </Badge>
+                                ))}
+                              </div>
+                            ) : (
+                              <Badge variant="secondary" className="text-[11px]">
+                                全模型通用
+                              </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col gap-1 text-xs tabular-nums">
+                              <span className="font-mono">
+                                剩 {formatMicroUsd(grant.remainingMicros)} / {formatMicroUsd(grant.initialMicros)}
+                              </span>
+                              <ProportionBar
+                                heightClass="h-1.5"
+                                total={Math.max(1, grant.initialMicros)}
+                                segments={[
+                                  {
+                                    key: "remaining",
+                                    label: "剩余",
+                                    value: grant.remainingMicros,
+                                    displayValue: formatMicroUsd(grant.remainingMicros),
+                                    colorClass: "bg-[var(--chart-3)]",
+                                  },
+                                  {
+                                    key: "used",
+                                    label: "已用",
+                                    value: used,
+                                    displayValue: formatMicroUsd(used),
+                                    colorClass: "bg-muted",
+                                  },
+                                ]}
+                              />
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground tabular-nums">
+                            {grant.expiresAt ? formatFullDateTime(grant.expiresAt) : "永久有效"}
+                          </TableCell>
+                          <TableCell>
+                            <StatusDot
+                              tone={ENTITLEMENT_TONE[grant.status]}
+                              label={ENTITLEMENT_STATUS_LABEL[grant.status]}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+                {(bonusGrantsState.data?.total ?? 0) > 10 ? (
+                  <div className="flex items-center justify-between border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+                    <span>第 {grantsPage} 页</span>
+                    <div className="flex gap-1.5">
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={grantsPage <= 1}
+                        onClick={() => setGrantsPage((p) => Math.max(1, p - 1))}
+                      >
+                        上一页
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={grantsPage * 10 >= (bonusGrantsState.data?.total ?? 0)}
+                        onClick={() => setGrantsPage((p) => p + 1)}
+                      >
+                        下一页
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        </TabsContent>
 
         {/* Tab 1: Wallet Ledger */}
         <TabsContent value="ledger">

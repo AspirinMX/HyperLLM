@@ -32,6 +32,8 @@ export type OrderStatus = "PENDING" | "PAID" | "FAILED" | "CLOSED" | "REFUNDED";
 export type PaymentChannel = "STRIPE" | "ALIPAY" | "WECHAT_PAY";
 export type PackUnitType = "TOKENS" | "CALLS";
 export type PackSkuStatus = "DRAFT" | "ACTIVE" | "RETIRED";
+export type EntitlementStatus = "ACTIVE" | "EXHAUSTED" | "EXPIRED" | "REVOKED";
+export type GrantSource = "SIGNUP" | "REDEMPTION" | "ADMIN_GRANT" | "CAMPAIGN";
 export type AlertType = "LOW_BALANCE" | "PROJECT_SOFT_CAP" | "PROJECT_HARD_CAP";
 export type NotificationChannelType = "EMAIL" | "WEBHOOK";
 export type ToggleStatus = "ACTIVE" | "DISABLED";
@@ -363,6 +365,29 @@ export interface RedemptionDto {
   amountMicros: number;
   applicableModels: string[];
   expiresAt: string | null;
+}
+
+export interface ResourcePackDto {
+  id: string;
+  packName: string;
+  unitType: PackUnitType;
+  applicableModels: string[];
+  totalUnits: number;
+  remainingUnits: number;
+  expiresAt: string;
+  status: EntitlementStatus;
+  createdAt: string;
+}
+
+export interface BonusGrantDto {
+  id: string;
+  grantSource: GrantSource;
+  applicableModels: string[] | null;
+  initialMicros: number;
+  remainingMicros: number;
+  expiresAt: string | null;
+  status: EntitlementStatus;
+  createdAt: string;
 }
 
 export type UsageGroupBy = "PROJECT" | "API_KEY" | "MODEL" | "CHANNEL" | "HOUR";
