@@ -1701,6 +1701,11 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 emitFinalClose(out);
                 return;
             }
+            TextFrame fastFrame = scanTextFrame(event.dataSource(), event.dataOffset(), event.dataLength());
+            if (fastFrame != null) {
+                emitTextFrame(fastFrame, out);
+                return;
+            }
             try {
                 JsonNode root = CodecSupport.readTreeBytes(
                         mapper, event.dataSource(), event.dataOffset(), event.dataLength());
@@ -1777,6 +1782,210 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     }
                 }
             } catch (Exception ignored) {
+            }
+        }
+
+        private record ChoiceFrame(String reasoning, String content, String refusal, String finishReason) {
+        }
+
+        private record TextFrame(String id, String model, Long created, String reasoning,
+                                 String content, String refusal, String finishReason) {
+        }
+
+        /**
+         * Tree-free fast path for the per-token frame shape
+         * ({@code choices[0].delta.{content,reasoning_content,refusal}} plus an optional
+         * {@code finish_reason}). Returns {@code null} for every other shape - tool calls, usage chunks,
+         * role chunks, malformed input - so the caller keeps the generic {@link JsonNode} path.
+         */
+        private TextFrame scanTextFrame(byte[] source, int offset, int length) {
+            try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
+                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                    return null;
+                }
+                String id = null;
+                String model = null;
+                Long created = null;
+                String reasoning = null;
+                String content = null;
+                String refusal = null;
+                String finishReason = null;
+                boolean sawChoices = false;
+                JsonToken token;
+                while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                    String field = parser.currentName();
+                    JsonToken value = parser.nextToken();
+                    switch (field) {
+                        case "id" -> {
+                            if (value != JsonToken.VALUE_STRING) {
+                                return null;
+                            }
+                            id = parser.getText();
+                        }
+                        case "model" -> {
+                            if (value != JsonToken.VALUE_STRING) {
+                                return null;
+                            }
+                            model = parser.getText();
+                        }
+                        case "created" -> {
+                            if (!value.isNumeric()) {
+                                return null;
+                            }
+                            created = parser.getLongValue();
+                        }
+                        case "object", "system_fingerprint", "service_tier" -> parser.skipChildren();
+                        case "choices" -> {
+                            if (value != JsonToken.START_ARRAY || sawChoices) {
+                                return null;
+                            }
+                            sawChoices = true;
+                            if (parser.nextToken() != JsonToken.START_OBJECT) {
+                                return null;
+                            }
+                            ChoiceFrame choice = scanChoice(parser);
+                            if (choice == null) {
+                                return null;
+                            }
+                            reasoning = choice.reasoning();
+                            content = choice.content();
+                            refusal = choice.refusal();
+                            finishReason = choice.finishReason();
+                            if (parser.nextToken() != JsonToken.END_ARRAY) {
+                                return null;
+                            }
+                        }
+                        default -> {
+                            return null;
+                        }
+                    }
+                }
+                if (token != JsonToken.END_OBJECT || !sawChoices) {
+                    return null;
+                }
+                return new TextFrame(id, model, created, reasoning, content, refusal, finishReason);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+
+        private ChoiceFrame scanChoice(JsonParser parser) throws IOException {
+            String reasoning = null;
+            String content = null;
+            String refusal = null;
+            String finishReason = null;
+            JsonToken token;
+            while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                String field = parser.currentName();
+                JsonToken value = parser.nextToken();
+                switch (field) {
+                    case "index" -> {
+                        if (!value.isNumeric()) {
+                            return null;
+                        }
+                    }
+                    case "finish_reason" -> {
+                        if (value == JsonToken.VALUE_NULL) {
+                            finishReason = null;
+                        } else if (value == JsonToken.VALUE_STRING) {
+                            finishReason = parser.getText();
+                        } else {
+                            return null;
+                        }
+                    }
+                    case "delta" -> {
+                        if (value != JsonToken.START_OBJECT) {
+                            return null;
+                        }
+                        JsonToken deltaToken;
+                        while ((deltaToken = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                            String deltaField = parser.currentName();
+                            JsonToken deltaValue = parser.nextToken();
+                            switch (deltaField) {
+                                case "content" -> {
+                                    if (deltaValue == JsonToken.VALUE_NULL) {
+                                        content = null;
+                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
+                                        content = parser.getText();
+                                    } else {
+                                        return null;
+                                    }
+                                }
+                                case "reasoning_content" -> {
+                                    if (deltaValue == JsonToken.VALUE_NULL) {
+                                        reasoning = null;
+                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
+                                        reasoning = parser.getText();
+                                    } else {
+                                        return null;
+                                    }
+                                }
+                                case "refusal" -> {
+                                    if (deltaValue == JsonToken.VALUE_NULL) {
+                                        refusal = null;
+                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
+                                        refusal = parser.getText();
+                                    } else {
+                                        return null;
+                                    }
+                                }
+                                default -> {
+                                    return null;
+                                }
+                            }
+                        }
+                        if (deltaToken != JsonToken.END_OBJECT) {
+                            return null;
+                        }
+                    }
+                    default -> {
+                        return null;
+                    }
+                }
+            }
+            if (token != JsonToken.END_OBJECT) {
+                return null;
+            }
+            return new ChoiceFrame(reasoning, content, refusal, finishReason);
+        }
+
+        private void emitTextFrame(TextFrame frame, List<CanonicalStreamEvent> out) {
+            if (!started) {
+                String id = frame.id();
+                if (id == null || id.isBlank()) {
+                    id = CodecSupport.generateId("chatcmpl-");
+                }
+                long created = frame.created() != null ? frame.created() : CodecSupport.nowEpochSeconds();
+                String model = (virtualModel != null && !virtualModel.isBlank())
+                        ? virtualModel : (frame.model() != null ? frame.model() : "");
+                out.add(new CanonicalStreamEvent.MessageStart(id, model, created));
+                started = true;
+            }
+            String reasoning = frame.reasoning();
+            if (reasoning != null && !reasoning.isEmpty()) {
+                int idx = ensureActiveBlock(BlockKind.THINKING, out);
+                out.add(new CanonicalStreamEvent.ThinkingDelta(idx, reasoning));
+            }
+            String content = frame.content();
+            if (content != null && !content.isEmpty()) {
+                int idx = ensureActiveBlock(BlockKind.TEXT, out);
+                out.add(new CanonicalStreamEvent.TextDelta(idx, content));
+            }
+            String refusal = frame.refusal();
+            if (refusal != null && !refusal.isEmpty()) {
+                sawRefusal = true;
+                int idx = ensureActiveBlock(BlockKind.REFUSAL, out);
+                out.add(new CanonicalStreamEvent.RefusalDelta(idx, refusal));
+            }
+            String finishReason = frame.finishReason();
+            if (finishReason != null && !finishReason.isBlank()) {
+                pendingStopReason = switch (finishReason) {
+                    case "tool_calls", "function_call" -> CanonicalStopReason.TOOL_CALLS;
+                    case "length" -> CanonicalStopReason.MAX_TOKENS;
+                    case "content_filter" -> CanonicalStopReason.CONTENT_FILTER;
+                    default -> sawRefusal ? CanonicalStopReason.REFUSAL
+                            : (sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN);
+                };
             }
         }
 

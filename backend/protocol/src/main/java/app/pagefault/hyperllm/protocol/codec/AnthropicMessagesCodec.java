@@ -1381,8 +1381,123 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             return out;
         }
 
+        private record DeltaFrame(int index, String kind, String text) {
+        }
+
+        /**
+         * Tree-free fast path for {@code content_block_delta} frames, which make up every token of an
+         * Anthropic stream. Returns {@code null} for any other event type so the caller keeps the
+         * generic {@link JsonNode} path.
+         */
+        private DeltaFrame scanDeltaFrame(byte[] source, int offset, int length) {
+            try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
+                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                    return null;
+                }
+                int index = 0;
+                String deltaKind = null;
+                String text = null;
+                boolean sawType = false;
+                boolean sawDelta = false;
+                JsonToken token;
+                while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                    String field = parser.currentName();
+                    JsonToken value = parser.nextToken();
+                    switch (field) {
+                        case "type" -> {
+                            if (value != JsonToken.VALUE_STRING
+                                    || !"content_block_delta".equals(parser.getText())) {
+                                return null;
+                            }
+                            sawType = true;
+                        }
+                        case "index" -> {
+                            if (!value.isNumeric()) {
+                                return null;
+                            }
+                            index = parser.getIntValue();
+                        }
+                        case "delta" -> {
+                            if (value != JsonToken.START_OBJECT) {
+                                return null;
+                            }
+                            sawDelta = true;
+                            JsonToken deltaToken;
+                            while ((deltaToken = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                String deltaField = parser.currentName();
+                                JsonToken deltaValue = parser.nextToken();
+                                switch (deltaField) {
+                                    case "type" -> {
+                                        if (deltaValue != JsonToken.VALUE_STRING) {
+                                            return null;
+                                        }
+                                        deltaKind = switch (parser.getText()) {
+                                            case "text_delta" -> "text";
+                                            case "thinking_delta" -> "thinking";
+                                            case "signature_delta" -> "signature";
+                                            case "input_json_delta" -> "partial_json";
+                                            default -> null;
+                                        };
+                                        if (deltaKind == null) {
+                                            return null;
+                                        }
+                                    }
+                                    case "text", "thinking", "signature", "partial_json" -> {
+                                        if (deltaValue == JsonToken.VALUE_NULL) {
+                                            text = null;
+                                        } else if (deltaValue == JsonToken.VALUE_STRING) {
+                                            text = parser.getText();
+                                        } else {
+                                            return null;
+                                        }
+                                    }
+                                    default -> {
+                                        return null;
+                                    }
+                                }
+                            }
+                            if (deltaToken != JsonToken.END_OBJECT) {
+                                return null;
+                            }
+                        }
+                        default -> {
+                            return null;
+                        }
+                    }
+                }
+                if (token != JsonToken.END_OBJECT || !sawType || !sawDelta || deltaKind == null) {
+                    return null;
+                }
+                return new DeltaFrame(index, deltaKind, text);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+
+        private void emitDeltaFrame(DeltaFrame frame, List<CanonicalStreamEvent> out) {
+            String text = frame.text();
+            if (text == null || text.isEmpty()) {
+                return;
+            }
+            switch (frame.kind()) {
+                case "text" -> out.add(new CanonicalStreamEvent.TextDelta(frame.index(), text));
+                case "thinking" -> out.add(new CanonicalStreamEvent.ThinkingDelta(frame.index(), text));
+                case "signature" -> out.add(new CanonicalStreamEvent.ThinkingSignatureDelta(
+                        frame.index(), text, ProtocolKind.ANTHROPIC_MESSAGES));
+                case "partial_json" -> out.add(new CanonicalStreamEvent.ToolCallArgsDelta(
+                        frame.index(), toolCallIdsByIndex.get(frame.index()), text));
+                default -> {
+                }
+            }
+        }
+
         private void processEvent(SseEventSplitter.SseEvent ev, List<CanonicalStreamEvent> out) {
             if (!ev.hasData()) {
+                return;
+            }
+            DeltaFrame fastFrame = scanDeltaFrame(ev.dataSource(), ev.dataOffset(), ev.dataLength());
+            if (fastFrame != null) {
+                emitDeltaFrame(fastFrame, out);
                 return;
             }
             try {
