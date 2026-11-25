@@ -40,19 +40,21 @@
 
 ## 高性能与高并发实测
 
-HyperLLM 数据面（`backend/gateway`）基于 **Spring WebFlux + Reactor Netty** 构建，全链路启用原生 Linux Epoll（`x86_64` & `ARM64`）、**Caffeine L1 + Redis L2** 多级缓存与 **Debezium CDC** 亚秒广播失效、静态预加载 Redis Lua 脚本、O(1) 字节长度 Token 估算以及非阻塞响应式热路径。
+HyperLLM 数据面（`backend/gateway`）基于 **Spring WebFlux + Reactor Netty** 构建，全链路启用原生 Linux Epoll（`x86_64` & `ARM64`）、**Caffeine L1 + Redis L2** 多级缓存与 **Debezium CDC** 亚秒广播失效、静态预加载 Redis Lua 脚本、同构透传**严格 RFC 8259 零拷贝状态机与 `CompositeByteBuf` 切片改写**、跨协议超大 `messages[]` **流式 `JsonParser`/`JsonGenerator` 编解码与 `>=64KB` EventLoop 卸载**、O(1) 字节长度 Token 估算以及非阻塞响应式热路径。
 
 在 **ARM64 KVM 实例（ARM Neoverse-N1，OpenJDK 21，`nettyEpoll=true`，全场景 `err=0`、`0 Full GC`）** 上开启完整鉴权、路由、Redis Lua 原子预占/结算、Outbox 落库与 Kafka 遥测后的实测成绩：
 
 | 压测场景（4 独占 ARM64 核 · 5G 堆） | 实测吞吐 | 延迟 / 网关附加开销 | 稳定性与余量 |
 | :--- | :---: | :---: | :--- |
-| **非流式短包吞吐**（`S1 c256`, 219B） | **`2,789 RPS`** *（2C：`1,836 RPS`）* | P50 `24.0 ms` / P99 `39.7 ms` *（c64 @ `2,560 RPS`）* | 网关 4 核仍有 **32–43% 空闲**；独立 8C16G 预计 **`6,500–7,500+ RPS`** |
-| **高并发 OpenAI SSE 流式**（`S2a c1000`） | **`1,000` 并发流 · `939 RPS` · `29,070 帧/秒`** | 网关 P50 TTFT 附加 **`+14.9 ms`** *（c200 仅 `+5.8 ms`）* | 网关 4 核仍余 **~20%**；独立 8C16G 预计稳态 **`3,000–5,000+`** 并发流 |
-| **Anthropic → OpenAI 跨协议 SSE**（`S2b c500`） | **`500` 并发流 · `483 RPS` · `16,883 帧/秒`** | 网关 P50 TTFT 附加 **`+9.4 ms`** *（跨协议额外开销 `< 2.5 ms`）* | 网关 4 核 **50% 空闲**，`Canonical IR` 转译开销极低 |
-| **Coding Agent 大上下文**（`S3`, +16 tools） | **`1,431 RPS`**（50 KB）/ **`741 RPS`**（200 KB） | P99 **`31.9 ms`**（50 KB）/ **`53.6 ms`**（200 KB，入站 **`~153 MB/s`**） | 高吞吐多轮 Agent 大包解析零错误 |
-| **中途强断与 GC 健康度**（`S4 c100`） | **`561 RPS`**（100 并发第 5 帧强断） | G1 Young 均值 **`21.2 ms`**（峰值 `54 ms`），**`0 Full GC`** | Netty Direct **`25.8 MB`**、Old Gen **`41.7 MB`**、**`0`** 处理器错误 |
+| **非流式短包吞吐**（`S1 c128`, 219B） | **`2,845 RPS`** *（2C：`1,836 RPS`）* | P50 `22.8 ms` / P99 `40.4 ms` *（c64 @ `2,643 RPS`）* | 网关 4 核仍余 **22–28%**（2C 基础设施先打满）；独立 8C16G 预计 **`6,500–7,500+ RPS`** |
+| **高并发 OpenAI SSE 流式**（`S2a c1000`） | **`1,000` 并发流 · `947 RPS` · `29,377 帧/秒`** | 网关 P50 TTFT 附加 **`+16.3 ms`** *（c200 仅 `+5.8 ms`）* | 网关 4 核仍余 **~20%**；独立 8C16G 预计稳态 **`3,000–5,000+`** 并发流 |
+| **Anthropic → OpenAI 跨协议 SSE**（`S2b c500`） | **`500` 并发流 · `479 RPS` · `16,797 帧/秒`** | 网关 P50 TTFT 附加 **`+8.6 ms`** *（跨协议额外开销 `< 2.5 ms`）* | 网关 4 核 **48% 空闲**，`Canonical IR` 转译开销极低 |
+| **Agent 大上下文 — 同构零拷贝透传**（`S3`, +16 tools） | **`2,250 RPS`**（50 KB）· **`2,095 RPS`**（200 KB）<br>**`1,704 RPS`**（500 KB）· **`1,216 RPS`**（1 MB） | P99 **`25.6 ms`**（200 KB, `433 MB/s`）<br>P99 **`33.6 ms`**（500 KB, **`874 MB/s`**）/ **`46.7 ms`**（1 MB, **`1.25 GB/s`**） | 状态机 + 切片改写总分配仅 **`0.3%`**，额外 `ByteBuf` 拷贝 **`0.0%`** |
+| **Agent 大上下文 — 跨协议流式转译**（`Anthropic → OpenAI`） | **`1,455 RPS`**（50 KB）· **`1,405 RPS`**（200 KB）<br>**`922 RPS`**（500 KB）· **`540 RPS`**（1 MB） | P99 **`37.3 ms`**（200 KB, `290 MB/s`）<br>P99 **`59.3 ms`**（500 KB, **`473 MB/s`**）/ **`124.4 ms`**（1 MB, **`553 MB/s`**） | **`52.4%`** CPU 卸载出 EventLoop（`>=64KB`）；Jackson DOM 仅 **`0.5%`** |
+| **500 KB (~125K tok) 长上下文流式 SSE**（`S5 c200`） | **`200` 并发 500 KB 长流**<br>`199 RPS`（同构）/ `192 RPS`（跨协议） | 网关 P50 TTFT 附加 **`+7.1 ms`**（同构）<br>**`+10.5 ms`**（Anthropic → OpenAI） | 网关 CPU 仅 **`28.5%`** / **`42.3%`**；Old Gen **`75.4 MB`**（**`1.47%`**），零钉死 |
+| **GC、堆外内存与中途强断健康度**（`S4` + 全套 15 场景） | 累计分配 **`275.8 GB`** · 强断 **`560 RPS`** | G1 Young 均值 **`12.0 ms`**（峰值 `41 ms`），**`0 Full GC`** | 晋升率 **`0.027%`**、Netty Direct **`34.2 MB`**、**`0`** 处理器错误 |
 
-> 完整压测方案、`async-profiler 4.0` CPU/Alloc/Lock 交互式火焰图与优化前后详细数据，请参阅 [ARM64 KVM P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md) 及 [压测工具套件说明](./benchmark/README.md)。
+> 完整压测方案、`async-profiler 4.0` 交互式火焰图与多轮优化对比数据，请参阅 [大 Payload 零拷贝透传与跨协议流式优化报告](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md)、[ARM64 KVM P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md) 及 [压测工具套件说明](./benchmark/README.md)。
 
 ---
 
@@ -296,6 +298,7 @@ curl http://localhost:8080/v1/messages \
   - [Admin 运营控制面 API（`admin-api.yaml`）](./docs/openapi/admin-api.yaml)
 
 ### ⚡ 性能压测报告与剖析指南
+- **[ARM64 KVM 大 Payload 零拷贝透传与跨协议流式优化报告](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md)** — 50 KB–1 MB Agent `messages[]` 同构零拷贝（1.25 GB/s 入站）与跨协议流式转译、200 并发 500 KB SSE TTFT、GC 晋升率分析及 500 KB 交互式 `async-profiler 4.0` 火焰图
 - **[ARM64 KVM P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md)** — 完整 2C/4C 优化前后吞吐、TTFT/TPOT 延迟、GC 表现、8C16G 容量估算与交互式 `async-profiler 4.0` 火焰图
 - **[ARM64 KVM 基线压测与剖析报告](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md)** — 降核硬隔离压测方案、基线瓶颈定位与火焰图根因分析
 - **[压测与火焰图剖析工具使用说明](./benchmark/README.md)** — 一键复现网关压力测试与性能剖析

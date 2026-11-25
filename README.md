@@ -38,19 +38,21 @@
 
 ## Performance Benchmarks
 
-HyperLLM's data plane (`backend/gateway`) is engineered on **Spring WebFlux + Reactor Netty** with native Linux Epoll (`x86_64` & `ARM64`), **Caffeine L1 + Redis L2** multi-tier caching with sub-second **Debezium CDC** broadcast invalidation, preloaded static Redis Lua scripts, O(1) length-based token estimation, and zero-blocking hot paths.
+HyperLLM's data plane (`backend/gateway`) is engineered on **Spring WebFlux + Reactor Netty** with native Linux Epoll (`x86_64` & `ARM64`), **Caffeine L1 + Redis L2** multi-tier caching with sub-second **Debezium CDC** broadcast invalidation, preloaded static Redis Lua scripts, a **strict zero-copy RFC 8259 JSON scanner & `CompositeByteBuf` patcher** for homomorphic passthrough, **streaming `JsonParser`/`JsonGenerator` large-`messages[]` translation with `>=64KB` EventLoop offload**, O(1) length-based token estimation, and zero-blocking hot paths.
 
 Verified on an **ARM64 KVM instance (ARM Neoverse-N1, OpenJDK 21, `nettyEpoll=true`, `err=0` across all scenarios, `0 Full GC`)** with full authentication, routing, atomic Redis Pre-hold/Settle billing, Outbox persistence, and Kafka telemetry enabled:
 
 | Workload (4 Dedicated ARM64 Cores · 5G Heap) | Throughput | Latency / Gateway Overhead | Stability & Headroom |
 | :--- | :---: | :---: | :--- |
-| **Non-Stream Short Payload** (`S1 c256`, 219B) | **`2,789 RPS`** *(2C: `1,836 RPS`)* | P50 `24.0 ms` / P99 `39.7 ms` *(c64 @ `2,560 RPS`)* | Gateway cores still **32–43% idle**; projected **`6,500–7,500+ RPS`** on 8C16G with dedicated infra |
-| **High-Concurrency OpenAI SSE** (`S2a c1000`) | **`1,000` streams · `939 RPS` · `29,070 events/s`** | Gateway TTFT overhead **`+14.9 ms`** P50 *(`+5.8 ms` @ c200)* | Gateway cores **~20% idle**; projected **`3,000–5,000+`** concurrent SSE streams on 8C16G |
-| **Anthropic → OpenAI Cross-Protocol SSE** (`S2b c500`) | **`500` streams · `483 RPS` · `16,883 events/s`** | Gateway TTFT overhead **`+9.4 ms`** P50 *(`< 2.5 ms` translation delta)* | Gateway cores **50% idle**; near-zero `Canonical IR` overhead |
-| **Coding Agent Large Context** (`S3`, +16 tools) | **`1,431 RPS`** (50 KB) / **`741 RPS`** (200 KB) | P99 **`31.9 ms`** (50 KB) / **`53.6 ms`** (200 KB, **`~153 MB/s`** inbound) | Sustained multi-turn agent payload parsing with zero errors |
-| **Mid-Stream Client Aborts & GC Health** (`S4 c100`) | **`561 RPS`** (100 concurrent aborts @ 5 chunks) | Avg G1 Young STW **`21.2 ms`** (max `54 ms`), **`0 Full GC`** | Netty Direct **`25.8 MB`**, Old Gen **`41.7 MB`**, **`0`** handler errors |
+| **Non-Stream Short Payload** (`S1 c128`, 219B) | **`2,845 RPS`** *(2C: `1,836 RPS`)* | P50 `22.8 ms` / P99 `40.4 ms` *(c64 @ `2,643 RPS`)* | Gateway cores still **22–28% idle** (2C Infra saturated); projected **`6,500–7,500+ RPS`** on 8C16G |
+| **High-Concurrency OpenAI SSE** (`S2a c1000`) | **`1,000` streams · `947 RPS` · `29,377 events/s`** | Gateway TTFT overhead **`+16.3 ms`** P50 *(`+5.8 ms` @ c200)* | Gateway cores **~20% idle**; projected **`3,000–5,000+`** concurrent SSE streams on 8C16G |
+| **Anthropic → OpenAI Cross-Protocol SSE** (`S2b c500`) | **`500` streams · `479 RPS` · `16,797 events/s`** | Gateway TTFT overhead **`+8.6 ms`** P50 *(`< 2.5 ms` translation delta)* | Gateway cores **48% idle**; near-zero `Canonical IR` overhead |
+| **Agent Large Context — Zero-Copy Passthrough** (`S3`, +16 tools) | **`2,250 RPS`** (50 KB) · **`2,095 RPS`** (200 KB)<br>**`1,704 RPS`** (500 KB) · **`1,216 RPS`** (1 MB) | P99 **`25.6 ms`** (200 KB, `433 MB/s`)<br>P99 **`33.6 ms`** (500 KB, **`874 MB/s`**) / **`46.7 ms`** (1 MB, **`1.25 GB/s`**) | Scanner/patcher alloc **`0.3%`** total; **`0.0%`** extra `ByteBuf` copy |
+| **Agent Large Context — Cross-Protocol Streaming** (`Anthropic → OpenAI`) | **`1,455 RPS`** (50 KB) · **`1,405 RPS`** (200 KB)<br>**`922 RPS`** (500 KB) · **`540 RPS`** (1 MB) | P99 **`37.3 ms`** (200 KB, `290 MB/s`)<br>P99 **`59.3 ms`** (500 KB, **`473 MB/s`**) / **`124.4 ms`** (1 MB, **`553 MB/s`**) | **`52.4%`** CPU offloaded off EventLoop (`>=64KB`); Jackson DOM **`0.5%`** |
+| **500 KB (~125K tok) Long-Context SSE** (`S5 c200`) | **`200` concurrent 500 KB streams**<br>`199 RPS` (Passthrough) / `192 RPS` (Cross-Proto) | Gateway TTFT overhead **`+7.1 ms`** (Passthrough)<br>**`+10.5 ms`** (Anthropic → OpenAI) | Gateway CPU **`28.5%`** / **`42.3%`**; Old Gen **`75.4 MB`** (**`1.47%`**), **`0`** pinning |
+| **GC, Direct Memory & Mid-Stream Aborts** (`S4` + full 15-case suite) | **`275.8 GB`** total allocated · **`560 RPS`** aborts | Avg G1 Young STW **`12.0 ms`** (max `41 ms`), **`0 Full GC`** | Promotion rate **`0.027%`**, Netty Direct **`34.2 MB`**, **`0`** handler errors |
 
-> See full methodology, `async-profiler 4.0` CPU/Alloc/Lock flamegraphs, and before-vs-after tuning breakdown in the [ARM64 P0/P1 Optimization Benchmark Report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md) and [Benchmark Harness](./benchmark/README.md).
+> See full methodology, `async-profiler 4.0` interactive HTML flamegraphs, and step-by-step tuning data in the [Large-Payload Zero-Copy & Streaming Report](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md), [ARM64 P0/P1 Optimization Report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md), and [Benchmark Harness](./benchmark/README.md).
 
 ---
 
@@ -294,6 +296,7 @@ curl http://localhost:8080/v1/messages \
   - [Admin Operator API (`admin-api.yaml`)](./docs/openapi/admin-api.yaml)
 
 ### ⚡ Performance Benchmarks & Profiling
+- **[ARM64 KVM Large-Payload Zero-Copy & Streaming Report](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md)** — 50 KB–1 MB Agent `messages[]` passthrough (`1.25 GB/s` inbound) & cross-protocol streaming benchmarks, 200-stream 500 KB SSE TTFT, GC promotion analysis, and 500 KB `async-profiler 4.0` HTML flamegraphs
 - **[ARM64 KVM P0/P1 Optimization & Regression Report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md)** — Full 2C/4C before-vs-after throughput, TTFT/TPOT latency, GC behavior, capacity projections, and interactive `async-profiler 4.0` HTML flamegraphs
 - **[ARM64 KVM Baseline Benchmark Report](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md)** — Initial baseline profiling methodology, bottleneck discovery, and root-cause flamegraph analysis
 - **[Benchmark & Load-Testing Suite Guide](./benchmark/README.md)** — How to run reproducible CPU-isolated benchmarks and capture flamegraphs
