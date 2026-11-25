@@ -4,7 +4,7 @@ set -euo pipefail
 # Starts hyperllm-gateway pinned to dedicated vCPUs via taskset and explicit ActiveProcessorCount.
 # Usage:
 #   GATEWAY_CPUS=0-1 GATEWAY_CPU_COUNT=2 GATEWAY_HEAP=3g ./benchmark/scripts/run-gateway.sh
-#   GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g ./benchmark/scripts/run-gateway.sh
+#   GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=6g ./benchmark/scripts/run-gateway.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -12,6 +12,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 GATEWAY_CPUS="${GATEWAY_CPUS:-0-1}"
 GATEWAY_CPU_COUNT="${GATEWAY_CPU_COUNT:-2}"
 GATEWAY_HEAP="${GATEWAY_HEAP:-3g}"
+# Unified GC log: the suite slices this file per scenario, and it is the only place where GC phases,
+# mixed-cycle frequency and humongous allocations are visible (jstat only reports aggregates).
+GATEWAY_GC_LOG="${GATEWAY_GC_LOG:-/tmp/hyperllm-gc.log}"
 GATEWAY_JAR="${GATEWAY_JAR:-$(ls -t "${REPO_ROOT}"/backend/gateway/target/hyperllm-gateway-*.jar 2>/dev/null | grep -v '\.original$' | head -n 1 || true)}"
 
 if [[ -z "${GATEWAY_JAR}" || ! -f "${GATEWAY_JAR}" ]]; then
@@ -40,6 +43,7 @@ export GATEWAY_MAX_IN_MEMORY_SIZE="${GATEWAY_MAX_IN_MEMORY_SIZE:-16MB}"
 ulimit -n 65535 || true
 
 echo "Launching hyperllm-gateway on CPUs=${GATEWAY_CPUS} (ActiveProcessorCount=${GATEWAY_CPU_COUNT}, Heap=${GATEWAY_HEAP})"
+echo "GC log: ${GATEWAY_GC_LOG}"
 echo "JAR: ${GATEWAY_JAR}"
 
 exec taskset -c "${GATEWAY_CPUS}" java \
@@ -50,5 +54,6 @@ exec taskset -c "${GATEWAY_CPUS}" java \
   -XX:+AlwaysPreTouch \
   -XX:+UnlockDiagnosticVMOptions \
   -XX:+DebugNonSafepoints \
+  "-Xlog:gc=info,gc+heap=info,gc+ergo=info,gc+phases=debug,gc+humongous=debug:file=${GATEWAY_GC_LOG}:time,uptime,level,tags" \
   -Dio.netty.leakDetection.level=disabled \
   -jar "${GATEWAY_JAR}"

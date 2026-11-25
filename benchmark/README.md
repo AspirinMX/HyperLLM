@@ -95,7 +95,7 @@ afterwards instead of trusted.
 
 | Role | CPUs | Notes |
 | :--- | :--- | :--- |
-| System under test | `0-3` (`SUT_CPUS`) | e.g. `-XX:ActiveProcessorCount=4 -Xms5g -Xmx5g` + `taskset` |
+| System under test | `0-3` (`SUT_CPUS`) | e.g. `-XX:ActiveProcessorCount=4 -Xms6g -Xmx6g` + `taskset` |
 | PostgreSQL + Redis + Kafka | `4` (`INFRA_CPUS`) | request rate is `N/10` RPS, one core is enough |
 | mock-upstream | `5-6` (`MOCK_CPUS`) | emits up to ~130k frames/s |
 | loadgen | `7` (`LOADGEN_CPUS`) | reads up to ~130k frames/s |
@@ -154,8 +154,10 @@ cd backend && ./mvnw -q -f pom.xml package -pl common,domain,protocol,gateway -a
 BENCH_TMPFS=1 BENCH_INFRA_CPUS=4 ./benchmark/scripts/setup-server.sh
 
 # 3. gateway pinned to cores 0-3
-GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g \
+GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=6g \
   ./benchmark/scripts/run-gateway.sh
+# the launcher always writes a unified GC log to /tmp/hyperllm-gc.log (-Xlog:gc*); the suite slices
+# it per scenario into <label>.gc.txt, which is where GC phases and humongous allocations show up
 
 # 4. the matrix (16 scenarios, ~16 x 80s)
 TAG=baseline TARGET=http://127.0.0.1:18081 ./benchmark/scripts/run-suite.sh
@@ -214,6 +216,9 @@ following, and `summary.csv` carries the per-scenario subset:
 6. Check `heap_max_mb` against `-Xmx`: a peak within ~10% of the heap means GC headroom is gone even
    when `fgc` is still zero, and the next concurrency step will pay for it in TTFT tails.
 7. Compare `ygct_ms` with the window: pause time is a direct share of the measured wall clock.
+8. Open `<label>.gc.txt` when `cgc` (concurrent cycles) climbs: that file shows whether the heap is
+   being marked because old-gen occupancy is high, and whether any allocation went humongous
+   (`G1 Humongous Allocation`), which is a different problem from a high promotion rate.
 
 ## Harness limits
 

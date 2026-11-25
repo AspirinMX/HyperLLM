@@ -56,6 +56,8 @@ KAFKA_RETENTION_BYTES="${KAFKA_RETENTION_BYTES:-268435456}"
 
 # --- sampling -------------------------------------------------------------------------------------
 JVM_SAMPLE_SEC="${JVM_SAMPLE_SEC:-2}"
+# Must match GATEWAY_GC_LOG of the gateway launch (run-gateway.sh); the suite slices it per scenario.
+GC_LOG="${GC_LOG:-/tmp/hyperllm-gc.log}"
 
 # --- profiling ------------------------------------------------------------------------------------
 PROFILE="${PROFILE:-0}"
@@ -116,6 +118,19 @@ reset_infra() {
 container_restarts() { docker inspect -f '{{.RestartCount}}' "$1" 2>/dev/null || echo "?"; }
 container_health()   { docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null || echo "unknown"; }
 tmpfs_pct() { docker exec "$1" df -P "$2" 2>/dev/null | awk 'NR==2 { gsub("%", "", $5); print $5 }'; }
+
+# Byte offset in the unified GC log, so every scenario can keep its own slice of it.
+gc_log_offset() { [[ -f "$1" ]] && stat -c %s "$1" 2>/dev/null || echo 0; }
+
+# Writes the GC log lines produced between $2 and $3 into $1 (per-scenario GC phases + humongous).
+capture_gc_log() {
+  local out="$1" from="$2" to="$3"
+  if [[ "${to}" -le "${from}" ]]; then
+    echo "WARN: no GC log bytes for ${out} (is the gateway started with -Xlog:gc*?)" >&2
+    return 0
+  fi
+  tail -c +$((from + 1)) "${GC_LOG}" | head -c $((to - from)) > "${out}" 2>/dev/null || true
+}
 
 detect_storage() {
   local pg_type kf_type commit
@@ -276,6 +291,7 @@ run_case() {
   configure_mock
   curl -sf "${MOCK_URL}/stats" > "${RESULTS_DIR}/${label}.mock-before.json" || true
 
+  local gc_from; gc_from="$(gc_log_offset "${GC_LOG}")"
   mpstat -P ALL 1 > "${mpstat}" 2>&1 &
   local mp_pid=$!
   start_jvm_sampler "${RESULTS_DIR}/${label}"
@@ -296,6 +312,7 @@ run_case() {
   kill "${mp_pid}" 2>/dev/null || true
   wait "${mp_pid}" 2>/dev/null || true
   curl -sf "${MOCK_URL}/stats" > "${RESULTS_DIR}/${label}.mock-after.json" || true
+  capture_gc_log "${RESULTS_DIR}/${label}.gc.txt" "${gc_from}" "$(gc_log_offset "${GC_LOG}")"
 
   local line max_steal sut_busy infra_busy mock_busy lg_busy worst_cpu maintained
   line="$(steal_and_cpu "${mpstat}")"
@@ -345,6 +362,7 @@ profile_case() {
   local label="profile_cross_stream_c${PROFILE_CONCURRENCY}"
   configure_mock
   echo "==> profiling ${label} (ctimer / alloc / lock) with jvm + cpu sampling"
+  local gc_from; gc_from="$(gc_log_offset "${GC_LOG}")"
   mpstat -P ALL 1 > "${RESULTS_DIR}/${label}.mpstat.txt" 2>&1 &
   local mp_pid=$!
   start_jvm_sampler "${RESULTS_DIR}/${label}"
@@ -360,6 +378,7 @@ profile_case() {
   wait "${lg_pid}" || true
   stop_jvm_sampler
   kill "${mp_pid}" 2>/dev/null || true
+  capture_gc_log "${RESULTS_DIR}/${label}.gc.txt" "${gc_from}" "$(gc_log_offset "${GC_LOG}")"
   echo "   cpu: $(steal_and_cpu "${RESULTS_DIR}/${label}.mpstat.txt")"
 }
 
@@ -386,6 +405,7 @@ printf 'label,protocol,stream,concurrency,max_steal_pct,worst_cpu,sut_busy_pct,i
   echo "target=${TARGET} commit=$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "jar=$(ls -t "${REPO_ROOT}"/backend/gateway/target/hyperllm-gateway-*.jar 2>/dev/null | grep -v original | head -1)"
   echo "jvm=$(ps -o args= -p "$(gateway_pid)" 2>/dev/null | grep -oE -- '-XX:[^ ]+|-Xm[sx][^ ]+' | tr '\n' ' ')"
+  echo "gc_log=${GC_LOG} (per scenario slice: <label>.gc.txt)"
   echo "upstream: ttft=${TTFT_MS}ms rate=${TOKEN_RATE}tok/s frame=${TOKENS_PER_FRAME}tok out=${OUTPUT_TOKENS} in=${INPUT_TOKENS} model=${MODEL}"
   echo "load: ramp=${RAMP} duration=${DURATION} payload_tokens=${PAYLOAD_TOKENS} max_tokens=${MAX_TOKENS}"
   echo "guards: steal_max=${STEAL_MAX}% maintained_min=${MAINTAINED_MIN}% tmpfs_max=${TMPFS_MAX}% abort_on_invalid=${ABORT_ON_INVALID}"
