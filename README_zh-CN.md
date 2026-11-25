@@ -126,7 +126,7 @@ curl http://localhost:8080/v1/messages \
 
 - **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook。
 - **[OpenAPI 3.1 接口契约文档](./docs/openapi/README.md)** — 可直接导入 Swagger UI / Postman / `openapi-typescript` 的标准规范：[Gateway 数据面](./docs/openapi/gateway-api.yaml) · [Console 开发者控制面](./docs/openapi/console-api.yaml) · [Admin 运营控制面](./docs/openapi/admin-api.yaml)。
-- **[压测与火焰图剖析套件](./benchmark/README.md)** — 如何在核隔离环境下复现网关压力测试并抓取 `async-profiler` 火焰图，另附[大 Payload 零拷贝与跨协议流式优化报告](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md)、[P0/P1 性能优化与回归对比报告](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md)与[ARM64 基线压测报告](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md)。
+- **[压测与火焰图剖析套件](./benchmark/README.md)** — 如何在核隔离环境下复现网关压力测试并抓取 `async-profiler` 火焰图。
 
 ## 参与贡献与开源协议
 

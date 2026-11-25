@@ -122,7 +122,7 @@ curl http://localhost:8080/v1/messages \
 
 - **[Newcomer Takeover & Onboarding Handbook](./docs/onboarding/README.md)** — 8-lesson guide covering local setup, architecture invariants, storage model, gateway lifecycle, Redis authority and Lua scripts, control planes, frontend BFF patterns, and troubleshooting runbooks.
 - **[OpenAPI 3.1 Specifications](./docs/openapi/README.md)** — machine-readable contracts for Swagger UI, Postman, and TypeScript SDK generation: [Gateway](./docs/openapi/gateway-api.yaml) · [Console](./docs/openapi/console-api.yaml) · [Admin](./docs/openapi/admin-api.yaml).
-- **[Benchmark & Load-Testing Suite](./benchmark/README.md)** — how to run reproducible CPU-isolated load tests and capture `async-profiler` flamegraphs, plus the [large-payload zero-copy report](./docs/benchmark/2026-11-25-gateway-arm64-large-payload-optimization.md), [P0/P1 optimization report](./docs/benchmark/2026-11-25-gateway-arm64-p0-p1-optimization.md), and [ARM64 baseline report](./docs/benchmark/2026-11-25-gateway-arm64-baseline.md).
+- **[Benchmark & Load-Testing Suite](./benchmark/README.md)** — how to run reproducible CPU-isolated load tests and capture `async-profiler` flamegraphs.
 
 ## Contributing & License
 
