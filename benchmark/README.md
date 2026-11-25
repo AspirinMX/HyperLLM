@@ -169,19 +169,37 @@ Useful overrides: `CONCURRENCIES`, `MODES`, `PAIRS`, `RAMP`, `DURATION`, `PAYLOA
 `MAINTAINED_MIN`, `TMPFS_MAX`, `RESET_INFRA`, `KAFKA_RETENTION_MS`, `KAFKA_RETENTION_BYTES`,
 `ABORT_ON_INVALID`, `API_KEY`, `MODEL`, `HEALTH_URL`.
 
+## What is recorded
+
+A number is only useful next to the conditions that produced it, so every scenario stores the
+following, and `summary.csv` carries the per-scenario subset:
+
+| Group | Metrics | Source |
+| :--- | :--- | :--- |
+| Load | concurrency, ramp, duration, payload bytes/tokens, max_tokens, protocol pair | loadgen report |
+| Throughput | RPS, SSE frames/s, aggregate output TPS, inbound/read MB/s | loadgen |
+| Latency | TTFT p50/p90/p95/p99, TPOT, per-stream TPS, total latency, status counts | loadgen |
+| Concurrency proof | in-flight min/avg/p95/max and the % of the window that held the target | loadgen sampler |
+| CPU | per-role busy % (gateway 0-3, infra 4, mock 5-6, loadgen 7), `max_steal_pct`, worst-offending CPU | `mpstat -P ALL 1` |
+| JVM | heap used peak, old-gen peak, YGC count/pause, Full GC count/pause, direct-buffer peak, live threads, process CPU seconds | `jstat -gc` + `/actuator/prometheus` |
+| Dependencies | Postgres and Kafka tmpfs %, container health, `RestartCount` delta | `docker inspect` / `df` |
+| Context | commit, jar path, JVM flags, kernel, nproc, storage mode and `synchronous_commit` | `run.info` |
+
 ## Outputs
 
 `benchmark/results/<tag>-<timestamp>/`:
 
 | File | Contents |
 | :--- | :--- |
-| `summary.csv` | one row per scenario: CPU split, `max_steal_pct`, `inflight_maintained_pct`, `pg_tmpfs_pct`, `kafka_tmpfs_pct`, `valid`, `guard` |
+| `summary.csv` | one row per scenario, 22 columns: CPU split, `max_steal_pct`/`worst_cpu`, `inflight_maintained_pct`, `heap_max_mb`, `old_gen_max_mb`, `ygc`/`ygct_ms`, `fgc`/`fgct_ms`, `direct_max_mb`, `threads_max`, `pg_tmpfs_pct`, `kafka_tmpfs_pct`, `valid` |
 | `<label>.json` | full report: RPS, SSE frames/s, aggregate output TPS, TTFT/TPOT/stream-TPS percentiles, latency, status counts, in-flight stats |
 | `<label>.txt` | the same report as printed text |
 | `<label>.mpstat.txt` | per-CPU samples (source of the steal and CPU columns) |
+| `<label>.jstat.txt` | `jstat -gc` samples every 2s (heap, eden, old, YGC/YGCT, FGC/FGCT) |
+| `<label>.prom.txt` | actuator samples: direct buffers, threads, outbox depth, process CPU |
 | `<label>.mock-before/after.json` | upstream counters (leftover streams, aborted streams, bytes out) |
 | `profiles/*.html` | async-profiler flamegraphs (`PROFILE=1`) |
-| `run.info` | host, target, upstream shape and load parameters for the run |
+| `run.info` | host, commit, jar, JVM flags, upstream shape, load parameters, guards, storage mode |
 
 ## Reading a result
 
@@ -193,6 +211,9 @@ Useful overrides: `CONCURRENCIES`, `MODES`, `PAIRS`, `RAMP`, `DURATION`, `PAYLOA
 4. Check `ttft_ms.p50/p99` for added latency versus the configured `TTFT_MS`.
 5. Use the CPU columns to attribute the bottleneck. If `mock_busy` or `loadgen_busy` approaches
    100%, the harness — not the gateway — is the limit for that scenario.
+6. Check `heap_max_mb` against `-Xmx`: a peak within ~10% of the heap means GC headroom is gone even
+   when `fgc` is still zero, and the next concurrency step will pay for it in TTFT tails.
+7. Compare `ygct_ms` with the window: pause time is a direct share of the measured wall clock.
 
 ## Harness limits
 

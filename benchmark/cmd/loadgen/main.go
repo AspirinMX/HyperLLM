@@ -313,7 +313,7 @@ func runWorker(client *http.Client, url string, headers http.Header, body []byte
 		var frames int64
 		var readBytes int64
 		if resp.StatusCode/100 == 2 && cfg.stream {
-			ttft, frames, readBytes = readSSE(resp.Body, start)
+			ttft, frames, readBytes = readSSE(resp.Body, start, cfg.protocol)
 		} else {
 			first := true
 			buf := make([]byte, 32<<10)
@@ -364,7 +364,17 @@ func runWorker(client *http.Client, url string, headers http.Header, body []byte
 }
 
 // readSSE counts data frames and returns time-to-first-frame, frame count and body bytes.
-func readSSE(body io.Reader, start time.Time) (time.Duration, int64, int64) {
+// contentFrameMarker returns the substring that identifies a text-delta SSE frame for the given
+// downstream protocol: OpenAI Chat carries it as delta.content, Anthropic as a text_delta block.
+func contentFrameMarker(protocol string) []byte {
+	if protocol == "anthropic" {
+		return []byte("\"text_delta\"")
+	}
+	return []byte("\"content\":")
+}
+
+func readSSE(body io.Reader, start time.Time, protocol string) (time.Duration, int64, int64) {
+	marker := contentFrameMarker(protocol)
 	br := bufio.NewReaderSize(body, 64<<10)
 	var frames int64
 	var ttft time.Duration
@@ -380,7 +390,7 @@ func readSSE(body io.Reader, start time.Time) (time.Duration, int64, int64) {
 				payload := bytes.TrimSpace(line[5:])
 				// Only content deltas count as output tokens: the terminal finish_reason and usage
 				// frames carry no generated text and must not inflate the frame count.
-				if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) && bytes.Contains(payload, []byte("\"content\":")) {
+				if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) && bytes.Contains(payload, marker) {
 					frames++
 				}
 			}
