@@ -1,344 +1,246 @@
+// Command mock-upstream is a minimal, fully configurable OpenAI Chat Completions upstream used by
+// the benchmark suite. It only speaks POST /v1/chat/completions (streaming and non-streaming) because
+// every scenario under test keeps the upstream protocol fixed to OpenAI Chat; the downstream protocol
+// (client side) is what varies between the same-protocol and cross-protocol pairs.
+//
+// The response shape is described by five numbers, all configurable at startup and at runtime through
+// POST /_mock/config: upstream TTFT, output tokens, token rate, tokens per SSE frame and the prompt
+// token count reported in usage. Defaults model a 100K-token agent request: 500ms TTFT, 2000 output
+// tokens at 200 tok/s in 5-token frames (400 frames, one every 25ms, ~10s per stream).
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
+// runtimeConfig is the mutable shape of the mock; every field is safe to change while it serves.
 type runtimeConfig struct {
-	ttftMs     atomic.Int64
-	chunks     atomic.Int64
-	intervalMs atomic.Int64
-	coalesce   atomic.Bool
+	ttftMs        atomic.Int64
+	tokenRate     atomic.Int64 // output tokens per second
+	tokensPerFrame atomic.Int64
+	outputTokens  atomic.Int64
+	inputTokens   atomic.Int64
 }
+
+var cfg runtimeConfig
+
+// modelName is echoed back in every response so the upstream looks like the channel it stands for.
+var modelName atomic.Value
+
+// frameSet holds the pre-serialized SSE bytes for the current configuration.
+type frameSet struct {
+	frames       [][]byte // delta frames, one per SSE event
+	endFrames    []byte   // finish_reason + usage + [DONE]
+	nonStream    []byte   // single non-streaming JSON body
+	totalFrames  int64
+	frameInterval time.Duration
+}
+
+var current atomic.Pointer[frameSet]
 
 type serverStats struct {
-	requestsTotal atomic.Int64
 	streamsActive atomic.Int64
 	streamsTotal  atomic.Int64
-	abortedTotal  atomic.Int64
-	bytesIn       atomic.Int64
+	requestsTotal atomic.Int64
 	bytesOut      atomic.Int64
+	aborted       atomic.Int64
 }
 
-var (
-	cfg   runtimeConfig
-	stats serverStats
+var stats serverStats
 
-	bufPool = sync.Pool{
-		New: func() any {
-			b := make([]byte, 8*1024)
-			return &b
-		},
+func buildFrameSet(model string, inputTokens, outputTokens, tokensPerFrame, tokenRate int64) *frameSet {
+	if tokensPerFrame < 1 {
+		tokensPerFrame = 1
 	}
+	if tokenRate < 1 {
+		tokenRate = 1
+	}
+	frames := outputTokens / tokensPerFrame
+	if frames < 1 {
+		frames = 1
+	}
+	if outputTokens < tokensPerFrame {
+		outputTokens = tokensPerFrame
+	}
+	frameText := strings.Repeat("token ", int(tokensPerFrame))
+	usage := fmt.Sprintf("{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,"+
+		"\"prompt_tokens_details\":{\"cached_tokens\":0},"+
+		"\"completion_tokens_details\":{\"reasoning_tokens\":0}}", inputTokens, outputTokens, inputTokens+outputTokens)
 
-	// Pre-serialized static wire responses for zero-allocation hot path
-	openAiChatNonStreamResp = []byte(`{"id":"chatcmpl-bench-001","object":"chat.completion","created":1730000000,"model":"gpt-bench","choices":[{"index":0,"message":{"role":"assistant","content":"HyperLLM benchmark response ok."},"finish_reason":"stop"}],"usage":{"prompt_tokens":128,"completion_tokens":64,"total_tokens":192,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}`)
+	first := fmt.Sprintf("data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,"+
+		"\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":%q},"+
+		"\"finish_reason\":null}]}\n\n", model, frameText)
+	delta := fmt.Sprintf("data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,"+
+		"\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},"+
+		"\"finish_reason\":null}]}\n\n", model, frameText)
+	end := fmt.Sprintf("data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,"+
+		"\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", model) +
+		fmt.Sprintf("data: {\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,"+
+			"\"model\":%q,\"choices\":[],\"usage\":%s}\n\ndata: [DONE]\n\n", model, usage)
+	nonStream := fmt.Sprintf("{\"id\":\"chatcmpl-bench\",\"object\":\"chat.completion\",\"created\":1730000000,"+
+		"\"model\":%q,\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":%q},"+
+		"\"finish_reason\":\"stop\"}],\"usage\":%s}",
+		model, strings.Repeat("token ", int(outputTokens)), usage)
 
-	openAiChatFirstChunk = []byte("data: {\"id\":\"chatcmpl-bench-001\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,\"model\":\"gpt-bench\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello \"},\"finish_reason\":null}]}\n\n")
-	openAiChatDeltaChunk = []byte("data: {\"id\":\"chatcmpl-bench-001\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,\"model\":\"gpt-bench\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"bench token \"},\"finish_reason\":null}]}\n\n")
-	openAiChatEndFrames  = []byte(
-		"data: {\"id\":\"chatcmpl-bench-001\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,\"model\":\"gpt-bench\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
-			"data: {\"id\":\"chatcmpl-bench-001\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,\"model\":\"gpt-bench\",\"choices\":[],\"usage\":{\"prompt_tokens\":128,\"completion_tokens\":64,\"total_tokens\":192,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\n" +
-			"data: [DONE]\n\n")
+	out := make([][]byte, frames)
+	for i := range out {
+		if i == 0 {
+			out[i] = []byte(first)
+		} else {
+			out[i] = []byte(delta)
+		}
+	}
+	interval := time.Duration(float64(tokensPerFrame) / float64(tokenRate) * float64(time.Second))
+	return &frameSet{
+		frames:        out,
+		endFrames:     []byte(end),
+		nonStream:     []byte(nonStream),
+		totalFrames:   frames,
+		frameInterval: interval,
+	}
+}
 
-	openAiRespNonStreamResp = []byte(`{"id":"resp_bench_001","object":"response","created_at":1730000000,"status":"completed","model":"gpt-bench-resp","output":[{"id":"msg_bench_001","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"HyperLLM responses benchmark ok."}]}],"usage":{"input_tokens":128,"output_tokens":64,"total_tokens":192,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
-
-	openAiRespStartFrames = []byte(
-		"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_bench_001\",\"object\":\"response\",\"created_at\":1730000000,\"status\":\"in_progress\",\"model\":\"gpt-bench-resp\",\"output\":[]}}\n\n" +
-			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_bench_001\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
-			"event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg_bench_001\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n")
-	openAiRespDeltaFrame = []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_bench_001\",\"output_index\":0,\"content_index\":0,\"delta\":\"bench token \"}\n\n")
-	openAiRespEndFrames  = []byte(
-		"event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_bench_001\",\"output_index\":0,\"content_index\":0,\"text\":\"done\"}\n\n" +
-			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg_bench_001\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n" +
-			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bench_001\",\"object\":\"response\",\"created_at\":1730000000,\"status\":\"completed\",\"model\":\"gpt-bench-resp\",\"output\":[],\"usage\":{\"input_tokens\":128,\"output_tokens\":64,\"total_tokens\":192,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n")
-
-	anthropicNonStreamResp = []byte(`{"id":"msg_bench_001","type":"message","role":"assistant","model":"claude-bench","content":[{"type":"text","text":"HyperLLM anthropic benchmark ok."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":128,"output_tokens":64}}`)
-
-	anthropicStartFrames = []byte(
-		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_bench_001\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-bench\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":128,\"output_tokens\":1}}}\n\n" +
-			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
-	anthropicDeltaFrame = []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"bench token \"}}\n\n")
-	anthropicEndFrames  = []byte(
-		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
-			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":64}}\n\n" +
-			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-
-	geminiNonStreamResp = []byte(`{"responseId":"gem_bench_001","modelVersion":"gemini-bench","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"HyperLLM gemini benchmark ok."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":128,"candidatesTokenCount":64,"totalTokenCount":192}}`)
-
-	geminiDeltaFrame = []byte("data: {\"responseId\":\"gem_bench_001\",\"modelVersion\":\"gemini-bench\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"bench token \"}]}}]}\n\n")
-	geminiEndFrame   = []byte("data: {\"responseId\":\"gem_bench_001\",\"modelVersion\":\"gemini-bench\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":128,\"candidatesTokenCount\":64,\"totalTokenCount\":192}}\n\n")
-)
+func refresh() {
+	model, _ := modelName.Load().(string)
+	if model == "" {
+		model = "bench-openai-chat"
+	}
+	current.Store(buildFrameSet(model, cfg.inputTokens.Load(), cfg.outputTokens.Load(),
+		cfg.tokensPerFrame.Load(), cfg.tokenRate.Load()))
+}
 
 func main() {
-	listenFlag := flag.String("listen", "127.0.0.1:18080", "Comma-separated listen addresses")
-	ttftMs := flag.Int64("ttft-ms", 0, "Default TTFT in milliseconds")
-	chunks := flag.Int64("chunks", 20, "Default number of SSE delta chunks")
-	intervalMs := flag.Int64("interval-ms", 0, "Default delay between SSE chunks in milliseconds")
-	coalesce := flag.Bool("coalesce", false, "If true, flush only at start and end when interval-ms == 0")
+	listen := flag.String("listen", "127.0.0.1:18080", "Comma-separated listen addresses")
+	ttftMs := flag.Int64("ttft-ms", 500, "Upstream time to first token in milliseconds")
+	tokenRate := flag.Int64("token-rate", 200, "Output tokens per second")
+	tokensPerFrame := flag.Int64("tokens-per-frame", 5, "Tokens carried by one SSE frame")
+	outputTokens := flag.Int64("output-tokens", 2000, "Output tokens per response")
+	inputTokens := flag.Int64("input-tokens", 100000, "Prompt tokens reported in usage")
+	model := flag.String("model", "bench-openai-chat", "Model name echoed in responses")
 	flag.Parse()
 
 	cfg.ttftMs.Store(*ttftMs)
-	cfg.chunks.Store(*chunks)
-	cfg.intervalMs.Store(*intervalMs)
-	cfg.coalesce.Store(*coalesce)
+	cfg.tokenRate.Store(*tokenRate)
+	cfg.tokensPerFrame.Store(*tokensPerFrame)
+	cfg.outputTokens.Store(*outputTokens)
+	cfg.inputTokens.Store(*inputTokens)
+	modelName.Store(*model)
+	refresh()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealth)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/stats", handleStats)
 	mux.HandleFunc("/_mock/config", handleConfig)
-	mux.HandleFunc("/v1/chat/completions", handleOpenAiChat)
-	mux.HandleFunc("/v1/responses", handleOpenAiResponses)
-	mux.HandleFunc("/v1/messages", handleAnthropicMessages)
-	mux.HandleFunc("/v1beta/models/", handleGemini)
+	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
 
-	addrs := strings.Split(*listenFlag, ",")
-	var servers []*http.Server
-	for _, rawAddr := range addrs {
-		addr := strings.TrimSpace(rawAddr)
+	for _, addr := range strings.Split(*listen, ",") {
+		addr = strings.TrimSpace(addr)
 		if addr == "" {
 			continue
 		}
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			log.Fatalf("failed to listen on %s: %v", addr, err)
-		}
-		srv := &http.Server{
-			Handler:                      mux,
-			IdleTimeout:                  120 * time.Second,
-			ReadHeaderTimeout:            10 * time.Second,
-			DisableGeneralOptionsHandler: true,
-		}
-		servers = append(servers, srv)
-		go func(a string, l net.Listener, s *http.Server) {
-			log.Printf("mock-upstream listening on %s (ttft=%dms chunks=%d interval=%dms)",
-				a, cfg.ttftMs.Load(), cfg.chunks.Load(), cfg.intervalMs.Load())
-			if err := s.Serve(l); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("server error on %s: %v", a, err)
+		go func(a string) {
+			srv := &http.Server{Addr: a, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+			log.Printf("mock-upstream listening on %s (ttft=%dms rate=%d tok/s frame=%d tok out=%d in=%d)",
+				a, cfg.ttftMs.Load(), cfg.tokenRate.Load(), cfg.tokensPerFrame.Load(),
+				cfg.outputTokens.Load(), cfg.inputTokens.Load())
+			if err := srv.ListenAndServe(); err != nil {
+				log.Fatalf("listen %s: %v", a, err)
 			}
-		}(addr, ln, srv)
+		}(addr)
 	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, srv := range servers {
-		_ = srv.Shutdown(ctx)
-	}
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	select {}
 }
 
 func handleStats(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	resp := map[string]any{
-		"requests_total": stats.requestsTotal.Load(),
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"streams_active": stats.streamsActive.Load(),
 		"streams_total":  stats.streamsTotal.Load(),
-		"aborted_total":  stats.abortedTotal.Load(),
-		"bytes_in":       stats.bytesIn.Load(),
+		"requests_total": stats.requestsTotal.Load(),
 		"bytes_out":      stats.bytesOut.Load(),
+		"aborted_total":  stats.aborted.Load(),
 		"config": map[string]any{
-			"ttft_ms":     cfg.ttftMs.Load(),
-			"chunks":      cfg.chunks.Load(),
-			"interval_ms": cfg.intervalMs.Load(),
-			"coalesce":    cfg.coalesce.Load(),
+			"ttft_ms":          cfg.ttftMs.Load(),
+			"token_rate":       cfg.tokenRate.Load(),
+			"tokens_per_frame": cfg.tokensPerFrame.Load(),
+			"output_tokens":    cfg.outputTokens.Load(),
+			"input_tokens":     cfg.inputTokens.Load(),
+			"model":            modelName.Load(),
 		},
-	}
-	_ = json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if v := q.Get("ttft_ms"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			cfg.ttftMs.Store(n)
+	set := func(name string, dst *atomic.Int64) {
+		if v := q.Get(name); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				dst.Store(n)
+			}
 		}
 	}
-	if v := q.Get("chunks"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 1 {
-			cfg.chunks.Store(n)
-		}
-	}
-	if v := q.Get("interval_ms"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			cfg.intervalMs.Store(n)
-		}
-	}
-	if v := q.Get("coalesce"); v != "" {
-		cfg.coalesce.Store(v == "1" || strings.EqualFold(v, "true"))
+	set("ttft_ms", &cfg.ttftMs)
+	set("token_rate", &cfg.tokenRate)
+	set("tokens_per_frame", &cfg.tokensPerFrame)
+	set("output_tokens", &cfg.outputTokens)
+	set("input_tokens", &cfg.inputTokens)
+	if v := q.Get("model"); v != "" {
+		modelName.Store(v)
 	}
 	if q.Get("reset_stats") == "1" {
-		stats.requestsTotal.Store(0)
 		stats.streamsTotal.Store(0)
-		stats.abortedTotal.Store(0)
-		stats.bytesIn.Store(0)
+		stats.requestsTotal.Store(0)
 		stats.bytesOut.Store(0)
+		stats.aborted.Store(0)
 	}
-	handleStats(w, r)
+	refresh()
+	fs := current.Load()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"frames":         fs.totalFrames,
+		"frame_interval_ms": fs.frameInterval.Milliseconds(),
+		"ttft_ms":        cfg.ttftMs.Load(),
+		"token_rate":     cfg.tokenRate.Load(),
+		"tokens_per_frame": cfg.tokensPerFrame.Load(),
+		"output_tokens":  cfg.outputTokens.Load(),
+		"input_tokens":   cfg.inputTokens.Load(),
+	})
 }
 
-type reqParams struct {
-	ttftMs     int64
-	chunks     int64
-	intervalMs int64
-	coalesce   bool
-}
+// handleChatCompletions drains the request body (the payload size is what the gateway has to parse) and
+// emits either one JSON body or a configured stream of SSE frames.
+func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	stats.requestsTotal.Add(1)
+	stream := drainAndDetectStream(r)
 
-func resolveParams(r *http.Request) reqParams {
-	p := reqParams{
-		ttftMs:     cfg.ttftMs.Load(),
-		chunks:     cfg.chunks.Load(),
-		intervalMs: cfg.intervalMs.Load(),
-		coalesce:   cfg.coalesce.Load(),
-	}
-	if h := r.Header.Get("X-Mock-TTFT-Ms"); h != "" {
-		if n, err := strconv.ParseInt(h, 10, 64); err == nil && n >= 0 {
-			p.ttftMs = n
+	fs := current.Load()
+	if !stream {
+		select {
+		case <-time.After(time.Duration(cfg.ttftMs.Load()) * time.Millisecond):
+		case <-r.Context().Done():
+			stats.aborted.Add(1)
+			return
 		}
-	}
-	if h := r.Header.Get("X-Mock-Chunks"); h != "" {
-		if n, err := strconv.ParseInt(h, 10, 64); err == nil && n >= 1 {
-			p.chunks = n
+		select {
+		case <-time.After(fs.frameInterval * time.Duration(fs.totalFrames)):
+		case <-r.Context().Done():
+			stats.aborted.Add(1)
+			return
 		}
-	}
-	if h := r.Header.Get("X-Mock-Interval-Ms"); h != "" {
-		if n, err := strconv.ParseInt(h, 10, 64); err == nil && n >= 0 {
-			p.intervalMs = n
-		}
-	}
-	return p
-}
-
-// detectStreamAndDrain reads the request body using a pooled buffer with zero per-request heap allocation,
-// detecting `"stream":true` or `"stream": true` even across chunk boundaries.
-func detectStreamAndDrain(body io.ReadCloser) bool {
-	if body == nil {
-		return false
-	}
-	defer body.Close()
-
-	bufPtr := bufPool.Get().(*[]byte)
-	buf := *bufPtr
-	defer bufPool.Put(bufPtr)
-
-	const overlap = 32
-	isStream := false
-	carry := 0
-	var total int64
-
-	for {
-		n, err := body.Read(buf[carry:])
-		if n > 0 {
-			total += int64(n)
-			if !isStream {
-				window := buf[:carry+n]
-				if containsStreamTrue(window) {
-					isStream = true
-				} else if len(window) > overlap {
-					copy(buf[:overlap], window[len(window)-overlap:])
-					carry = overlap
-				} else {
-					carry = len(window)
-				}
-			} else {
-				carry = 0
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	stats.bytesIn.Add(total)
-	return isStream
-}
-
-var (
-	streamKeyBytes = []byte(`"stream"`)
-	trueBytes      = []byte("true")
-)
-
-func containsStreamTrue(b []byte) bool {
-	offset := 0
-	for {
-		idx := bytes.Index(b[offset:], streamKeyBytes)
-		if idx < 0 {
-			return false
-		}
-		pos := offset + idx + len(streamKeyBytes)
-		for pos < len(b) && (b[pos] == ' ' || b[pos] == '\t' || b[pos] == '\r' || b[pos] == '\n') {
-			pos++
-		}
-		if pos < len(b) && b[pos] == ':' {
-			pos++
-			for pos < len(b) && (b[pos] == ' ' || b[pos] == '\t' || b[pos] == '\r' || b[pos] == '\n') {
-				pos++
-			}
-			if pos+len(trueBytes) <= len(b) && bytes.Equal(b[pos:pos+len(trueBytes)], trueBytes) {
-				return true
-			}
-		}
-		offset = offset + idx + len(streamKeyBytes)
-	}
-}
-
-func sleepContext(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
-func writeNonStream(w http.ResponseWriter, r *http.Request, payload []byte) {
-	p := resolveParams(r)
-	if !sleepContext(r.Context(), time.Duration(p.ttftMs)*time.Millisecond) {
-		stats.abortedTotal.Add(1)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
-	w.WriteHeader(http.StatusOK)
-	n, _ := w.Write(payload)
-	stats.bytesOut.Add(int64(n))
-}
-
-func writeStream(w http.ResponseWriter, r *http.Request, startFrames []byte, deltaFrame []byte, endFrames []byte) {
-	p := resolveParams(r)
-	stats.streamsTotal.Add(1)
-	stats.streamsActive.Add(1)
-	defer stats.streamsActive.Add(-1)
-
-	ctx := r.Context()
-	if !sleepContext(ctx, time.Duration(p.ttftMs)*time.Millisecond) {
-		stats.abortedTotal.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fs.nonStream)
+		stats.bytesOut.Add(int64(len(fs.nonStream)))
 		return
 	}
 
@@ -351,95 +253,78 @@ func writeStream(w http.ResponseWriter, r *http.Request, startFrames []byte, del
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
-	var outBytes int64
-	defer func() {
-		stats.bytesOut.Add(outBytes)
-	}()
+	stats.streamsActive.Add(1)
+	stats.streamsTotal.Add(1)
+	defer stats.streamsActive.Add(-1)
 
-	writeFrame := func(frame []byte, flushNow bool) bool {
-		if len(frame) == 0 {
-			return true
-		}
-		n, err := w.Write(frame)
-		outBytes += int64(n)
-		if err != nil {
-			stats.abortedTotal.Add(1)
-			return false
-		}
-		if flushNow {
-			flusher.Flush()
-		}
-		return true
-	}
+	ticker := time.NewTicker(fs.frameInterval)
+	defer ticker.Stop()
 
-	flushEach := p.intervalMs > 0 || !p.coalesce
-	if !writeFrame(startFrames, true) {
+	select {
+	case <-time.After(time.Duration(cfg.ttftMs.Load()) * time.Millisecond):
+	case <-r.Context().Done():
+		stats.aborted.Add(1)
 		return
 	}
 
-	interval := time.Duration(p.intervalMs) * time.Millisecond
-	for i := int64(0); i < p.chunks; i++ {
-		if interval > 0 {
-			if !sleepContext(ctx, interval) {
-				stats.abortedTotal.Add(1)
+	for i := int64(0); i < fs.totalFrames; i++ {
+		if i > 0 {
+			select {
+			case <-ticker.C:
+			case <-r.Context().Done():
+				stats.aborted.Add(1)
 				return
 			}
-		} else if ctx.Err() != nil {
-			stats.abortedTotal.Add(1)
+		}
+		if _, err := w.Write(fs.frames[i]); err != nil {
+			stats.aborted.Add(1)
 			return
 		}
-		if !writeFrame(deltaFrame, flushEach) {
-			return
+		stats.bytesOut.Add(int64(len(fs.frames[i])))
+		flusher.Flush()
+	}
+	if _, err := w.Write(fs.endFrames); err != nil {
+		stats.aborted.Add(1)
+		return
+	}
+	stats.bytesOut.Add(int64(len(fs.endFrames)))
+	flusher.Flush()
+}
+
+// drainAndDetectStream consumes the whole request body (a real upstream would) while looking for the
+// top-level "stream": true flag. Scanning in blocks with a small overlap keeps memory flat for
+// 100K-token payloads and avoids assuming where the flag sits inside the JSON.
+func drainAndDetectStream(r *http.Request) bool {
+	const block = 64 << 10
+	const overlap = 64
+	buf := make([]byte, block+overlap)
+	want := []string{"\"stream\":true", "\"stream\": true"}
+	carry := 0
+	stream := false
+	for {
+		n, err := r.Body.Read(buf[carry:])
+		if n > 0 {
+			if !stream {
+				window := strings.ToLower(string(buf[:carry+n]))
+				for _, w := range want {
+					if strings.Contains(window, w) {
+						stream = true
+						break
+					}
+				}
+			}
+			if n > overlap {
+				copy(buf[:overlap], buf[carry+n-overlap:carry+n])
+				carry = overlap
+			} else {
+				carry = 0
+			}
+		}
+		if err == io.EOF || err != nil {
+			break
 		}
 	}
-
-	if !writeFrame(endFrames, true) {
-		return
-	}
-}
-
-func handleOpenAiChat(w http.ResponseWriter, r *http.Request) {
-	stats.requestsTotal.Add(1)
-	isStream := detectStreamAndDrain(r.Body)
-	if !isStream {
-		writeNonStream(w, r, openAiChatNonStreamResp)
-		return
-	}
-	writeStream(w, r, openAiChatFirstChunk, openAiChatDeltaChunk, openAiChatEndFrames)
-}
-
-func handleOpenAiResponses(w http.ResponseWriter, r *http.Request) {
-	stats.requestsTotal.Add(1)
-	isStream := detectStreamAndDrain(r.Body)
-	if !isStream {
-		writeNonStream(w, r, openAiRespNonStreamResp)
-		return
-	}
-	writeStream(w, r, openAiRespStartFrames, openAiRespDeltaFrame, openAiRespEndFrames)
-}
-
-func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	stats.requestsTotal.Add(1)
-	isStream := detectStreamAndDrain(r.Body)
-	if !isStream {
-		writeNonStream(w, r, anthropicNonStreamResp)
-		return
-	}
-	writeStream(w, r, anthropicStartFrames, anthropicDeltaFrame, anthropicEndFrames)
-}
-
-func handleGemini(w http.ResponseWriter, r *http.Request) {
-	stats.requestsTotal.Add(1)
-	_ = detectStreamAndDrain(r.Body)
-	if strings.Contains(r.URL.Path, ":streamGenerateContent") {
-		writeStream(w, r, nil, geminiDeltaFrame, geminiEndFrame)
-		return
-	}
-	if strings.Contains(r.URL.Path, ":generateContent") {
-		writeNonStream(w, r, geminiNonStreamResp)
-		return
-	}
-	w.WriteHeader(http.StatusNotFound)
-	_, _ = fmt.Fprintf(w, `{"error":{"code":404,"message":"unknown gemini path: %s"}}`, r.URL.Path)
+	return stream
 }
