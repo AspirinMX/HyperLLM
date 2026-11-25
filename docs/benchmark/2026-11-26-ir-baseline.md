@@ -180,11 +180,11 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 ## 五、火焰图分析（anthropic→chat，1000 并发，95 RPS，38k 帧/s）
 
-采样方式：负载稳态中 `asprof -e ctimer/alloc -d 15 -o collapsed`，再用脚本渲染成 SVG（宽度 = 样本占比）。
+采样方式：负载稳态中 `asprof -e ctimer/alloc -d 15 -o collapsed`，再用 async-profiler 自带的 HTML 报告渲染，**原始 HTML 直接提交**（[CPU](figures/flame-cpu.html) / [分配](figures/flame-alloc.html)），用浏览器打开即可缩放、搜索、逐层下钻。方向与 async-profiler 默认一致：根在第 0 层（最底一条），向上是被调用者，宽度 = 样本占比。GitHub 不内联渲染 HTML，需要下载后本地打开。
 
 ### 5.1 CPU（4,621 样本）
 
-![CPU 火焰图](figures/flame-cpu.svg)
+交互式火焰图：[flame-cpu.html](figures/flame-cpu.html) —— 4,621 个样本，131 层全部保留。
 
 | 占比 | 归属 |
 | --: | :--- |
@@ -200,7 +200,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 ### 5.2 分配（12,043 样本）
 
-![分配火焰图](figures/flame-alloc.svg)
+交互式火焰图：[flame-alloc.html](figures/flame-alloc.html) —— 12,043 个样本，113 层全部保留。
 
 | 占比 | 归属 |
 | --: | :--- |
@@ -278,5 +278,5 @@ TARGET=http://127.0.0.1:18081 TAG=ir-baseline PROFILE=1 ./benchmark/scripts/run-
 
 ## 十、原始数据与图表
 
-- **图表**：`docs/benchmark/figures/*.svg`（本报告引用，随仓库提交）
+- **图表**：`docs/benchmark/figures/*.svg`（推导出的折线/柱状图）与 `figures/flame-*.html`（async-profiler 原始火焰图），均随仓库提交
 - **原始数据**：`raw` 采样（`summary.csv`、每场景 `jstat/mpstat/prom`、mock 计数器、collapsed 火焰图栈）体积约 2.3 MB，**不随仓库提交**；本次运行保留在压测机 `/opt/HyperLLM/benchmark/results/ir-baseline-20261126-002611` 与 `ir-cross-20261126-004848`，本地副本见 `docs/benchmark/data/`（`.gitignore` 已排除）。
