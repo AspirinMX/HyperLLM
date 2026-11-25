@@ -8,20 +8,7 @@
 
 ---
 
-## 一、为什么是这条路径
-
-`b490694` 之前网关有两条请求路径：同协议走"严格扫描 + 字节切片改写"直接转发客户端字节，跨协议才进 Canonical IR。前者虽然快，但**上游收到的字节部分来自客户端**，任何解析器语义差异（嵌套重复键、数字语法、转义、尾随垃圾）都可能让网关的路由/计费判断与上游实际执行不一致。
-
-统一之后每次请求都走：
-
-```
-downstream bytes ──decodeRequest──▶ CanonicalRequest ──normalize──▶ encodeRequest ──▶ upstream bytes
-upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encodeEvent──▶ downstream frames
-```
-
-本报告就是这条路径的**优化前基线**。所有数字都带完整环境、参数与采集方式，后续每一轮优化都以它对照。
-
-## 二、测试环境
+## 一、测试环境
 
 | 项 | 实测值 |
 | :--- | :--- |
@@ -38,7 +25,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 | 存储模式 | `postgres=tmpfs kafka=tmpfs synchronous_commit=off`（`fsync=off`、`full_page_writes=off`） |
 | 内核参数 | `somaxconn=65535`、`netdev_max_backlog=65535`、`tcp_max_syn_backlog=65535`、`ip_local_port_range=1024-65535`、`tcp_tw_reuse=1`、`file-max=1048576`、`ulimit -n 65535` |
 
-### 2.1 硬切核拓扑
+### 1.1 硬切核拓扑
 
 | 角色 | CPU | 配置 |
 | :--- | :--- | :--- |
@@ -49,9 +36,9 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 
 被测系统独占 4 核，其余组件严格隔离，互不抢核。
 
-## 三、测试方法
+## 二、测试方法
 
-### 3.1 上游形状（5 个可配置参数）
+### 2.1 上游形状（5 个可配置参数）
 
 由 `mock-upstream` 提供，只实现 `POST /v1/chat/completions`（流式 / 非流式）：
 
@@ -65,7 +52,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 
 非流式响应**故意同样耗时 ~10.5s**（TTFT + 同样的生成时长），保证 stream / nonstream 两种模式在时间维度可比、并发语义一致。
 
-### 3.2 并发是怎么"维持"的
+### 2.2 并发是怎么"维持"的
 
 10 秒的长流如果一次性打满 2000 连接，测到的是"连接风暴 + 排空"，不是稳态。因此：
 
@@ -74,7 +61,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 3. **只统计稳态窗口**：ramp 结束后的 60s（≥ 6 个流生命周期），ramp 期间发出的请求不计入分位；
 4. **自证**：每 100ms 采样在飞数量，输出 `min/avg/p95/max/maintained%`；低于 95% 直接判该场景无效。
 
-### 3.3 场景矩阵（12 个）
+### 2.3 场景矩阵（12 个）
 
 ```
 并发   = 500 / 1000 / 2000
@@ -84,7 +71,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 
 每场景墙钟 = `20s ramp + 60s 稳态 + 最多 10.5s 收尾`（最后一个在窗口内启动的请求需要跑完）。
 
-### 3.4 有效性判据（任一不满足即 `valid=NO`）
+### 2.4 有效性判据（任一不满足即 `valid=NO`）
 
 | 判据 | 阈值 | 采集方式 |
 | :--- | :--- | :--- |
@@ -93,7 +80,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 | 依赖健康 | 三容器 `healthy` 且 `RestartCount` 不变 | `docker inspect` |
 | 依赖容量 | PG / Kafka tmpfs **< 70%** | 容器内 `df` |
 
-### 3.5 长跑依赖治理
+### 2.5 长跑依赖治理
 
 2000 并发 ≈ 190 RPS，每个场景约 1.7 万请求；每个请求产生 1 条 outbox、数个 Redis key、1–2 条 Kafka 事件，而 bench 栈是 **tmpfs**：
 
@@ -104,7 +91,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 | Kafka retention 15min / 256MiB | 整套开始前 | topic 默认 7 天，日志只增不减会撑爆 1 GiB tmpfs |
 | 整套开始前重建栈 | 测试前 | `down -v` 后重放 12 个迁移 + 重新 seed，确保 tmpfs 无残留 |
 
-### 3.6 指标采集
+### 2.6 指标采集
 
 | 维度 | 指标 | 来源 | 频率 |
 | :--- | :--- | :--- | :--- |
@@ -117,7 +104,7 @@ upstream frames  ──decodeEvent───▶ CanonicalStreamEvent ──encode
 | 依赖 | PG/Kafka tmpfs%、健康、重启次数 | `docker inspect` / `df` | 每场景前后 |
 | 上下文 | commit、jar、JVM 参数、内核、存储模式 | `run.info` | 每轮 |
 
-## 四、执行过程（实际命令）
+## 三、执行过程（实际命令）
 
 ```bash
 # 1) 同步代码并构建 IR-only 网关（服务器 /opt/HyperLLM）
@@ -157,9 +144,9 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 1. **跨协议帧计数为 0**：loadgen 用 `"content":` 识别输出帧，而 Anthropic 帧是 `text_delta`，导致 cross 场景帧率/TPS 统计失真 —— 改为协议感知匹配后重跑 6 个 cross 场景；
 2. **jvm/steal/依赖指标未采集**：本轮之前套件只产出吞吐与延迟，已补 `jstat`/`actuator`/健康检查采样（提交 `87abc31`）。
 
-## 五、结果
+## 四、结果
 
-### 5.1 流式（400 帧/流，40 帧/s，≈10.5s/流）
+### 4.1 流式（400 帧/流，40 帧/s，≈10.5s/流）
 
 | 场景 | 并发 | RPS | TTFT P50 / P99 | 网关 CPU | mock | loadgen | 帧/s | 输出 tok/s |
 | :--- | --: | --: | :--- | --: | --: | --: | --: | --: |
@@ -170,7 +157,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 | anthropic→chat | 1000 | 95.3 | 513.0 / 592.5 ms | 71.2% | 43.1% | 57.5% | 38,140 | 200.5 |
 | anthropic→chat | 2000 | 186.9 | 645.6 / **1054.1** ms | **91.7%** | 64.1% | 62.1% | 74,767 | 200.6 |
 
-### 5.2 非流式（同样 ≈10.5s/请求）
+### 4.2 非流式（同样 ≈10.5s/请求）
 
 | 场景 | 并发 | RPS | 延迟 P50 | 网关 CPU | mock | loadgen |
 | :--- | --: | --: | --: | --: | --: | --: |
@@ -183,7 +170,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 > 12/12 场景：`max_steal=0.00%`（另有独立 `vmstat` 监视全程为 0）、`maintained=100%`、**0 错误**（全部 HTTP 200）、`valid=yes`。
 
-### 5.3 资源视图
+### 4.3 资源视图
 
 ![每个角色占用的 CPU](figures/cpu-split.svg)
 
@@ -191,11 +178,11 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 **读法**：并发从 1000 → 2000，RPS 与帧率线性翻倍（95 → 187 RPS，38k → 75k 帧/s），但网关 CPU 从 74.9% → 91.8%，TTFT P99 从 608ms → 1133ms。**2000 并发已经是 4 核的实际上限**；再往上必须先做 CPU/内存优化或加核。
 
-## 六、火焰图分析（anthropic→chat，1000 并发，95 RPS，38k 帧/s）
+## 五、火焰图分析（anthropic→chat，1000 并发，95 RPS，38k 帧/s）
 
 采样方式：负载稳态中 `asprof -e ctimer/alloc -d 15 -o collapsed`，再用脚本渲染成 SVG（宽度 = 样本占比）。
 
-### 6.1 CPU（4,621 样本）
+### 5.1 CPU（4,621 样本）
 
 ![CPU 火焰图](figures/flame-cpu.svg)
 
@@ -211,7 +198,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 > 结论：**CPU 的主项是"每帧一次系统调用 + TCP 处理"**，业务编解码加起来不到 8%。这也解释了为什么同协议与跨协议几乎同价（91.8% vs 91.7%）。
 
-### 6.2 分配（12,043 样本）
+### 5.2 分配（12,043 样本）
 
 ![分配火焰图](figures/flame-alloc.svg)
 
@@ -227,15 +214,15 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 > 结论：**约 45% 的分配来自"把字节拼成新数组 / 把字节 decode 成 String"** —— 正是 `ResizableByteBuffer` 的扩容拷贝、`toExactByteArray()` 的二次拷贝、以及 parser 的 `new String`。这是下一轮优化的第一优先级。
 
-## 七、堆内存与 GC
+## 六、堆内存与 GC
 
-### 7.1 Old Gen 走势
+### 6.1 Old Gen 走势
 
 ![Old Gen 走势](figures/heap-oldgen.svg)
 
 四个场景按时间顺序执行（c500 → c1000 → c2000 stream → c2000 nonstream），Old Gen 只增不减：**c500 结束时约 1.95 GB，到 nonstream c2000 峰值 4.02 GB**。没有 Full GC，靠 Young GC 回收，说明对象在 Eden 就死了，但**元数据/长驻结构在持续累积**——与"每请求建一棵 IR 图、图里有大量小对象"的形态一致。
 
-### 7.2 峰值对比
+### 6.2 峰值对比
 
 ![堆峰值](figures/heap-peaks.svg)
 
@@ -248,7 +235,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 | cross stream 2000 | 4419 MB | 3398 MB | 56 | 2712 ms | 0 | 32.7 MB | 51 |
 | cross nonstream 2000 | 4340 MB | **4020 MB** | 36 | 1933 ms | 0 | 32.7 MB | 51 |
 
-### 7.3 GC 停顿
+### 6.3 GC 停顿
 
 ![GC 停顿](figures/gc-pause.svg)
 
@@ -256,7 +243,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 - 但 **2000 并发时 Young GC 停顿占墙钟 4.5%**（2925ms / 60s），这直接体现在 TTFT P99 上（1133ms vs 608ms）。
 - 堆峰值 4438 MB / 5120 MB ⇒ **余量 12%**。这不是"能不能跑"的问题，而是"再加任何一点并发就会 GC 抖动"的问题。
 
-## 八、瓶颈归因与容量结论
+## 七、瓶颈归因与容量结论
 
 | 观察 | 证据 | 结论 |
 | :--- | :--- | :--- |
@@ -269,7 +256,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 
 **容量结论（4C/5G，tmpfs 存储）**：该形状下 **2000 并发是已验证上限**（0 错误、吞吐线性），**1000 并发是舒适区间**（CPU 75%、TTFT P99 608ms、堆 4312 MB）。
 
-## 九、局限
+## 八、局限
 
 1. **存储是 tmpfs + `fsync=off`**：测的是网关算力上限，不是持久化能力；生产磁盘的 commit 延迟未包含在内（`run.info` 已标注 storage 模式，两种配置不可混用）。
 2. **同机压测**：mock 与 loadgen 与被测网关共享 8 核，虽然硬隔离，但 2000 并发时 mock 已用 64%。
@@ -277,7 +264,7 @@ asprof -e alloc  -d 15 -o collapsed -f /tmp/flame-alloc.collapsed <gateway-pid>
 4. **火焰图取自 c1000**：这是为了在稳定窗口内采集，2000 并发下的热点结构应该一致但未单独采。
 5. 未测 new-api 等对照系统（本轮只看自身路径）。
 
-## 十、复现
+## 九、复现
 
 ```bash
 git checkout c347807
@@ -289,7 +276,7 @@ GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g ./benchm
 TARGET=http://127.0.0.1:18081 TAG=ir-baseline PROFILE=1 ./benchmark/scripts/run-suite.sh
 ```
 
-## 十一、原始数据与图表
+## 十、原始数据与图表
 
 - **图表**：`docs/benchmark/figures/*.svg`（本报告引用，随仓库提交）
 - **原始数据**：`raw` 采样（`summary.csv`、每场景 `jstat/mpstat/prom`、mock 计数器、collapsed 火焰图栈）体积约 2.3 MB，**不随仓库提交**；本次运行保留在压测机 `/opt/HyperLLM/benchmark/results/ir-baseline-20261126-002611` 与 `ir-cross-20261126-004848`，本地副本见 `docs/benchmark/data/`（`.gitignore` 已排除）。
