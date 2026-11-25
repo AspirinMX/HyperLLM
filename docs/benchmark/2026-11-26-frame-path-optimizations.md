@@ -1,0 +1,115 @@
+# 帧路径优化与容量复测（2026-11-26）
+
+承接 [2026-11-26-ir-baseline.md](./2026-11-26-ir-baseline.md)。基线报告确认了"每帧一次系统调用"
+是 CPU 主项（`writev` 22.8% + `recv` 14.2% + `epoll_wait` 2.3%，`epoll_ctl` 为 0），本报告记录
+据此做的四组改动，以及改动后的容量复测、GC 观察和一次失败的合并实验。
+
+环境与基线报告完全相同：8 vCPU KVM / 内核 6.12.107，网关 `taskset 0-3` + `-XX:ActiveProcessorCount=4`，
+infra 核 4，mock 5-6，loadgen 7；上游 100K 输入 / 2000 输出 / 200 tok/s / 5 token 每帧 / 500ms TTFT；
+tmpfs 栈，12 场景矩阵中所有场景 `%steal=0`、`maintained=100%`、0 错误。
+
+## 一、改了什么
+
+| 提交 | 改动 | 针对的实测成本 |
+| :-- | :-- | :-- |
+| `7519410` | SSE 分帧改为"增长缓冲 + 读游标 + 回调式发帧"，帧是缓冲里的 `(byte[],off,len)` 切片；四个 codec 用 `readTree(JsonParser)` 直接读字节 | `Arrays.copyOf` 12.4% + `copyOfRange` 12.6% + `StringUTF16.compress` 12.3% 分配 |
+| `d95fb32` | OpenAI Chat / Anthropic 解码器用 `JsonParser` 游标只取 delta 字段，控制帧回落原树路径 | `readTree` 4.6% CPU、`LinkedHashMap` 9% 分配 |
+| `57f7a61` | 出帧改为"常量信封 + Jackson 只写 delta + 复用缓冲"，新增 `toCopiedByteArray()` | `writeValueAsString` 2.6% CPU、`ByteArrayOutputStream` 8.8% 分配 |
+| `9147d0f` | `StreamBridge.feed` 返回合并后的 `byte[]`，一个上游 chunk 只写一次 | `writev` 22.8%（仅在多帧同读时生效） |
+| `339a93a` | `rawBody` 移出重试闭包；`MAX_ACCUMULATED_CHARS` 100 万 → 65,536 | 每在飞请求 ~400KB + 每流最多 2MB 的存活 |
+| `c6d56ac` | `encodeRequestPayload()` + `PreparedUpstreamPayload.ofSlice()`，请求体以切片交付 | 每请求一次 ~400KB 的 `toExactByteArray()` 拷贝 |
+
+过程中通过新加的出帧测试发现一个潜在缺陷：`ResizableByteBuffer.toExactByteArray()` 在
+`count == capacity` 时直接返回内部数组（原来只用于一次性请求编码，安全），复用缓冲会导致串帧，
+因此补充了恒定拷贝的 `toCopiedByteArray()`。
+
+## 二、复测结果（同协议流式，堆 6g，暖态）
+
+| 并发 | RPS | 网关 CPU | TTFT P50 | TTFT P99 | YGC | GC 时间 | 堆峰值 / 老年代 |
+| --: | --: | --: | --: | --: | --: | --: | --: |
+| 500 | 47.7 (47.7) | **44.4%** (54.2) | 509 (511) | 525 (538) | **6** (18) | **341ms** (590) | 5156 / 3814 |
+| 1000 | 95.4 (95.2) | **69.2%** (74.9) | 513 (515) | 591 (608) | **10** (23) | **873ms** (1360) | 4888 / 3260 |
+| 2000 | 187.5 (187.3) | 91.0% (91.8) | 615 (511) | **920** (1133) | **33** (57) | **2259ms** (2925) | 5114 / 4462 |
+
+括号内是基线报告同场景的数字。跨协议 2000：187.5 RPS、91.8% CPU、P50 620、P99 910、YGC 36。
+
+结论：
+
+- **分配显著下降**：YGC 次数 −42%～−67%，GC 时间 −23%～−45%，与分配剖析的预期一致。
+- **CPU 收益随并发衰减**：500 时 −18%、1000 时 −8%、2000 时约 0。2000 时 CPU 已被内核收发与
+  Netty/Reactor 事件循环占满，被优化掉的这部分在总量中占比变小；GC 本来也只占 3%。
+- **2000 的 P50 变差、P99 变好**（511→615、1133→920）：分布被压平，更像把排队从长尾挪到中位数。
+- **RPS 三个档位都没变**，因为吞吐由"2000 token / 200 tok/s"的请求时长决定，改动前就不是瓶颈。
+
+## 三、容量上限复测
+
+| 并发 | RPS | 网关 CPU | TTFT P50 | TTFT P99 | YGC / GC 时间 | Full GC | mock CPU | 判定 |
+| --: | --: | --: | --: | --: | --: | --: | --: | :-- |
+| 2000 | 180.2 | 94.4% | 752 | 1472 | 58 / 2531ms | 0 | 62.6% | 刚重启后的冷态 |
+| **2500** | **230.4** | **93.2%** | **738** | **1319** | 79 / 3298ms | 0 | 74.3% | **稳态上限** |
+| 3000 | 268.9 | 93.3% | 1004 | 1917 | 123 / 4600ms | **2 次 / 939ms** | **83.1%** | 极限，堆打满 |
+
+3000 并发能跑完且 0 错误、in-flight 100%，但堆 5120/5120 被占满、出现 2 次 Full GC、P99 涨到 1.9s，
+属于"靠排队硬吃"，不作为可用容量。**2500 是当前这台 4C 网关的稳态上限**：比基线报告的 2000 提升 25%，
+P99 仍在 1.3s、无 Full GC、mock 还有 26% 余量。
+
+堆取值：6g 与 5g 在 2500 档为 92.6%/P99 1199 对 93.2%/P99 1319，差异在噪声量级；5g 的好处是能在
+3000 时观察到"堆打满 + Full GC"这条边界信号，因此默认仍用 5g。
+
+## 四、GC 观察
+
+- 0 次 Full GC（2500 及以下）；平均 YGC 暂停 50–60 ms，远低于 `MaxGCPauseMillis=200`，
+  **暂停不是瓶颈，调暂停目标没有意义**。
+- 分配率从 ~1.1 GB/s 降到 ~0.6 GB/s（YGC 57→33 / 90s），这是本轮唯一可归因于代码的 GC 收益。
+- 老年代占用随并发线性增长（c500 3.8GB → c2000 4.5GB），主要由"短活对象跨过一次 YGC 被晋升"
+  造成，不是长活泄漏：`responseSink` 是 `Sinks.One`，响应头一到即 complete，请求对象在约一个
+  TTFT 后就不可达。
+- 6g 堆没有换来余量：G1 把老年代养到 4.8–5.0GB，占用率仍是 ~90%，多出的 1GB 只是变成了老年代。
+- 网关启动脚本现在固定写 `-Xlog:gc=info,gc+heap=info,gc+ergo=info,gc+phases=debug,gc+humongous=debug`，
+  `run-suite.sh` 按场景切片到 `<label>.gc.txt`，后续做 GC 分析不必再靠 jstat 聚合值。
+
+## 五、出帧合并实验（结论：当前 harness 下不可测）
+
+设计：每请求一个 `SseFrameBatcher`，首帧不延迟，之后按 `max(64KB, 256 帧, 12ms)` 成批；
+由**单个** 5ms tick 线程驱动所有有积压的请求（不给每连接建定时器）。代码已合入
+（`0e75a36`、`59dea37`），**默认关闭**，需 `-Dgateway.stream.coalesce-window-ms=12` 才启用。
+
+把 `TOKENS_PER_FRAME` 设为 1（模拟真实"一 token 一帧"）后，2000 并发：
+
+| | RPS | 网关 CPU | TTFT P50 | P99 | mock CPU | 帧率 |
+| :-- | --: | --: | --: | --: | --: | --: |
+| 合并关 | 67.65 | 96.4% | 1976 | 3541 | **91.1%** | 135,368/s |
+| 合并开 12ms | 68.47 | 95.8% | 1812 | 3851 | **91.1%** | 136,976/s |
+
+两组几乎相同，原因是**压测机先饱和**：mock 占满 91% CPU、帧率停在 13.6 万/秒（正是 README 记录的
+harness 上限 13–15 万），网关只能拿到 13.5 万帧/秒，而不是 2000×200 = 40 万。mock 被自身拖慢后，
+每流帧间隔被拉长到 ~15ms（5 token/帧 时是 25ms），比 12ms 窗口还长，**合并窗口抓不到任何可合并的帧**。
+
+因此：合并只在"帧间隔小于窗口"时成立（真实厂商 200 帧/s/流 = 5ms 间隔），本机的 mock 无法产生
+这种负载。功能保留、默认关闭，等有真实上游或独立发压机时再评估。
+
+## 六、仍未验证 / 下一步
+
+1. 2000 档 P50 从 511 涨到 615 的成因未定（可能是 6g 堆下更贵的 mixed 暂停，也可能是饱和点附近的
+   排队重分布），需要在 5g + 暖态下复测同场景。
+2. 2000→2500 之后新增的 CPU 具体去向未采（需在新的饱和点做一次火焰图 + `/proc/<pid>/io`）。
+3. 合并功能若要在本机验证，需要把 mock 拆到独立机器，或降低单流帧率并提高流数。
+
+## 七、复现
+
+```bash
+# 网关（5g 堆，固定 GC 日志）
+GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g \
+  ./benchmark/scripts/run-gateway.sh
+
+# 2000/2500/3000 同协议流式
+TARGET=http://127.0.0.1:18081 CONCURRENCIES="2000 2500 3000" MODES=stream PAIRS=same TAG=heap5g \
+  ./benchmark/scripts/run-suite.sh
+
+# 一 token 一帧 + 合并 A/B
+JAVA_TOOL_OPTIONS="-Dgateway.stream.coalesce-window-ms=12" \
+TARGET=http://127.0.0.1:18081 CONCURRENCIES=2000 MODES=stream PAIRS=same \
+TOKENS_PER_FRAME=1 TAG=tpf1on ./benchmark/scripts/run-suite.sh
+```
+
+原始数据在压测机 `/opt/HyperLLM/benchmark/results/{gc2000,warm2000,c2500,heap5g}-*`，不随仓库提交。
