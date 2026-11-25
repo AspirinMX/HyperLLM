@@ -322,6 +322,14 @@ public class GatewayProxyService {
         String anthropicVersion = inboundContext.anthropicVersion();
         String anthropicBeta = inboundContext.anthropicBeta();
 
+        // Computed once: the inbound body is only needed to size the translation offload decision, so it
+        // must not be captured by the retry closure - otherwise the whole request body stays reachable
+        // for as long as the attempt (and its retries) live.
+        int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
+        boolean offloadTranslation = offloadThreshold >= 0
+                && rawBody != null
+                && rawBody.length >= offloadThreshold;
+
         return Mono.defer(() -> {
             GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels, protocolKind);
             if (candidate == null) {
@@ -348,11 +356,6 @@ public class GatewayProxyService {
 
             // Every combination re-encodes the upstream body from the IR graph, so large bodies are always
             // translated off the Netty event loop once they exceed the configured threshold.
-            int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
-            boolean offloadTranslation = offloadThreshold >= 0
-                    && rawBody != null
-                    && rawBody.length >= offloadThreshold;
-
             Mono<PreparedUpstreamPayload> payloadMono = offloadTranslation
                     ? Mono.fromCallable(() -> protocolTranslator.prepareUpstreamPayload(
                             decodedRequest, outboundProtocol, encodingContext))

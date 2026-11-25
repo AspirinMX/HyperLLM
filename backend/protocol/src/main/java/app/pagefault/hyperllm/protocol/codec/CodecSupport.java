@@ -32,7 +32,12 @@ import java.util.Locale;
  */
 public final class CodecSupport {
 
-    public static final int MAX_ACCUMULATED_CHARS = 1_000_000;
+    /**
+     * Upper bound for the per-stream completion text kept for token estimation when the upstream sends no
+     * usage block. 1,000,000 chars cost up to 2 MB of Old Gen per in-flight stream; 65,536 chars is
+     * already ~16k tokens, far past any sane {@code max_tokens}, and bounds the retention at ~128 KB.
+     */
+    public static final int MAX_ACCUMULATED_CHARS = 65_536;
     public static final String GEMINI_SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
     private CodecSupport() {
