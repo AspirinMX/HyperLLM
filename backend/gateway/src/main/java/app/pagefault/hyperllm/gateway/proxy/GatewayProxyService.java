@@ -140,6 +140,14 @@ public class GatewayProxyService {
     private final ProjectBudgetService projectBudgetService;
     private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
+    private static final long COALESCE_WINDOW_MS = Long.getLong("gateway.stream.coalesce-window-ms", 0L);
+    private static final SseFrameCoalescer FRAME_COALESCER = new SseFrameCoalescer(
+            Math.max(0L, COALESCE_WINDOW_MS) * 1_000_000L,
+            Math.max(1L, Long.getLong("gateway.stream.coalesce-tick-ms", 5L)),
+            64 * 1024,
+            256);
+    private static final boolean FRAME_COALESCER_ENABLED = COALESCE_WINDOW_MS > 0L;
+
     private final GatewayProperties properties;
     private final ProtocolTranslator protocolTranslator;
     private final AesGcmCipher aesGcmCipher;
@@ -533,6 +541,9 @@ public class GatewayProxyService {
         AtomicLong firstByteNanos = new AtomicLong(0L);
         DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();
         Sinks.Many<byte[]> frameSink = Sinks.many().unicast().onBackpressureBuffer();
+        // Batching is off unless gateway.stream.coalesce-window-ms is set: with a window of 0 the
+        // pipeline keeps its one-frame-per-write behaviour.
+        SseFrameBatcher frameBatcher = FRAME_COALESCER_ENABLED ? FRAME_COALESCER.newBatcher() : null;
 
         Flux<DataBuffer> clientFrames = frameSink.asFlux()
                 .map(bufferFactory::wrap)
@@ -583,7 +594,11 @@ public class GatewayProxyService {
                         : Mono.just(frame))
                 .doOnNext(frame -> {
                     firstByteNanos.compareAndSet(0L, System.nanoTime());
-                    frameSink.tryEmitNext(frame);
+                    if (frameBatcher != null) {
+                        FRAME_COALESCER.offer(frameBatcher, batch -> frameSink.tryEmitNext(batch), frame);
+                    } else {
+                        frameSink.tryEmitNext(frame);
+                    }
                 })
                 .then(Mono.defer(() -> settleReactive(
                         settled, true, bridge.finalizeUsage(true),
@@ -592,7 +607,12 @@ public class GatewayProxyService {
                         candidate.upstreamModelName(),
                         protocolKind, true, 200, null, retryCount, clientIp, lease
                 )))
-                .then(Mono.fromRunnable(frameSink::tryEmitComplete))
+                .then(Mono.fromRunnable(() -> {
+                    if (frameBatcher != null) {
+                        FRAME_COALESCER.drain(frameBatcher, batch -> frameSink.tryEmitNext(batch));
+                    }
+                    frameSink.tryEmitComplete();
+                }))
                 .onErrorResume(ex -> settleReactive(
                         settled, false, bridge.finalizeUsage(false),
                         requestStartNanos, firstByteNanos.get(),
