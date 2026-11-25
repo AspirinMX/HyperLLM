@@ -38,21 +38,6 @@ public final class CodecSupport {
     private CodecSupport() {
     }
 
-    public static ObjectNode parseObjectRoot(ObjectMapper mapper, byte[] rawBody) {
-        if (rawBody == null || rawBody.length == 0) {
-            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
-        }
-        try {
-            JsonNode tree = mapper.readTree(rawBody);
-            if (!(tree instanceof ObjectNode obj)) {
-                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must be a JSON object");
-            }
-            return obj;
-        } catch (IOException ex) {
-            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
-        }
-    }
-
     public static ObjectNode parseResponseObjectRoot(ObjectMapper mapper, byte[] rawBody) {
         if (rawBody == null || rawBody.length == 0) {
             throw new HyperLlmException(ErrorCode.UPSTREAM_ERROR, "Upstream returned empty response body");
@@ -74,12 +59,6 @@ public final class CodecSupport {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'model' is required and must be non-blank");
         }
         return modelNode.asText().trim();
-    }
-
-    public static void rewriteModelIfPresent(ObjectNode root, String upstreamModelName) {
-        if (upstreamModelName != null && !upstreamModelName.isBlank()) {
-            root.put("model", upstreamModelName);
-        }
     }
 
     public static byte[] writeJsonBytes(ObjectMapper mapper, JsonNode node) {

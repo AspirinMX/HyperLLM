@@ -28,8 +28,6 @@ import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
-import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -72,13 +70,6 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
-    }
-
-    @Override
-    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
-        ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
-        CodecSupport.rewriteModelIfPresent(root, context.upstreamModelName());
-        return CodecSupport.writeJsonBytes(mapper, root);
     }
 
     @Override
@@ -743,11 +734,6 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
     @Override
     public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
         return new OpenAiResponsesStreamEncoder(inboundMeta);
-    }
-
-    @Override
-    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-        return new OpenAiResponsesPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Request decoding helpers ----
@@ -2081,86 +2067,5 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
     }
 
-    // ---- Passthrough Streaming Bridge ----
 
-    private final class OpenAiResponsesPassthroughBridge implements StreamBridge {
-
-        private final StreamRequestMetadata inboundMeta;
-        private final TokenEstimator tokenEstimator;
-        private final SseEventSplitter splitter = new SseEventSplitter();
-        private final StringBuilder streamedText = new StringBuilder();
-        private TokenUsage observedUsage;
-
-        private OpenAiResponsesPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-            this.inboundMeta = inboundMeta;
-            this.tokenEstimator = tokenEstimator;
-        }
-
-        @Override
-        public List<byte[]> feed(byte[] upstreamChunk) {
-            return inspectEvents(splitter.push(upstreamChunk));
-        }
-
-        @Override
-        public List<byte[]> complete() {
-            return inspectEvents(splitter.flushRemainder());
-        }
-
-        @Override
-        public TokenUsage finalizeUsage(boolean cleanCompletion) {
-            if (cleanCompletion && observedUsage != null) {
-                return observedUsage;
-            }
-            if (observedUsage != null && observedUsage.totalOutputTokens() > 0) {
-                return observedUsage;
-            }
-            int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
-                    ? observedUsage.promptTokens()
-                    : inboundMeta.estimatedPromptTokens();
-            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
-            return new TokenUsage(
-                    estPrompt,
-                    observedUsage == null ? 0 : observedUsage.cachedReadTokens(),
-                    observedUsage == null ? 0 : observedUsage.cachedWriteTokens(),
-                    estCompletion,
-                    observedUsage == null ? 0 : observedUsage.reasoningTokens(),
-                    true
-            );
-        }
-
-        private List<byte[]> inspectEvents(List<SseEventSplitter.SseEvent> events) {
-            if (events.isEmpty()) {
-                return List.of();
-            }
-            List<byte[]> out = new ArrayList<>(events.size());
-            for (SseEventSplitter.SseEvent ev : events) {
-                inspectPayload(ev);
-                out.add(ev.rawBytes());
-            }
-            return out;
-        }
-
-        private void inspectPayload(SseEventSplitter.SseEvent ev) {
-            String data = ev.dataPayload();
-            if (data.isEmpty() || "[DONE]".equals(data)) {
-                return;
-            }
-            try {
-                JsonNode root = mapper.readTree(data);
-                if (!root.isObject()) {
-                    return;
-                }
-                String type = root.path("type").asText(ev.eventName());
-                if ("response.output_text.delta".equals(type)
-                        || "response.reasoning_summary_text.delta".equals(type)
-                        || "response.reasoning_text.delta".equals(type)
-                        || "response.function_call_arguments.delta".equals(type)) {
-                    CodecSupport.appendBounded(streamedText, root.path("delta").asText(""));
-                } else if ("response.completed".equals(type) || "response.incomplete".equals(type)) {
-                    parseUsageNode(root.path("response").get("usage")).ifPresent(u -> observedUsage = u);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-    }
 }

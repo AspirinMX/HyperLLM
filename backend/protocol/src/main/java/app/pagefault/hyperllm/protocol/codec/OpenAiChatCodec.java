@@ -28,8 +28,6 @@ import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
-import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -72,21 +70,6 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
-    }
-
-    @Override
-    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
-        ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
-        CodecSupport.rewriteModelIfPresent(root, context.upstreamModelName());
-        if (decoded.stream() && !decoded.clientRequestedUsage()) {
-            JsonNode streamOptions = root.get("stream_options");
-            ObjectNode optionsObj = (streamOptions instanceof ObjectNode existing)
-                    ? existing
-                    : mapper.createObjectNode();
-            optionsObj.put("include_usage", true);
-            root.set("stream_options", optionsObj);
-        }
-        return CodecSupport.writeJsonBytes(mapper, root);
     }
 
     @Override
@@ -779,11 +762,6 @@ public final class OpenAiChatCodec implements ProtocolCodec {
     @Override
     public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
         return new OpenAiChatStreamEncoder(inboundMeta);
-    }
-
-    @Override
-    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-        return new OpenAiChatPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Request decoding helpers ----
@@ -2085,143 +2063,4 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         }
     }
 
-    // ---- Passthrough Streaming Bridge ----
-
-    private final class OpenAiChatPassthroughBridge implements StreamBridge {
-
-        private final StreamRequestMetadata inboundMeta;
-        private final TokenEstimator tokenEstimator;
-        private final SseEventSplitter splitter = new SseEventSplitter();
-        private final StringBuilder streamedText = new StringBuilder();
-        private TokenUsage observedUsage;
-
-        private OpenAiChatPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-            this.inboundMeta = inboundMeta;
-            this.tokenEstimator = tokenEstimator;
-        }
-
-        @Override
-        public List<byte[]> feed(byte[] upstreamChunk) {
-            return processEvents(splitter.push(upstreamChunk));
-        }
-
-        @Override
-        public List<byte[]> complete() {
-            return processEvents(splitter.flushRemainder());
-        }
-
-        @Override
-        public TokenUsage finalizeUsage(boolean cleanCompletion) {
-            if (cleanCompletion && observedUsage != null) {
-                return observedUsage;
-            }
-            if (observedUsage != null && observedUsage.totalOutputTokens() > 0) {
-                return observedUsage;
-            }
-            int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
-                    ? observedUsage.promptTokens()
-                    : inboundMeta.estimatedPromptTokens();
-            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
-            return new TokenUsage(
-                    estPrompt,
-                    observedUsage == null ? 0 : observedUsage.cachedReadTokens(),
-                    observedUsage == null ? 0 : observedUsage.cachedWriteTokens(),
-                    estCompletion,
-                    observedUsage == null ? 0 : observedUsage.reasoningTokens(),
-                    true
-            );
-        }
-
-        private List<byte[]> processEvents(List<SseEventSplitter.SseEvent> events) {
-            if (events.isEmpty()) {
-                return List.of();
-            }
-            List<byte[]> out = new ArrayList<>(events.size());
-            for (SseEventSplitter.SseEvent event : events) {
-                byte[] inspected = inspectAndFilter(event);
-                if (inspected != null) {
-                    out.add(inspected);
-                }
-            }
-            return out;
-        }
-
-        private byte[] inspectAndFilter(SseEventSplitter.SseEvent event) {
-            String data = event.dataPayload();
-            if (data.isEmpty() || "[DONE]".equals(data)) {
-                return event.rawBytes();
-            }
-            try {
-                JsonNode node = mapper.readTree(data);
-                if (!node.isObject()) {
-                    return event.rawBytes();
-                }
-                accumulateChoices(node.get("choices"));
-                Optional<TokenUsage> parsed = parseUsageNode(node.get("usage"));
-                if (parsed.isPresent()) {
-                    observedUsage = parsed.get();
-                    if (!inboundMeta.clientRequestedUsage()) {
-                        if (isUsageOnlyFrame(node)) {
-                            return null;
-                        }
-                        if (node instanceof ObjectNode obj) {
-                            obj.remove("usage");
-                            return SseEventSplitter.buildDataFrame(CodecSupport.writeJsonString(mapper, obj));
-                        }
-                    }
-                }
-                return event.rawBytes();
-            } catch (Exception ignored) {
-                return event.rawBytes();
-            }
-        }
-
-        private void accumulateChoices(JsonNode choices) {
-            if (choices == null || !choices.isArray()) {
-                return;
-            }
-            for (JsonNode choice : choices) {
-                JsonNode delta = choice.get("delta");
-                if (delta == null || !delta.isObject()) {
-                    continue;
-                }
-                if (delta.hasNonNull("content") && delta.get("content").isTextual()) {
-                    CodecSupport.appendBounded(streamedText, delta.get("content").asText());
-                }
-                String reasoning = extractReasoningText(delta);
-                if (reasoning != null && !reasoning.isEmpty()) {
-                    CodecSupport.appendBounded(streamedText, reasoning);
-                }
-                JsonNode toolCalls = delta.get("tool_calls");
-                if (toolCalls != null && toolCalls.isArray()) {
-                    for (JsonNode tc : toolCalls) {
-                        JsonNode args = tc.path("function").get("arguments");
-                        if (args != null && args.isTextual()) {
-                            CodecSupport.appendBounded(streamedText, args.asText());
-                        }
-                    }
-                }
-            }
-        }
-
-        private boolean isUsageOnlyFrame(JsonNode root) {
-            JsonNode choices = root.get("choices");
-            if (choices == null || choices.isNull() || (choices.isArray() && choices.isEmpty())) {
-                return true;
-            }
-            if (!choices.isArray()) {
-                return false;
-            }
-            for (JsonNode choice : choices) {
-                if (choice.hasNonNull("finish_reason")) {
-                    return false;
-                }
-                JsonNode delta = choice.get("delta");
-                if (delta != null && delta.isObject() && !delta.isEmpty()) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
 }

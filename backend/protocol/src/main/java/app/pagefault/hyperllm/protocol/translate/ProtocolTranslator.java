@@ -6,9 +6,6 @@ import app.pagefault.hyperllm.protocol.codec.GeminiGenerateContentCodec;
 import app.pagefault.hyperllm.protocol.codec.OpenAiChatCodec;
 import app.pagefault.hyperllm.protocol.codec.OpenAiResponsesCodec;
 import app.pagefault.hyperllm.protocol.codec.ProtocolCodec;
-import app.pagefault.hyperllm.protocol.fast.FastRequestProbe;
-import app.pagefault.hyperllm.protocol.fast.PassthroughBytePatcher;
-import app.pagefault.hyperllm.protocol.fast.StrictJsonRequestScanner;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalResponse;
@@ -25,15 +22,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.EnumMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Dual-path protocol engine supporting all 16 combinations of the four supported text-generation protocols:
- * <ul>
- *   <li>4 homomorphic combinations use strict single-pass UTF-8 scanning + zero-copy byte-range patching
- *       (no full JSON DOM parsing or re-serialization on 100K+ token requests).</li>
- *   <li>12 heterogeneous combinations lazily decode into the Canonical IR and streaming state machines.</li>
- * </ul>
+ * Single-path Canonical IR protocol engine for the four supported text-generation protocols.
+ *
+ * <p>Every request follows exactly one route — <b>downstream wire body &rarr; Canonical IR &rarr; upstream wire
+ * body</b> — regardless of whether the inbound and outbound protocols match. There is no homomorphic
+ * passthrough and no byte-range patching of the client payload: the bytes sent upstream are always
+ * produced by {@link ProtocolCodec#encodeRequest} from a request graph that this process decoded and
+ * validated, so routing, billing, and auditing all observe the same authoritative parse as the upstream.
+ *
+ * <p>Responses follow the mirror rule: upstream wire events &rarr; Canonical IR &rarr; downstream wire events,
+ * including the same-protocol case.
  */
 public final class ProtocolTranslator {
 
@@ -78,61 +78,37 @@ public final class ProtocolTranslator {
     }
 
     /**
-     * Single-pass strict RFC 8259 UTF-8 probe extracting routing scalars, Base64-aware prompt token
-     * estimation, and exact byte spans for zero-copy passthrough patching.
+     * Decodes the downstream body into the Canonical IR. This is the single authoritative parse of the
+     * request: it is strict (rejects malformed JSON, duplicate critical fields, and unsupported shapes)
+     * and everything downstream — routing, admission, billing, and the outbound body — is derived from it.
      */
-    public FastRequestProbe probeRequest(
-            ProtocolKind inboundProtocol,
-            byte[] rawBody,
-            InboundRequestContext context
-    ) {
-        codecFor(inboundProtocol); // validate supported protocol
-        return StrictJsonRequestScanner.scan(inboundProtocol, rawBody, context);
-    }
-
     public CanonicalRequest parseRequest(
             ProtocolKind inboundProtocol,
             byte[] rawBody,
             InboundRequestContext context
     ) {
-        return codecFor(inboundProtocol).decodeRequest(rawBody, context != null ? context : InboundRequestContext.empty());
+        return codecFor(inboundProtocol).decodeRequest(
+                rawBody, context != null ? context : InboundRequestContext.empty());
     }
 
     /**
-     * Zero-copy fast-path / lazy-IR slow-path upstream payload builder used by the gateway hot path.
+     * Canonical IR &rarr; outbound upstream body. Always re-encoded: the client's bytes are never forwarded.
      */
     public PreparedUpstreamPayload prepareUpstreamPayload(
-            byte[] rawBody,
-            FastRequestProbe probe,
-            InboundRequestContext inboundContext,
+            CanonicalRequest decoded,
             ProtocolKind outboundProtocol,
-            UpstreamEncodingContext context,
-            AtomicReference<CanonicalRequest> lazyCanonical
+            UpstreamEncodingContext context
     ) {
-        if (probe.inboundProtocol() == outboundProtocol && !probe.requiresSlowPath()) {
-            return PassthroughBytePatcher.patch(rawBody, probe, context);
-        }
-        CanonicalRequest decoded = lazyCanonical != null ? lazyCanonical.get() : null;
-        if (decoded == null) {
-            decoded = parseRequest(probe.inboundProtocol(), rawBody, inboundContext);
-            if (lazyCanonical != null) {
-                lazyCanonical.set(decoded);
-            }
-        }
         ProtocolCodec outboundCodec = codecFor(outboundProtocol);
-        if (decoded.inboundProtocol() == outboundProtocol) {
-            byte[] rewritten = outboundCodec.preparePassthroughRequest(rawBody, decoded, context);
-            return PreparedUpstreamPayload.ofSingleArray(outboundProtocol, rewritten, true);
-        }
         CanonicalRequest normalized = CanonicalRequestNormalizer.normalizeForTranslation(
                 decoded, outboundProtocol, context);
         byte[] translatedBody = outboundCodec.encodeRequest(normalized, context);
-        return PreparedUpstreamPayload.ofSingleArray(outboundProtocol, translatedBody, false);
+        return PreparedUpstreamPayload.ofSingleArray(outboundProtocol, translatedBody);
     }
 
     /**
-     * Prepares an upstream request body using either zero-overhead passthrough (when
-     * {@code decoded.inboundProtocol() == outboundProtocol}) or Canonical IR normalization and encoding.
+     * Canonical IR &rarr; outbound upstream request, retaining the normalized request graph for callers that
+     * need it (adapters and tests).
      */
     public PreparedUpstreamRequest prepareUpstreamRequest(
             byte[] rawBody,
@@ -141,19 +117,14 @@ public final class ProtocolTranslator {
             UpstreamEncodingContext context
     ) {
         ProtocolCodec outboundCodec = codecFor(outboundProtocol);
-        if (decoded.inboundProtocol() == outboundProtocol) {
-            byte[] passthroughBody = outboundCodec.preparePassthroughRequest(rawBody, decoded, context);
-            return new PreparedUpstreamRequest(decoded, outboundProtocol, passthroughBody, true);
-        }
         CanonicalRequest normalized = CanonicalRequestNormalizer.normalizeForTranslation(
                 decoded, outboundProtocol, context);
         byte[] translatedBody = outboundCodec.encodeRequest(normalized, context);
-        return new PreparedUpstreamRequest(normalized, outboundProtocol, translatedBody, false);
+        return new PreparedUpstreamRequest(normalized, outboundProtocol, translatedBody);
     }
 
     /**
-     * Extracts disjoint usage and (when cross-protocol) translates a 2xx non-streaming upstream
-     * response into the caller's native wire protocol using only lightweight {@link StreamRequestMetadata}.
+     * Upstream non-streaming body &rarr; Canonical IR &rarr; downstream body, for every protocol combination.
      */
     public TranslatedResponse translateNonStreamingResponse(
             StreamRequestMetadata inboundMeta,
@@ -161,12 +132,6 @@ public final class ProtocolTranslator {
             byte[] upstreamBody
     ) {
         ProtocolCodec outboundCodec = codecFor(outboundProtocol);
-        if (inboundMeta.inboundProtocol() == outboundProtocol) {
-            TokenUsage usage = outboundCodec.extractNonStreamingUsage(upstreamBody)
-                    .orElseGet(() -> fallbackUsage(inboundMeta, upstreamBody));
-            return new TranslatedResponse(upstreamBody, usage);
-        }
-
         CanonicalResponse canonicalResponse = outboundCodec.decodeResponse(upstreamBody, inboundMeta.model());
         TokenUsage usage = canonicalResponse.usage();
         if (usage == null || (usage.totalInputTokens() == 0 && usage.totalOutputTokens() == 0)) {
@@ -187,7 +152,7 @@ public final class ProtocolTranslator {
     }
 
     /**
-     * Backwards-compatible overload accepting full {@link CanonicalRequest}.
+     * Backwards-compatible overload accepting the full {@link CanonicalRequest}.
      */
     public TranslatedResponse translateNonStreamingResponse(
             CanonicalRequest decoded,
@@ -203,13 +168,11 @@ public final class ProtocolTranslator {
     }
 
     /**
-     * Creates a stateful streaming bridge holding only lightweight {@link StreamRequestMetadata}.
+     * Creates a stateful streaming bridge: upstream wire frames &rarr; Canonical IR &rarr; downstream frames,
+     * for every protocol combination (including same-protocol, which is a 1:1 IR round trip).
      */
     public StreamBridge newStreamBridge(StreamRequestMetadata inboundMeta, ProtocolKind outboundProtocol) {
         ProtocolCodec outboundCodec = codecFor(outboundProtocol);
-        if (inboundMeta.inboundProtocol() == outboundProtocol) {
-            return outboundCodec.newPassthroughStreamBridge(inboundMeta, tokenEstimator);
-        }
         ProtocolCodec inboundCodec = codecFor(inboundMeta.inboundProtocol());
         return new TranslatingStreamBridge(
                 inboundMeta,
@@ -219,9 +182,6 @@ public final class ProtocolTranslator {
         );
     }
 
-    /**
-     * Creates a stateful streaming bridge for either homomorphic passthrough or cross-protocol SSE translation.
-     */
     public StreamBridge newStreamBridge(CanonicalRequest decoded, ProtocolKind outboundProtocol) {
         int estPrompt = tokenEstimator.estimatePromptTokens(decoded);
         return newStreamBridge(StreamRequestMetadata.fromCanonical(decoded, estPrompt), outboundProtocol);

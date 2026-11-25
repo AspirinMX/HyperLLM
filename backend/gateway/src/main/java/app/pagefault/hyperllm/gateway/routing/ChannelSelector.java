@@ -29,7 +29,7 @@ public class ChannelSelector {
      * <ol>
      *   <li>Lowest {@code priorityTier} that still has at least one non-excluded candidate.</li>
      *   <li>Within that tier, strictly prefers homomorphic candidates (supporting {@code inboundProtocol}
-     *       for zero-overhead passthrough) over heterogeneous translation candidates.</li>
+     *       over channels that would require translation) before falling back to translation candidates.</li>
      *   <li>Within the chosen sub-bucket, selects via weighted random sampling.</li>
      * </ol>
      */

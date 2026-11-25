@@ -74,7 +74,7 @@ public record GatewayChannelCandidate(
      * Resolves the wire protocol used when dispatching a request to this candidate:
      * <ol>
      *   <li>Explicit binding override ({@code upstreamProtocol}) if set</li>
-     *   <li>Caller's {@code inboundProtocol} if listed in {@code supportedProtocols} (zero-overhead passthrough)</li>
+     *   <li>Caller's {@code inboundProtocol} if listed in {@code supportedProtocols} (no translation needed)</li>
      *   <li>Provider's {@code defaultWireProtocol} (Canonical IR translation)</li>
      * </ol>
      */

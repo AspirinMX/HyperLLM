@@ -10,7 +10,7 @@ import java.util.Optional;
 /**
  * SPI for parsing, preparing, and extracting usage telemetry for a wire protocol family.
  *
- * <p>Phase 1 performs high-fidelity same-protocol passthrough with model rewriting and usage sniffing.
+ * <p>Phase 1 validates the wire body and rewrites the model name before handing it to the codec layer.
  * Phase 3 will layer heterogeneous request/response translation onto this SPI.
  */
 public interface ProtocolAdapter {

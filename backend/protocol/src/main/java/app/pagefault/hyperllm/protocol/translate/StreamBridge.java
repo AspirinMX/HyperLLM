@@ -5,8 +5,8 @@ import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import java.util.List;
 
 /**
- * Unified reactive streaming bridge used by the gateway for both zero-overhead homomorphic
- * passthrough and cross-protocol Canonical IR streaming translation.
+ * Unified reactive streaming bridge: every upstream SSE chunk is decoded into Canonical IR and
+ * re-encoded for the downstream protocol, including the same-protocol case.
  */
 public interface StreamBridge {
 

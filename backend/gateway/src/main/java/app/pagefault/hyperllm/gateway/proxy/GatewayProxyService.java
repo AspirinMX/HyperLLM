@@ -36,7 +36,6 @@ import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import app.pagefault.hyperllm.gateway.outbox.OutboxAdmissionGate;
 import app.pagefault.hyperllm.gateway.routing.ChannelSelector;
 import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
-import app.pagefault.hyperllm.protocol.fast.FastRequestProbe;
 import app.pagefault.hyperllm.protocol.ir.ByteSlice;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
@@ -218,18 +217,19 @@ public class GatewayProxyService {
         String clientIp = extractClientIp(exchange.getRequest());
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    FastRequestProbe probe = protocolTranslator.probeRequest(
+                    CanonicalRequest request = protocolTranslator.parseRequest(
                             ProtocolKind.ANTHROPIC_MESSAGES, rawBody, inboundContext);
-                    if (!isModelAllowed(caller, probe.model())) {
+                    if (!isModelAllowed(caller, request.model())) {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
-                    return cacheService.resolveModelRoute(probe.model())
+                    return cacheService.resolveModelRoute(request.model())
                             .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 if (route.model().status() != ModelStatus.ACTIVE) {
                                     return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
                                 }
-                                return Mono.just(Map.<String, Object>of("input_tokens", probe.estimatedPromptTokens()));
+                                return Mono.just(Map.<String, Object>of(
+                                        "input_tokens", tokenEstimator.estimatePromptTokens(request)));
                             });
                 });
     }
@@ -256,11 +256,13 @@ public class GatewayProxyService {
 
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    FastRequestProbe probe = protocolTranslator.probeRequest(protocolKind, rawBody, inboundContext);
-                    if (!isModelAllowed(caller, probe.model())) {
+                    // Single authoritative parse of the downstream body: every later decision
+                    // (routing, admission, billing, outbound bytes) derives from this IR graph.
+                    CanonicalRequest request = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
+                    if (!isModelAllowed(caller, request.model())) {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
-                    return cacheService.resolveModelRoute(probe.model())
+                    return cacheService.resolveModelRoute(request.model())
                             .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 VirtualModel vm = route.model();
@@ -283,9 +285,11 @@ public class GatewayProxyService {
                                             "No active channel available for protocol " + protocolKind
                                     ));
                                 }
-                                return preparePreHold(caller, route, probe, requestId)
+                                int estimatedPromptTokens = tokenEstimator.estimatePromptTokens(request);
+                                return preparePreHold(caller, route, request, estimatedPromptTokens, requestId)
                                         .flatMap(lease -> dispatchWithRetry(
-                                                exchange, probe, protocolKind, inboundContext, rawBody,
+                                                exchange, request, estimatedPromptTokens, protocolKind,
+                                                inboundContext, rawBody,
                                                 caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
                                         ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
                             });
@@ -294,7 +298,8 @@ public class GatewayProxyService {
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> dispatchWithRetry(
             ServerWebExchange exchange,
-            FastRequestProbe probe,
+            CanonicalRequest decodedRequest,
+            int estimatedPromptTokens,
             ProtocolKind protocolKind,
             InboundRequestContext inboundContext,
             byte[] rawBody,
@@ -309,14 +314,13 @@ public class GatewayProxyService {
     ) {
         Set<UUID> excludedChannels = ConcurrentHashMap.newKeySet();
         AtomicInteger attemptCounter = new AtomicInteger(0);
-        AtomicReference<CanonicalRequest> lazyCanonical = new AtomicReference<>();
         TranslationPolicy policy = TranslationPolicy.parseOrDefault(
                 route.model().translationPolicy(), TranslationPolicy.BEST_EFFORT);
         String thinkingStyle = extractThinkingStyle(route.model().metadataJson());
-        StreamRequestMetadata streamMeta = probe.toStreamMetadata();
-        boolean isStream = probe.stream();
-        String anthropicVersion = probe.anthropicVersion();
-        String anthropicBeta = probe.anthropicBeta();
+        StreamRequestMetadata streamMeta = StreamRequestMetadata.fromCanonical(decodedRequest, estimatedPromptTokens);
+        boolean isStream = decodedRequest.stream();
+        String anthropicVersion = inboundContext.anthropicVersion();
+        String anthropicBeta = inboundContext.anthropicBeta();
 
         return Mono.defer(() -> {
             GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels, protocolKind);
@@ -342,19 +346,19 @@ public class GatewayProxyService {
                     candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
-            boolean homomorphicFastPath = (outboundProtocol == protocolKind && !probe.requiresSlowPath());
+            // Every combination re-encodes the upstream body from the IR graph, so large bodies are always
+            // translated off the Netty event loop once they exceed the configured threshold.
             int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
-            boolean offloadTranslation = !homomorphicFastPath
-                    && offloadThreshold >= 0
+            boolean offloadTranslation = offloadThreshold >= 0
                     && rawBody != null
                     && rawBody.length >= offloadThreshold;
 
             Mono<PreparedUpstreamPayload> payloadMono = offloadTranslation
                     ? Mono.fromCallable(() -> protocolTranslator.prepareUpstreamPayload(
-                            rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical))
+                            decodedRequest, outboundProtocol, encodingContext))
                             .subscribeOn(protocolTranslationScheduler)
                     : Mono.just(protocolTranslator.prepareUpstreamPayload(
-                            rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical));
+                            decodedRequest, outboundProtocol, encodingContext));
 
             return payloadMono.flatMap(payload -> {
                 DataBuffer bodyBuffer = toZeroCopyDataBuffer(payload);
@@ -803,16 +807,16 @@ public class GatewayProxyService {
     private Mono<PreHoldService.Lease> preparePreHold(
             CallerContext caller,
             GatewayModelRoute route,
-            FastRequestProbe probe,
+            CanonicalRequest request,
+            int estimatedPromptTokens,
             String requestId
     ) {
         outboxAdmissionGate.check();
         GatewayProperties.Billing billing = properties.getBilling();
         String modelCode = route.model().modelCode();
-        long promptEstimate = Math.max(0L, probe.estimatedPromptTokens());
-        int outputCap = probe.maxOutputTokens() != null && probe.maxOutputTokens() > 0
-                ? probe.maxOutputTokens()
-                : billing.getDefaultOutputTokens();
+        long promptEstimate = Math.max(0L, estimatedPromptTokens);
+        int requestedMaxTokens = request.maxOutputTokens() != null ? request.maxOutputTokens() : 0;
+        int outputCap = requestedMaxTokens > 0 ? requestedMaxTokens : billing.getDefaultOutputTokens();
 
         return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())
                 .map(override -> PricingResolver.resolve(

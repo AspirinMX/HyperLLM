@@ -28,8 +28,6 @@ import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
-import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -77,17 +75,6 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
-    }
-
-    @Override
-    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
-        ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
-        CodecSupport.rewriteModelIfPresent(root, context.upstreamModelName());
-        if (!root.hasNonNull("max_tokens")) {
-            root.put("max_tokens", context.resolveDefaultMaxOutputTokens(DEFAULT_MAX_TOKENS));
-        }
-        normalizePassthroughMessages(root);
-        return CodecSupport.writeJsonBytes(mapper, root);
     }
 
     @Override
@@ -769,94 +756,9 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         return new AnthropicStreamEncoder(inboundMeta);
     }
 
-    @Override
-    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-        return new AnthropicPassthroughBridge(inboundMeta, tokenEstimator);
-    }
-
     // ---- Decoding helpers ----
 
-    /**
-     * For Anthropic passthrough: hoists leading {@code system}/{@code developer} messages out of
-     * {@code messages[]} into top-level {@code system[]} (since Anthropic requires {@code messages[0]}
-     * to be {@code user}), while preserving mid-conversation {@code role: "system"} (native Anthropic
-     * cache-preserving developer override) and rewriting mid-conversation {@code role: "developer"} to {@code "system"}.
-     */
-    private void normalizePassthroughMessages(ObjectNode root) {
-        JsonNode messagesNode = root.get("messages");
-        if (!(messagesNode instanceof ArrayNode messagesArr) || messagesArr.isEmpty()) {
-            return;
-        }
-        boolean needsRewrite = false;
-        boolean sawNonSystem = false;
-        for (JsonNode msg : messagesArr) {
-            if (!msg.isObject()) {
-                continue;
-            }
-            String role = msg.path("role").asText("").toLowerCase(Locale.ROOT);
-            if (!sawNonSystem && ("system".equals(role) || "developer".equals(role))) {
-                needsRewrite = true;
-                break;
-            }
-            if ("developer".equals(role)) {
-                needsRewrite = true;
-                break;
-            }
-            if (!"system".equals(role)) {
-                sawNonSystem = true;
-            }
-        }
-        if (!needsRewrite) {
-            return;
-        }
-
-        ArrayNode systemArr = mapper.createArrayNode();
-        JsonNode existingSystem = root.get("system");
-        if (existingSystem != null && existingSystem.isTextual() && !existingSystem.asText().isEmpty()) {
-            ObjectNode b = mapper.createObjectNode();
-            b.put("type", "text");
-            b.put("text", existingSystem.asText());
-            systemArr.add(b);
-        } else if (existingSystem instanceof ArrayNode existingArr) {
-            for (JsonNode item : existingArr) {
-                systemArr.add(item.deepCopy());
-            }
-        }
-
-        ArrayNode cleanedMessages = mapper.createArrayNode();
-        sawNonSystem = false;
-        for (JsonNode msg : messagesArr) {
-            if (!msg.isObject()) {
-                continue;
-            }
-            String role = msg.path("role").asText("").toLowerCase(Locale.ROOT);
-            if (!sawNonSystem && ("system".equals(role) || "developer".equals(role))) {
-                for (CanonicalSystemPart sp : decodeSystem(msg.get("content"), false)) {
-                    if (!sp.text().isEmpty()) {
-                        ObjectNode b = mapper.createObjectNode();
-                        b.put("type", "text");
-                        b.put("text", sp.text());
-                        if (sp.cacheControl() != null) {
-                            b.set("cache_control", CodecSupport.encodeCacheControl(mapper, sp.cacheControl()));
-                        }
-                        systemArr.add(b);
-                    }
-                }
-            } else {
-                sawNonSystem = true;
-                ObjectNode copy = (ObjectNode) msg.deepCopy();
-                if ("developer".equals(role)) {
-                    copy.put("role", "system");
-                }
-                cleanedMessages.add(copy);
-            }
-        }
-
-        if (!systemArr.isEmpty()) {
-            root.set("system", systemArr);
-        }
-        root.set("messages", cleanedMessages);
-    }
+    
 
     private List<CanonicalSystemPart> decodeSystem(JsonNode systemNode, boolean developerPriority) {
         if (systemNode == null || systemNode.isNull()) {
@@ -1047,6 +949,19 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     // ---- Streaming encoding helpers (zero outbound DOM tree, zero-sort 2-pass turn grouping) ----
 
+    /**
+     * Maps a canonical turn back onto the Anthropic wire role. Mid-conversation {@code system} /
+     * {@code developer} turns are native to Anthropic (cache-preserving developer overrides), so they must
+     * round-trip as {@code role: "system"} instead of being flattened into {@code "user"}.
+     */
+    private static String wireRole(CanonicalTurn turn) {
+        return switch (turn.role()) {
+            case ASSISTANT -> "assistant";
+            case SYSTEM, DEVELOPER -> "system";
+            default -> "user";
+        };
+    }
+
     private void writeAlternatingMessages(
             JsonGenerator gen,
             List<CanonicalTurn> turns,
@@ -1056,7 +971,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         int firstNonEmpty = -1;
         for (int i = 0; i < n; i++) {
             CanonicalTurn turn = turns.get(i);
-            String role = (turn.role() == CanonicalRole.ASSISTANT) ? "assistant" : "user";
+            String role = wireRole(turn);
             if (hasEmittableBlock(turn, role)) {
                 firstNonEmpty = i;
                 break;
@@ -1066,7 +981,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Translated Anthropic messages cannot be empty");
         }
 
-        String firstRole = (turns.get(firstNonEmpty).role() == CanonicalRole.ASSISTANT) ? "assistant" : "user";
+        String firstRole = wireRole(turns.get(firstNonEmpty));
         if (!"user".equals(firstRole) && policy == TranslationPolicy.STRICT) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_UNSUPPORTED_FEATURE,
                     "Anthropic Messages requires the first message to have role 'user'");
@@ -1085,7 +1000,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         int i = firstNonEmpty;
         while (i < n) {
             CanonicalTurn startTurn = turns.get(i);
-            String groupRole = (startTurn.role() == CanonicalRole.ASSISTANT) ? "assistant" : "user";
+            String groupRole = wireRole(startTurn);
             if (!hasEmittableBlock(startTurn, groupRole)) {
                 i++;
                 continue;
@@ -1093,7 +1008,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             int groupEnd = i + 1;
             while (groupEnd < n) {
                 CanonicalTurn nextTurn = turns.get(groupEnd);
-                String nextRole = (nextTurn.role() == CanonicalRole.ASSISTANT) ? "assistant" : "user";
+                String nextRole = wireRole(nextTurn);
                 if (!hasEmittableBlock(nextTurn, nextRole)) {
                     groupEnd++;
                     continue;
@@ -1906,110 +1821,4 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         }
     }
 
-    // ---- Passthrough Streaming Bridge ----
-
-    private final class AnthropicPassthroughBridge implements StreamBridge {
-
-        private final StreamRequestMetadata inboundMeta;
-        private final TokenEstimator tokenEstimator;
-        private final SseEventSplitter splitter = new SseEventSplitter();
-        private final StringBuilder streamedText = new StringBuilder();
-        private TokenUsage observed = TokenUsage.empty();
-        private boolean sawInputUsage;
-        private boolean sawOutputUsage;
-
-        private AnthropicPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-            this.inboundMeta = inboundMeta;
-            this.tokenEstimator = tokenEstimator;
-        }
-
-        @Override
-        public List<byte[]> feed(byte[] upstreamChunk) {
-            return inspectEvents(splitter.push(upstreamChunk));
-        }
-
-        @Override
-        public List<byte[]> complete() {
-            return inspectEvents(splitter.flushRemainder());
-        }
-
-        @Override
-        public TokenUsage finalizeUsage(boolean cleanCompletion) {
-            if (cleanCompletion && sawInputUsage && sawOutputUsage) {
-                return observed;
-            }
-            if (sawInputUsage && sawOutputUsage && observed.completionTokens() > 0) {
-                return observed;
-            }
-            int prompt = sawInputUsage ? observed.promptTokens() : inboundMeta.estimatedPromptTokens();
-            int completion = (cleanCompletion && sawOutputUsage)
-                    ? observed.completionTokens()
-                    : tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
-            return new TokenUsage(
-                    prompt,
-                    observed.cachedReadTokens(),
-                    observed.cachedWriteTokens(),
-                    completion,
-                    0,
-                    !(sawInputUsage && sawOutputUsage && cleanCompletion)
-            );
-        }
-
-        private List<byte[]> inspectEvents(List<SseEventSplitter.SseEvent> events) {
-            if (events.isEmpty()) {
-                return List.of();
-            }
-            List<byte[]> out = new ArrayList<>(events.size());
-            for (SseEventSplitter.SseEvent event : events) {
-                inspectPayload(event);
-                out.add(event.rawBytes());
-            }
-            return out;
-        }
-
-        private void inspectPayload(SseEventSplitter.SseEvent event) {
-            String data = event.dataPayload();
-            if (data.isEmpty()) {
-                return;
-            }
-            try {
-                JsonNode root = mapper.readTree(data);
-                if (!root.isObject()) {
-                    return;
-                }
-                String type = root.path("type").asText(event.eventName());
-                switch (type) {
-                    case "message_start" -> parseUsageObject(root.path("message").get("usage")).ifPresent(u -> {
-                        observed = observed.mergeMax(u);
-                        sawInputUsage = true;
-                    });
-                    case "content_block_delta" -> {
-                        JsonNode delta = root.get("delta");
-                        if (delta != null && delta.isObject()) {
-                            if (delta.hasNonNull("text") && delta.get("text").isTextual()) {
-                                CodecSupport.appendBounded(streamedText, delta.get("text").asText());
-                            }
-                            if (delta.hasNonNull("thinking") && delta.get("thinking").isTextual()) {
-                                CodecSupport.appendBounded(streamedText, delta.get("thinking").asText());
-                            }
-                            if (delta.hasNonNull("partial_json") && delta.get("partial_json").isTextual()) {
-                                CodecSupport.appendBounded(streamedText, delta.get("partial_json").asText());
-                            }
-                        }
-                    }
-                    case "message_delta" -> {
-                        JsonNode usage = root.get("usage");
-                        parseUsageObject(usage).ifPresent(u -> {
-                            observed = observed.mergeMax(u);
-                            if (usage.hasNonNull("output_tokens")) {
-                                sawOutputUsage = true;
-                            }
-                        });
-                    }
-                    default -> {}
-                }
-            } catch (Exception ignored) {
-            }
-        }
-    }
 }

@@ -1,7 +1,6 @@
 package app.pagefault.hyperllm.protocol.translate;
 
 import app.pagefault.hyperllm.protocol.codec.CanonicalRequestNormalizer;
-import app.pagefault.hyperllm.protocol.fast.FastRequestProbe;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
@@ -35,16 +34,16 @@ class CrossProtocolLargeMessagesTest {
         byte[] raw = buildLargeOpenAiChatPayload(120, 30); // ~480 KB, 120 turns + 30 tool call/result pairs + 16 tools
         assertThat(raw.length).isGreaterThan(450_000);
 
-        FastRequestProbe probe = translator.probeRequest(ProtocolKind.OPENAI_CHAT, raw, InboundRequestContext.empty());
-        AtomicReference<CanonicalRequest> lazy = new AtomicReference<>();
+        CanonicalRequest decodedLarge = translator.parseRequest(
+                ProtocolKind.OPENAI_CHAT, raw, InboundRequestContext.empty());
 
         // 1. OpenAI Chat -> Anthropic Messages (2-pass tool_result ordering, zero-sort alternating merge)
         UpstreamEncodingContext antCtx = new UpstreamEncodingContext(
                 "claude-sonnet-4-5", 8192, TranslationPolicy.BEST_EFFORT, null, "anthropic", true, null);
         PreparedUpstreamPayload antPayload = translator.prepareUpstreamPayload(
-                raw, probe, InboundRequestContext.empty(), ProtocolKind.ANTHROPIC_MESSAGES, antCtx, lazy);
+                decodedLarge, ProtocolKind.ANTHROPIC_MESSAGES, antCtx);
 
-        assertThat(lazy.get()).isNotNull();
+        assertThat(decodedLarge.turns()).isNotEmpty();
         JsonNode antOut = mapper.readTree(antPayload.toByteArray());
         assertThat(antOut.get("model").asText()).isEqualTo("claude-sonnet-4-5");
         assertThat(antOut.get("system").isArray()).isTrue();
@@ -73,13 +72,11 @@ class CrossProtocolLargeMessagesTest {
             }
         }
 
-        // 2. OpenAI Chat -> OpenAI Responses (streaming input[] encode, reusing lazyCanonical!)
-        CanonicalRequest cachedRef = lazy.get();
+        // 2. OpenAI Chat -> OpenAI Responses (streaming input[] encode from the same IR graph)
         UpstreamEncodingContext respCtx = new UpstreamEncodingContext(
                 "gpt-5", 8192, TranslationPolicy.BEST_EFFORT, null, "openai", true, null);
         PreparedUpstreamPayload respPayload = translator.prepareUpstreamPayload(
-                raw, probe, InboundRequestContext.empty(), ProtocolKind.OPENAI_RESPONSES, respCtx, lazy);
-        assertThat(lazy.get()).isSameAs(cachedRef);
+                decodedLarge, ProtocolKind.OPENAI_RESPONSES, respCtx);
         JsonNode respOut = mapper.readTree(respPayload.toByteArray());
         assertThat(respOut.get("model").asText()).isEqualTo("gpt-5");
         assertThat(respOut.get("input").size()).isGreaterThan(100);
@@ -89,7 +86,7 @@ class CrossProtocolLargeMessagesTest {
         UpstreamEncodingContext gemCtx = new UpstreamEncodingContext(
                 "gemini-2.5-pro", 8192, TranslationPolicy.BEST_EFFORT, null, "google", true, null);
         PreparedUpstreamPayload gemPayload = translator.prepareUpstreamPayload(
-                raw, probe, InboundRequestContext.empty(), ProtocolKind.GEMINI_GENERATE_CONTENT, gemCtx, lazy);
+                decodedLarge, ProtocolKind.GEMINI_GENERATE_CONTENT, gemCtx);
         JsonNode gemOut = mapper.readTree(gemPayload.toByteArray());
         assertThat(gemOut.get("contents").size()).isGreaterThan(50);
         assertThat(gemOut.get("tools").get(0).get("functionDeclarations").size()).isEqualTo(16);
@@ -106,11 +103,11 @@ class CrossProtocolLargeMessagesTest {
             InboundRequestContext inCtx = srcKind == ProtocolKind.GEMINI_GENERATE_CONTENT
                     ? InboundRequestContext.forGemini("gemini-2.5-pro", true, true)
                     : InboundRequestContext.empty();
-            FastRequestProbe srcProbe = translator.probeRequest(srcKind, srcBytes, inCtx);
+            CanonicalRequest srcDecoded = translator.parseRequest(srcKind, srcBytes, inCtx);
             UpstreamEncodingContext oaiCtx = new UpstreamEncodingContext(
                     "deepseek-chat", 4096, TranslationPolicy.BEST_EFFORT, null, "deepseek", false, null);
             PreparedUpstreamPayload backToOai = translator.prepareUpstreamPayload(
-                    srcBytes, srcProbe, inCtx, ProtocolKind.OPENAI_CHAT, oaiCtx, new AtomicReference<>());
+                    srcDecoded, ProtocolKind.OPENAI_CHAT, oaiCtx);
             JsonNode oaiBack = mapper.readTree(backToOai.toByteArray());
             assertThat(oaiBack.get("model").asText()).isEqualTo("deepseek-chat");
             assertThat(oaiBack.get("messages").size()).isGreaterThan(50);

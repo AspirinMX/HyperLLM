@@ -36,7 +36,7 @@ public sealed interface ImageSource permits
 
     /**
      * Vendor-scoped file reference ({@code file_id}, Gemini Files API URI, or {@code gs://}).
-     * Permitted on homomorphic passthrough; rejected fast on cross-vendor translation.
+     * Permitted on same-protocol translation; rejected fast on cross-vendor translation.
      */
     record FileRefImage(
             ProtocolKind ownerProtocol,

@@ -1,21 +1,21 @@
 package app.pagefault.hyperllm.protocol.ir;
 
 /**
- * Outbound request payload prepared for upstream dispatch after passthrough rewrite or IR translation.
+ * Outbound request payload prepared for upstream dispatch: the normalized Canonical IR graph together
+ * with the bytes the outbound codec produced from it.
  */
 public record PreparedUpstreamRequest(
         CanonicalChatRequest canonicalRequest,
         CanonicalRequest canonical,
         ProtocolKind outboundProtocol,
-        byte[] upstreamBody,
-        boolean passthrough
+        byte[] upstreamBody
 ) {
-    /** Backwards-compatible constructor for Phase 1 callers and tests. */
+    /** Backwards-compatible constructor for adapter callers and tests. */
     public PreparedUpstreamRequest(CanonicalChatRequest canonicalRequest, byte[] upstreamBody) {
-        this(canonicalRequest, null, canonicalRequest != null ? canonicalRequest.inboundProtocol() : null, upstreamBody, true);
+        this(canonicalRequest, null, canonicalRequest != null ? canonicalRequest.inboundProtocol() : null, upstreamBody);
     }
 
-    public PreparedUpstreamRequest(CanonicalRequest canonical, ProtocolKind outboundProtocol, byte[] upstreamBody, boolean passthrough) {
-        this(null, canonical, outboundProtocol, upstreamBody, passthrough);
+    public PreparedUpstreamRequest(CanonicalRequest canonical, ProtocolKind outboundProtocol, byte[] upstreamBody) {
+        this(null, canonical, outboundProtocol, upstreamBody);
     }
 }

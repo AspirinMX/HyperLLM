@@ -3,31 +3,26 @@ package app.pagefault.hyperllm.protocol.ir;
 import java.util.List;
 
 /**
- * Outbound upstream request body represented as an ordered sequence of zero-copy {@link ByteSlice}s.
- * On the homomorphic passthrough fast path, unchanged spans of the original request body are referenced
- * directly without full JSON DOM parsing, re-serialization, or copying the payload into a new {@code byte[]}.
+ * Outbound upstream request body represented as an ordered sequence of {@link ByteSlice}s so a single
+ * request can be assembled from several disjoint spans without materializing a contiguous copy.
+ * Every payload is produced by the outbound {@code ProtocolCodec} from Canonical IR; the client's bytes
+ * are never forwarded verbatim.
  */
 public record PreparedUpstreamPayload(
         ProtocolKind outboundProtocol,
         List<ByteSlice> slices,
-        long contentLength,
-        boolean passthrough
+        long contentLength
 ) {
     public PreparedUpstreamPayload {
         slices = slices == null ? List.of() : List.copyOf(slices);
     }
 
-    public static PreparedUpstreamPayload ofSingleArray(
-            ProtocolKind outboundProtocol,
-            byte[] body,
-            boolean passthrough
-    ) {
+    public static PreparedUpstreamPayload ofSingleArray(ProtocolKind outboundProtocol, byte[] body) {
         byte[] safe = body == null ? new byte[0] : body;
         return new PreparedUpstreamPayload(
                 outboundProtocol,
                 safe.length == 0 ? List.of() : List.of(ByteSlice.full(safe)),
-                safe.length,
-                passthrough
+                safe.length
         );
     }
 

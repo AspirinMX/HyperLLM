@@ -7,8 +7,6 @@ import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
-import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 
 import java.util.Optional;
 
@@ -23,11 +21,6 @@ public interface ProtocolCodec {
 
     byte[] encodeRequest(CanonicalRequest normalizedRequest, UpstreamEncodingContext context);
 
-    /**
-     * Fast-path AST rewrite when {@code inboundProtocol == outboundProtocol}.
-     */
-    byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context);
-
     CanonicalResponse decodeResponse(byte[] responseBody, String virtualModel);
 
     byte[] encodeResponse(CanonicalResponse response);
@@ -40,14 +33,5 @@ public interface ProtocolCodec {
 
     default DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
         return newStreamEncoder(StreamRequestMetadata.fromCanonical(inboundRequest, 0));
-    }
-
-    StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator);
-
-    default StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-        return newPassthroughStreamBridge(
-                StreamRequestMetadata.fromCanonical(request, tokenEstimator.estimatePromptTokens(request)),
-                tokenEstimator
-        );
     }
 }

@@ -1,7 +1,7 @@
 package app.pagefault.hyperllm.protocol.ir;
 
 /**
- * Inbound transport and protocol-specific options needed for response formatting and passthrough fidelity.
+ * Inbound transport and protocol-specific options needed for response formatting and request fidelity.
  */
 public record CanonicalProtocolOptions(
         boolean clientRequestedUsage,

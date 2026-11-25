@@ -26,8 +26,6 @@ import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
-import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -72,13 +70,6 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
-    }
-
-    @Override
-    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
-        // Model lives in the Gemini URL path; body passes through unmodified.
-        CodecSupport.parseObjectRoot(mapper, rawBody);
-        return rawBody;
     }
 
     @Override
@@ -540,11 +531,6 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
     @Override
     public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
         return new GeminiStreamEncoder(inboundMeta);
-    }
-
-    @Override
-    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-        return new GeminiPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Decoding helpers ----
@@ -1509,109 +1495,5 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         }
     }
 
-    // ---- Passthrough Streaming Bridge ----
 
-    private final class GeminiPassthroughBridge implements StreamBridge {
-
-        private final StreamRequestMetadata inboundMeta;
-        private final TokenEstimator tokenEstimator;
-        private final SseEventSplitter splitter = new SseEventSplitter();
-        private final StringBuilder streamedText = new StringBuilder();
-        private TokenUsage observedUsage;
-        private boolean emittedJsonArrayStart;
-
-        private GeminiPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
-            this.inboundMeta = inboundMeta;
-            this.tokenEstimator = tokenEstimator;
-        }
-
-        @Override
-        public String contentType() {
-            return inboundMeta.geminiAltSse() ? "text/event-stream" : "application/json";
-        }
-
-        @Override
-        public List<byte[]> feed(byte[] upstreamChunk) {
-            return inspectEvents(splitter.push(upstreamChunk));
-        }
-
-        @Override
-        public List<byte[]> complete() {
-            List<byte[]> out = new ArrayList<>(inspectEvents(splitter.flushRemainder()));
-            if (!inboundMeta.geminiAltSse()) {
-                out.add((emittedJsonArrayStart ? "\n]" : "[]").getBytes(StandardCharsets.UTF_8));
-            }
-            return out;
-        }
-
-        @Override
-        public TokenUsage finalizeUsage(boolean cleanCompletion) {
-            if (cleanCompletion && observedUsage != null) {
-                return observedUsage;
-            }
-            if (observedUsage != null && observedUsage.totalOutputTokens() > 0) {
-                return observedUsage;
-            }
-            int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
-                    ? observedUsage.promptTokens()
-                    : inboundMeta.estimatedPromptTokens();
-            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
-            return new TokenUsage(
-                    estPrompt,
-                    observedUsage == null ? 0 : observedUsage.cachedReadTokens(),
-                    0,
-                    estCompletion,
-                    observedUsage == null ? 0 : observedUsage.reasoningTokens(),
-                    true
-            );
-        }
-
-        private List<byte[]> inspectEvents(List<SseEventSplitter.SseEvent> events) {
-            if (events.isEmpty()) {
-                return List.of();
-            }
-            List<byte[]> out = new ArrayList<>(events.size());
-            for (SseEventSplitter.SseEvent ev : events) {
-                inspectPayload(ev.dataPayload());
-                if (inboundMeta.geminiAltSse()) {
-                    out.add(ev.rawBytes());
-                } else if (!ev.dataPayload().isEmpty()) {
-                    String prefix = emittedJsonArrayStart ? ",\n" : "[\n";
-                    emittedJsonArrayStart = true;
-                    out.add((prefix + ev.dataPayload()).getBytes(StandardCharsets.UTF_8));
-                }
-            }
-            return out;
-        }
-
-        private void inspectPayload(String data) {
-            if (data.isEmpty() || "[DONE]".equals(data)) {
-                return;
-            }
-            try {
-                JsonNode root = mapper.readTree(data);
-                if (!root.isObject()) {
-                    return;
-                }
-                parseUsageMetadata(root.get("usageMetadata")).ifPresent(u -> observedUsage = u);
-                JsonNode candidates = root.get("candidates");
-                if (candidates != null && candidates.isArray()) {
-                    for (JsonNode c : candidates) {
-                        JsonNode parts = c.path("content").get("parts");
-                        if (parts != null && parts.isArray()) {
-                            for (JsonNode p : parts) {
-                                if (p.hasNonNull("text") && p.get("text").isTextual()) {
-                                    CodecSupport.appendBounded(streamedText, p.get("text").asText());
-                                }
-                                if (p.hasNonNull("functionCall")) {
-                                    CodecSupport.appendBounded(streamedText, p.get("functionCall").toString());
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-    }
 }
