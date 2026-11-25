@@ -40,6 +40,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -145,6 +146,12 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             if (req.options().user() != null && !req.options().user().isBlank()) {
                 gen.writeStringField("user", req.options().user());
             }
+            // Vendor-only members retained verbatim from the inbound body. They are present only on the
+            // same-protocol path; cross-protocol translation strips them (hard-incompatible ones fail first).
+            for (Map.Entry<String, String> vendorField : req.options().vendorRawFields().entrySet()) {
+                gen.writeFieldName(vendorField.getKey());
+                gen.writeRawValue(vendorField.getValue());
+            }
             gen.writeEndObject();
         } catch (HyperLlmException ex) {
             throw ex;
@@ -163,6 +170,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         boolean inputIsNull = false;
 
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
+        Map<String, String> vendorRawFields = new LinkedHashMap<>();
         List<CanonicalSystemPart> systemParts = new ArrayList<>();
         List<CanonicalSystemPart> leadingInputSystemParts = new ArrayList<>();
         List<CanonicalTurn> turns = new ArrayList<>();
@@ -197,25 +205,28 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     }
                 }
                 case "previous_response_id" -> {
-                    String prev = CodecSupport.readNullableString(parser);
-                    if (prev != null && !prev.isBlank()) {
+                    JsonNode previousResponseId = mapper.readTree(parser);
+                    if (previousResponseId != null && previousResponseId.isTextual()
+                            && !previousResponseId.asText().isBlank()) {
                         unsupported.add(UnsupportedFeatureFlag.hard("previous_response_id",
-                                "Server-side response chaining requires OpenAI Responses passthrough"));
+                                "Server-side response chaining requires the OpenAI Responses upstream protocol"));
+                        vendorRawFields.put("previous_response_id", previousResponseId.toString());
                     }
                 }
                 case "conversation" -> {
-                    if (valTok != JsonToken.VALUE_NULL) {
+                    JsonNode conversation = mapper.readTree(parser);
+                    if (conversation != null && !conversation.isNull()) {
                         unsupported.add(UnsupportedFeatureFlag.hard("conversation",
-                                "Server-side conversation state requires OpenAI Responses passthrough"));
+                                "Server-side conversation state requires the OpenAI Responses upstream protocol"));
+                        vendorRawFields.put("conversation", conversation.toString());
                     }
-                    parser.skipChildren();
                 }
                 case "background" -> {
-                    if (valTok == JsonToken.VALUE_TRUE) {
+                    JsonNode background = mapper.readTree(parser);
+                    if (background != null && background.asBoolean(false)) {
                         unsupported.add(UnsupportedFeatureFlag.hard("background",
-                                "Asynchronous background execution requires OpenAI Responses passthrough"));
-                    } else {
-                        parser.skipChildren();
+                                "Asynchronous background execution requires the OpenAI Responses upstream protocol"));
+                        vendorRawFields.put("background", background.toString());
                     }
                 }
                 case "instructions" -> {
@@ -267,6 +278,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
 
         List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
+        List<String> vendorRawTools = retainBuiltinTools(toolsNode);
         CanonicalToolChoice toolChoice = decodeToolChoice(toolChoiceNode, parallelToolCalls);
         CanonicalResponseFormat responseFormat = textNode != null ? decodeTextFormat(textNode.get("format")) : null;
         CanonicalGenerationConfig generation = new CanonicalGenerationConfig(
@@ -274,7 +286,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         CanonicalThinkingConfig thinking = decodeReasoning(reasoningNode);
         CanonicalCacheConfig cache = new CanonicalCacheConfig(null, promptCacheKey, promptCacheRetention, null);
         CanonicalProtocolOptions options = new CanonicalProtocolOptions(
-                true, true, null, null, user, serviceTier, store);
+                true, true, null, null, user, serviceTier, store, vendorRawFields, vendorRawTools);
 
         return new CanonicalRequest(
                 ProtocolKind.OPENAI_RESPONSES, model.trim(), stream, systemParts, turns, tools, toolChoice,
@@ -986,6 +998,23 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         return out;
     }
 
+    /**
+     * Retains built-in (non-function) tool declarations verbatim so a same-protocol re-encode can emit them.
+     * They remain flagged as degradable, so cross-protocol translation still drops them.
+     */
+    private static List<String> retainBuiltinTools(JsonNode toolsNode) {
+        if (toolsNode == null || !toolsNode.isArray()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>(2);
+        for (JsonNode tool : toolsNode) {
+            if (!"function".equals(tool.path("type").asText(""))) {
+                out.add(tool.toString());
+            }
+        }
+        return out;
+    }
+
     private CanonicalToolChoice decodeToolChoice(JsonNode node, Boolean parallel) {
         if (node == null || node.isNull()) {
             return new CanonicalToolChoice(CanonicalToolChoice.ToolChoiceMode.OMITTED, null, parallel);
@@ -1295,7 +1324,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
     }
 
     private void writeTools(JsonGenerator gen, CanonicalRequest req) throws IOException {
-        if (req.tools().isEmpty()) {
+        List<String> vendorTools = req.options().vendorRawTools();
+        if (req.tools().isEmpty() && vendorTools.isEmpty()) {
             return;
         }
         gen.writeArrayFieldStart("tools");
@@ -1316,6 +1346,10 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 gen.writeBooleanField("strict", tool.strict());
             }
             gen.writeEndObject();
+        }
+        // Built-in vendor tools (e.g. web_search) retained verbatim from the inbound body.
+        for (String vendorTool : vendorTools) {
+            gen.writeRawValue(vendorTool);
         }
         gen.writeEndArray();
 

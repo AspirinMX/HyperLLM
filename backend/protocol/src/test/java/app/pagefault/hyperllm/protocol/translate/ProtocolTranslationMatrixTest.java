@@ -13,7 +13,6 @@ import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -362,9 +361,26 @@ class ProtocolTranslationMatrixTest {
     }
 
     @Test
-    @Disabled("TODO(ir): the unified IR path does not yet retain vendor-only payloads "
-            + "(previous_response_id / builtin tools), so a same-protocol re-encode currently drops them. "
-            + "Re-enable once CanonicalProtocolOptions carries the raw vendor fields.")
+    void builtinVendorToolsAreRetainedHomomorphicallyAndDroppedCrossProtocol() {
+        byte[] req = """
+                {"model":"gpt-5","input":"hi","tools":[{"type":"web_search"}]}
+                """.getBytes(StandardCharsets.UTF_8);
+        CanonicalRequest decoded = translator.parseRequest(
+                ProtocolKind.OPENAI_RESPONSES, req, InboundRequestContext.empty());
+        assertThat(decoded.options().vendorRawTools()).hasSize(1);
+
+        String sameProtocol = new String(translator.prepareUpstreamRequest(
+                req, decoded, ProtocolKind.OPENAI_RESPONSES,
+                UpstreamEncodingContext.simple("gpt-5-2026")).upstreamBody(), StandardCharsets.UTF_8);
+        assertThat(sameProtocol).contains("web_search");
+
+        String crossProtocol = new String(translator.prepareUpstreamRequest(
+                req, decoded, ProtocolKind.OPENAI_CHAT,
+                UpstreamEncodingContext.simple("gpt-4o-mini")).upstreamBody(), StandardCharsets.UTF_8);
+        assertThat(crossProtocol).doesNotContain("web_search");
+    }
+
+    @Test
     void vendorLockedFeaturesSurviveHomomorphicReEncodingAndFailFastCrossProtocol() {
         byte[] statefulResponsesReq = """
                 {

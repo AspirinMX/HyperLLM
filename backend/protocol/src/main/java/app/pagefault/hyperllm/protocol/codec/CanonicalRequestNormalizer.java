@@ -187,7 +187,7 @@ public final class CanonicalRequestNormalizer {
         if (effectiveTurns == originalTurns
                 && normalizedTools == request.tools()
                 && normalizedToolChoice == request.toolChoice()) {
-            return request;
+            return stripVendorRaw(request);
         }
 
         return new CanonicalRequest(
@@ -202,7 +202,33 @@ public final class CanonicalRequestNormalizer {
                 request.responseFormat(),
                 request.thinking(),
                 request.cache(),
-                request.options(),
+                request.options().withoutVendorRaw(),
+                request.vendorOnlyFeatures()
+        );
+    }
+
+    /**
+     * Drops vendor-only members retained for a same-protocol re-encode. Cross-protocol translation must not
+     * forward them: hard-incompatible members already fail the feature gate, and degradable ones (built-in
+     * tools) are dropped by policy.
+     */
+    private static CanonicalRequest stripVendorRaw(CanonicalRequest request) {
+        if (!request.options().hasVendorRaw()) {
+            return request;
+        }
+        return new CanonicalRequest(
+                request.inboundProtocol(),
+                request.model(),
+                request.stream(),
+                request.systemInstructions(),
+                request.turns(),
+                request.tools(),
+                request.toolChoice(),
+                request.generation(),
+                request.responseFormat(),
+                request.thinking(),
+                request.cache(),
+                request.options().withoutVendorRaw(),
                 request.vendorOnlyFeatures()
         );
     }
