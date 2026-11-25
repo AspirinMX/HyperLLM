@@ -1180,18 +1180,14 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         @Override
         public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent ev : splitter.push(upstreamChunk)) {
-                processChunk(ev.dataPayload(), out);
-            }
+            splitter.push(upstreamChunk, ev -> processChunk(ev, out));
             return out;
         }
 
         @Override
         public List<CanonicalStreamEvent> complete() {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent ev : splitter.flushRemainder()) {
-                processChunk(ev.dataPayload(), out);
-            }
+            splitter.flushRemainder(ev -> processChunk(ev, out));
             if (!finished && started) {
                 closeActiveBlock(out);
                 finished = true;
@@ -1201,12 +1197,13 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             return out;
         }
 
-        private void processChunk(String data, List<CanonicalStreamEvent> out) {
-            if (data.isEmpty() || "[DONE]".equals(data)) {
+        private void processChunk(SseEventSplitter.SseEvent ev, List<CanonicalStreamEvent> out) {
+            if (!ev.hasData() || SseEventSplitter.isDoneMarker(ev)) {
                 return;
             }
             try {
-                JsonNode root = mapper.readTree(data);
+                JsonNode root = CodecSupport.readTreeBytes(
+                        mapper, ev.dataSource(), ev.dataOffset(), ev.dataLength());
                 if (!root.isObject()) {
                     return;
                 }

@@ -1681,33 +1681,29 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         @Override
         public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent event : splitter.push(upstreamChunk)) {
-                processEvent(event, out);
-            }
+            splitter.push(upstreamChunk, event -> processEvent(event, out));
             return out;
         }
 
         @Override
         public List<CanonicalStreamEvent> complete() {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent event : splitter.flushRemainder()) {
-                processEvent(event, out);
-            }
+            splitter.flushRemainder(event -> processEvent(event, out));
             emitFinalClose(out);
             return out;
         }
 
         private void processEvent(SseEventSplitter.SseEvent event, List<CanonicalStreamEvent> out) {
-            String data = event.dataPayload();
-            if (data.isEmpty()) {
+            if (!event.hasData()) {
                 return;
             }
-            if ("[DONE]".equals(data)) {
+            if (SseEventSplitter.isDoneMarker(event)) {
                 emitFinalClose(out);
                 return;
             }
             try {
-                JsonNode root = mapper.readTree(data);
+                JsonNode root = CodecSupport.readTreeBytes(
+                        mapper, event.dataSource(), event.dataOffset(), event.dataLength());
                 if (!root.isObject()) {
                     return;
                 }

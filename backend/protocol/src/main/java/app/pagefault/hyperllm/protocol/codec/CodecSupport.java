@@ -77,6 +77,16 @@ public final class CodecSupport {
         }
     }
 
+    /**
+     * Parses a JSON document straight from a byte range, so streaming frames never pay for a
+     * UTF-8 &rarr; {@code String} decode just to hand the bytes back to the parser.
+     */
+    public static JsonNode readTreeBytes(ObjectMapper mapper, byte[] bytes, int offset, int length) throws IOException {
+        try (JsonParser parser = mapper.getFactory().createParser(bytes, offset, length)) {
+            return mapper.readTree(parser);
+        }
+    }
+
     public static ImageSource parseImageUrlOrDataUri(String url) {
         if (url == null || url.isBlank()) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Image URL must not be blank");

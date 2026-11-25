@@ -1,129 +1,285 @@
 package app.pagefault.hyperllm.protocol.codec;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.function.Consumer;
 
 /**
- * Byte-level SSE event splitter that handles multi-byte UTF-8 characters split across TCP chunks
- * and emits intact raw event frames along with decoded {@code event} and {@code data} lines.
+ * Byte-level SSE event splitter that handles multi-byte UTF-8 characters split across TCP chunks.
+ *
+ * <p>The splitter keeps a growing receive buffer plus a read cursor, so a {@code push} of N bytes copies
+ * those N bytes exactly once (and only an unconsumed remainder is ever shifted). Every emitted frame is a
+ * zero-copy slice into that buffer - the payload is never decoded to {@link String} on the hot path.
+ * Frames are handed to a consumer instead of being collected into a list, which both avoids one
+ * allocation per frame and pins down the slice lifetime: a slice is only valid for the duration of the
+ * callback, before the buffer is compacted.
  */
 public final class SseEventSplitter {
 
-    public record SseEvent(byte[] rawBytes, String eventName, String dataPayload) {
+    private static final byte[] DONE = "[DONE]".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] EVENT_PREFIX = "event:".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DATA_PREFIX = "data:".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] EMPTY = new byte[0];
+    private static final byte NEWLINE = '\n';
+    private static final byte CARRIAGE_RETURN = '\r';
+    private static final byte SPACE = ' ';
+
+    /**
+     * One SSE frame. {@link #dataSource()}/{@link #dataOffset()}/{@link #dataLength()} delimit the
+     * (possibly multi-line, newline-joined) {@code data:} payload; {@link #eventNameString()} decodes the
+     * {@code event:} field on demand. Slices are only valid inside the consumer callback.
+     */
+    public static final class SseEvent {
+
+        private final byte[] data;
+        private final int dataOffset;
+        private final int dataLength;
+        private final byte[] name;
+        private final int nameOffset;
+        private final int nameLength;
+
+        SseEvent(byte[] data, int dataOffset, int dataLength, byte[] name, int nameOffset, int nameLength) {
+            this.data = data;
+            this.dataOffset = dataOffset;
+            this.dataLength = dataLength;
+            this.name = name;
+            this.nameOffset = nameOffset;
+            this.nameLength = nameLength;
+        }
+
+        public boolean hasData() {
+            return dataLength > 0;
+        }
+
+        public byte[] dataSource() {
+            return data;
+        }
+
+        public int dataOffset() {
+            return dataOffset;
+        }
+
+        public int dataLength() {
+            return dataLength;
+        }
+
+        /** Compares the payload against an ASCII literal without decoding it. */
+        public boolean dataEqualsAscii(String literal) {
+            return matchesAscii(data, dataOffset, dataLength, literal);
+        }
+
+        public boolean hasEventName() {
+            return nameLength > 0;
+        }
+
+        /** Cold path: only called when a protocol genuinely needs the textual event name. */
+        public String eventNameString() {
+            return nameLength == 0 ? "" : new String(name, nameOffset, nameLength, StandardCharsets.UTF_8);
+        }
+
+        /** Cold path: only used where a textual payload is genuinely required. */
+        public String dataString() {
+            return new String(data, dataOffset, dataLength, StandardCharsets.UTF_8);
+        }
     }
 
-    private byte[] buffer = new byte[0];
+    private byte[] buffer = new byte[8192];
+    private int end;
+    private int start;
+    private byte[] scratch = EMPTY;
 
-    public List<SseEvent> push(byte[] chunk) {
+    public void push(byte[] chunk, Consumer<SseEvent> sink) {
         if (chunk == null || chunk.length == 0) {
-            return List.of();
+            return;
         }
-        byte[] combined = Arrays.copyOf(buffer, buffer.length + chunk.length);
-        System.arraycopy(chunk, 0, combined, buffer.length, chunk.length);
-        buffer = combined;
-        return drainCompleteEvents();
+        append(chunk);
+        drain(sink);
     }
 
-    public List<SseEvent> flushRemainder() {
-        if (buffer.length == 0) {
-            return List.of();
+    public void flushRemainder(Consumer<SseEvent> sink) {
+        if (start < end) {
+            emit(buffer, start, end, sink, true);
+            start = end;
         }
-        byte[] trailing = buffer;
-        buffer = new byte[0];
-        SseEvent parsed = parseFrame(trailing);
-        return (parsed.dataPayload().isEmpty() && parsed.eventName().isEmpty())
-                ? List.of()
-                : List.of(parsed);
+        compact();
     }
 
-    private List<SseEvent> drainCompleteEvents() {
-        List<SseEvent> events = new ArrayList<>();
-        int start = 0;
-        int i = 0;
-        while (i < buffer.length) {
-            int delimLen = boundaryLength(buffer, i);
+    private void append(byte[] chunk) {
+        int required = end + chunk.length;
+        if (required > buffer.length) {
+            byte[] grown = new byte[Math.max(required, buffer.length * 2)];
+            System.arraycopy(buffer, 0, grown, 0, end);
+            buffer = grown;
+        }
+        System.arraycopy(chunk, 0, buffer, end, chunk.length);
+        end = required;
+    }
+
+    private void drain(Consumer<SseEvent> sink) {
+        int i = start;
+        while (i < end) {
+            int delimLen = boundaryLength(buffer, i, end);
             if (delimLen > 0) {
-                int end = i + delimLen;
-                byte[] frame = Arrays.copyOfRange(buffer, start, end);
-                events.add(parseFrame(frame));
-                start = end;
-                i = end;
+                int frameEnd = i + delimLen;
+                emit(buffer, start, frameEnd, sink, false);
+                start = frameEnd;
+                i = frameEnd;
             } else {
                 i++;
             }
         }
-        if (start > 0) {
-            buffer = (start < buffer.length) ? Arrays.copyOfRange(buffer, start, buffer.length) : new byte[0];
-        }
-        return events;
+        compact();
     }
 
-    private static int boundaryLength(byte[] bytes, int idx) {
-        if (idx + 1 < bytes.length && bytes[idx] == '\n' && bytes[idx + 1] == '\n') {
+    private void compact() {
+        if (start == 0) {
+            return;
+        }
+        if (start >= end) {
+            start = 0;
+            end = 0;
+            return;
+        }
+        System.arraycopy(buffer, start, buffer, 0, end - start);
+        end -= start;
+        start = 0;
+    }
+
+    private static int boundaryLength(byte[] bytes, int idx, int limit) {
+        if (idx + 1 < limit && bytes[idx] == NEWLINE && bytes[idx + 1] == NEWLINE) {
             return 2;
         }
-        if (idx + 3 < bytes.length && bytes[idx] == '\r' && bytes[idx + 1] == '\n'
-                && bytes[idx + 2] == '\r' && bytes[idx + 3] == '\n') {
+        if (idx + 3 < limit && bytes[idx] == CARRIAGE_RETURN && bytes[idx + 1] == NEWLINE
+                && bytes[idx + 2] == CARRIAGE_RETURN && bytes[idx + 3] == NEWLINE) {
             return 4;
         }
         return 0;
     }
 
-    private static SseEvent parseFrame(byte[] rawBytes) {
-        String text = new String(rawBytes, StandardCharsets.UTF_8);
-        String eventName = "";
-        StringBuilder data = new StringBuilder();
-        int lineStart = 0;
-        while (lineStart < text.length()) {
-            int nl = text.indexOf('\n', lineStart);
-            String line = (nl >= 0) ? text.substring(lineStart, nl) : text.substring(lineStart);
-            if (line.endsWith("\r")) {
-                line = line.substring(0, line.length() - 1);
-            }
-            if (line.startsWith("event:")) {
-                eventName = trimLeadingSpace(line.substring("event:".length()));
-            } else if (line.startsWith("data:")) {
-                if (!data.isEmpty()) {
-                    data.append('\n');
+    private void emit(byte[] source, int from, int to, Consumer<SseEvent> sink, boolean skipEmpty) {
+        int nameOffset = -1;
+        int nameLength = 0;
+        int dataOffset = -1;
+        int dataLength = 0;
+        byte[] dataBacking = source;
+
+        int lineStart = from;
+        while (lineStart < to) {
+            int newline = indexOf(source, NEWLINE, lineStart, to);
+            int lineEnd = (newline >= 0) ? newline : to;
+            int contentEnd = (lineEnd > lineStart && source[lineEnd - 1] == CARRIAGE_RETURN) ? lineEnd - 1 : lineEnd;
+            if (startsWith(source, lineStart, contentEnd, EVENT_PREFIX)) {
+                int valueStart = skipOptionalSpace(source, lineStart + EVENT_PREFIX.length, contentEnd);
+                nameOffset = valueStart;
+                nameLength = contentEnd - valueStart;
+            } else if (startsWith(source, lineStart, contentEnd, DATA_PREFIX)) {
+                int valueStart = skipOptionalSpace(source, lineStart + DATA_PREFIX.length, contentEnd);
+                int valueLength = contentEnd - valueStart;
+                if (dataOffset < 0) {
+                    dataOffset = valueStart;
+                    dataLength = valueLength;
+                } else if (dataBacking != scratch) {
+                    // second data: line - materialize the joined payload in scratch
+                    byte[] joined = new byte[dataLength + 1 + valueLength];
+                    System.arraycopy(source, dataOffset, joined, 0, dataLength);
+                    joined[dataLength] = NEWLINE;
+                    System.arraycopy(source, valueStart, joined, dataLength + 1, valueLength);
+                    scratch = joined;
+                    dataBacking = joined;
+                    dataOffset = 0;
+                    dataLength = joined.length;
+                } else {
+                    int previous = dataLength;
+                    byte[] joined = new byte[previous + 1 + valueLength];
+                    System.arraycopy(scratch, 0, joined, 0, previous);
+                    joined[previous] = NEWLINE;
+                    System.arraycopy(source, valueStart, joined, previous + 1, valueLength);
+                    scratch = joined;
+                    dataBacking = joined;
+                    dataOffset = 0;
+                    dataLength = joined.length;
                 }
-                data.append(trimLeadingSpace(line.substring("data:".length())));
             }
-            if (nl < 0) {
+            if (newline < 0) {
                 break;
             }
-            lineStart = nl + 1;
+            lineStart = newline + 1;
         }
-        return new SseEvent(rawBytes, eventName, data.toString());
+
+        if (skipEmpty && nameLength == 0 && dataLength == 0) {
+            return;
+        }
+        sink.accept(new SseEvent(
+                dataOffset < 0 ? EMPTY : dataBacking, Math.max(dataOffset, 0), dataLength,
+                nameOffset < 0 ? EMPTY : source, Math.max(nameOffset, 0), nameLength));
     }
 
-    private static String trimLeadingSpace(String value) {
-        return (!value.isEmpty() && value.charAt(0) == ' ') ? value.substring(1) : value;
+    private static boolean matchesAscii(byte[] bytes, int offset, int length, String literal) {
+        if (literal.length() != length) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            if (bytes[offset + i] != (byte) literal.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int indexOf(byte[] bytes, byte needle, int from, int limit) {
+        for (int i = from; i < limit; i++) {
+            if (bytes[i] == needle) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean startsWith(byte[] bytes, int from, int limit, byte[] prefix) {
+        if (limit - from < prefix.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (bytes[from + i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int skipOptionalSpace(byte[] bytes, int from, int limit) {
+        return (from < limit && bytes[from] == SPACE) ? from + 1 : from;
+    }
+
+    /** True when the payload is the {@code [DONE]} sentinel; never allocates. */
+    public static boolean isDoneMarker(SseEvent event) {
+        return matchesAscii(event.dataSource(), event.dataOffset(), event.dataLength(), "[DONE]");
     }
 
     public static byte[] buildDataFrame(String payload) {
         byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8);
-        ByteArrayOutputStream out = new ByteArrayOutputStream(payloadBytes.length + 10);
-        out.writeBytes("data: ".getBytes(StandardCharsets.UTF_8));
+        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(payloadBytes.length + 10);
+        out.writeBytes(DATA_PREFIX);
+        out.write(SPACE);
         out.writeBytes(payloadBytes);
-        out.write('\n');
-        out.write('\n');
+        out.write(NEWLINE);
+        out.write(NEWLINE);
         return out.toByteArray();
     }
 
     public static byte[] buildNamedEventFrame(String eventName, String jsonPayload) {
         byte[] nameBytes = eventName.getBytes(StandardCharsets.UTF_8);
         byte[] payloadBytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
-        ByteArrayOutputStream out = new ByteArrayOutputStream(nameBytes.length + payloadBytes.length + 20);
-        out.writeBytes("event: ".getBytes(StandardCharsets.UTF_8));
+        CodecSupport.ResizableByteBuffer out =
+                new CodecSupport.ResizableByteBuffer(nameBytes.length + payloadBytes.length + 20);
+        out.writeBytes(EVENT_PREFIX);
+        out.write(SPACE);
         out.writeBytes(nameBytes);
-        out.write('\n');
-        out.writeBytes("data: ".getBytes(StandardCharsets.UTF_8));
+        out.write(NEWLINE);
+        out.writeBytes(DATA_PREFIX);
+        out.write(SPACE);
         out.writeBytes(payloadBytes);
-        out.write('\n');
-        out.write('\n');
+        out.write(NEWLINE);
+        out.write(NEWLINE);
         return out.toByteArray();
     }
 }

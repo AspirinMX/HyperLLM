@@ -1365,18 +1365,14 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         @Override
         public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent ev : splitter.push(upstreamChunk)) {
-                processEvent(ev, out);
-            }
+            splitter.push(upstreamChunk, ev -> processEvent(ev, out));
             return out;
         }
 
         @Override
         public List<CanonicalStreamEvent> complete() {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent ev : splitter.flushRemainder()) {
-                processEvent(ev, out);
-            }
+            splitter.flushRemainder(ev -> processEvent(ev, out));
             if (!finished) {
                 finished = true;
                 out.add(new CanonicalStreamEvent.MessageFinish(
@@ -1386,16 +1382,18 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         }
 
         private void processEvent(SseEventSplitter.SseEvent ev, List<CanonicalStreamEvent> out) {
-            String data = ev.dataPayload();
-            if (data.isEmpty()) {
+            if (!ev.hasData()) {
                 return;
             }
             try {
-                JsonNode root = mapper.readTree(data);
+                JsonNode root = CodecSupport.readTreeBytes(
+                        mapper, ev.dataSource(), ev.dataOffset(), ev.dataLength());
                 if (!root.isObject()) {
                     return;
                 }
-                String type = root.path("type").asText(ev.eventName());
+                JsonNode typeNode = root.get("type");
+                String type = (typeNode == null || typeNode.isNull())
+                        ? ev.eventNameString() : typeNode.asText("");
                 switch (type) {
                     case "message_start" -> {
                         JsonNode msg = root.path("message");

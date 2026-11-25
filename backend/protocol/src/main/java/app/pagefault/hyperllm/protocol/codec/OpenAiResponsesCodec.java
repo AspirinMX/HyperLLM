@@ -1512,18 +1512,14 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         @Override
         public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent event : splitter.push(upstreamChunk)) {
-                processEvent(event, out);
-            }
+            splitter.push(upstreamChunk, event -> processEvent(event, out));
             return out;
         }
 
         @Override
         public List<CanonicalStreamEvent> complete() {
             List<CanonicalStreamEvent> out = new ArrayList<>();
-            for (SseEventSplitter.SseEvent event : splitter.flushRemainder()) {
-                processEvent(event, out);
-            }
+            splitter.flushRemainder(event -> processEvent(event, out));
             if (!finished && started) {
                 finished = true;
                 out.add(new CanonicalStreamEvent.MessageFinish(
@@ -1533,16 +1529,18 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
 
         private void processEvent(SseEventSplitter.SseEvent event, List<CanonicalStreamEvent> out) {
-            String data = event.dataPayload();
-            if (data.isEmpty() || "[DONE]".equals(data)) {
+            if (!event.hasData() || SseEventSplitter.isDoneMarker(event)) {
                 return;
             }
             try {
-                JsonNode root = mapper.readTree(data);
+                JsonNode root = CodecSupport.readTreeBytes(
+                        mapper, event.dataSource(), event.dataOffset(), event.dataLength());
                 if (!root.isObject()) {
                     return;
                 }
-                String type = root.path("type").asText(event.eventName());
+                JsonNode typeNode = root.get("type");
+                String type = (typeNode == null || typeNode.isNull())
+                        ? event.eventNameString() : typeNode.asText("");
                 switch (type) {
                     case "response.created" -> {
                         if (!started) {
