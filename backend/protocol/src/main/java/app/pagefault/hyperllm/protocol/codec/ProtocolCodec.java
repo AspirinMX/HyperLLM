@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalResponse;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
@@ -35,7 +36,18 @@ public interface ProtocolCodec {
 
     UpstreamStreamDecoder newStreamDecoder(String virtualModel);
 
-    DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest);
+    DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta);
 
-    StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator);
+    default DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
+        return newStreamEncoder(StreamRequestMetadata.fromCanonical(inboundRequest, 0));
+    }
+
+    StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator);
+
+    default StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
+        return newPassthroughStreamBridge(
+                StreamRequestMetadata.fromCanonical(request, tokenEstimator.estimatePromptTokens(request)),
+                tokenEstimator
+        );
+    }
 }

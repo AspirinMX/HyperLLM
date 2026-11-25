@@ -23,6 +23,7 @@ import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
@@ -405,13 +406,13 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     }
 
     @Override
-    public DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
-        return new AnthropicStreamEncoder(inboundRequest);
+    public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
+        return new AnthropicStreamEncoder(inboundMeta);
     }
 
     @Override
-    public StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-        return new AnthropicPassthroughBridge(request, tokenEstimator);
+    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+        return new AnthropicPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Decoding helpers ----
@@ -1173,8 +1174,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             }
         }
 
-        private AnthropicStreamEncoder(CanonicalRequest inboundRequest) {
-            this.model = inboundRequest.model();
+        private AnthropicStreamEncoder(StreamRequestMetadata inboundMeta) {
+            this.model = inboundMeta.model();
         }
 
         @Override
@@ -1468,7 +1469,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     private final class AnthropicPassthroughBridge implements StreamBridge {
 
-        private final CanonicalRequest request;
+        private final StreamRequestMetadata inboundMeta;
         private final TokenEstimator tokenEstimator;
         private final SseEventSplitter splitter = new SseEventSplitter();
         private final StringBuilder streamedText = new StringBuilder();
@@ -1476,8 +1477,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         private boolean sawInputUsage;
         private boolean sawOutputUsage;
 
-        private AnthropicPassthroughBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-            this.request = request;
+        private AnthropicPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+            this.inboundMeta = inboundMeta;
             this.tokenEstimator = tokenEstimator;
         }
 
@@ -1499,10 +1500,10 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             if (sawInputUsage && sawOutputUsage && observed.completionTokens() > 0) {
                 return observed;
             }
-            int prompt = sawInputUsage ? observed.promptTokens() : tokenEstimator.estimatePromptTokens(request);
+            int prompt = sawInputUsage ? observed.promptTokens() : inboundMeta.estimatedPromptTokens();
             int completion = (cleanCompletion && sawOutputUsage)
                     ? observed.completionTokens()
-                    : tokenEstimator.estimateCompletionTokens(request.model(), streamedText);
+                    : tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
             return new TokenUsage(
                     prompt,
                     observed.cachedReadTokens(),

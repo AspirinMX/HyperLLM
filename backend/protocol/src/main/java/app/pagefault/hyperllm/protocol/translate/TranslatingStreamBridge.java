@@ -5,6 +5,7 @@ import app.pagefault.hyperllm.protocol.codec.DownstreamStreamEncoder;
 import app.pagefault.hyperllm.protocol.codec.UpstreamStreamDecoder;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalStreamEvent;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 
@@ -14,10 +15,12 @@ import java.util.List;
 /**
  * Cross-protocol streaming pipeline composing {@link UpstreamStreamDecoder} -> usage sniffing ->
  * {@link DownstreamStreamEncoder} with bounded text accumulation for token estimation on abrupt abort.
+ * Retains only lightweight {@link StreamRequestMetadata} (~48 bytes) so large multi-turn requests are
+ * never pinned in Old Gen across long-lived SSE streams.
  */
 public final class TranslatingStreamBridge implements StreamBridge {
 
-    private final CanonicalRequest inboundRequest;
+    private final StreamRequestMetadata inboundMeta;
     private final UpstreamStreamDecoder decoder;
     private final DownstreamStreamEncoder encoder;
     private final TokenEstimator tokenEstimator;
@@ -26,15 +29,29 @@ public final class TranslatingStreamBridge implements StreamBridge {
     private boolean sawUsage;
 
     public TranslatingStreamBridge(
+            StreamRequestMetadata inboundMeta,
+            UpstreamStreamDecoder decoder,
+            DownstreamStreamEncoder encoder,
+            TokenEstimator tokenEstimator
+    ) {
+        this.inboundMeta = inboundMeta;
+        this.decoder = decoder;
+        this.encoder = encoder;
+        this.tokenEstimator = tokenEstimator;
+    }
+
+    public TranslatingStreamBridge(
             CanonicalRequest inboundRequest,
             UpstreamStreamDecoder decoder,
             DownstreamStreamEncoder encoder,
             TokenEstimator tokenEstimator
     ) {
-        this.inboundRequest = inboundRequest;
-        this.decoder = decoder;
-        this.encoder = encoder;
-        this.tokenEstimator = tokenEstimator;
+        this(
+                StreamRequestMetadata.fromCanonical(inboundRequest, tokenEstimator.estimatePromptTokens(inboundRequest)),
+                decoder,
+                encoder,
+                tokenEstimator
+        );
     }
 
     @Override
@@ -63,8 +80,8 @@ public final class TranslatingStreamBridge implements StreamBridge {
         }
         int prompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
                 ? observedUsage.promptTokens()
-                : tokenEstimator.estimatePromptTokens(inboundRequest);
-        int estCompletion = tokenEstimator.estimateCompletionTokens(inboundRequest.model(), streamedText);
+                : inboundMeta.estimatedPromptTokens();
+        int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
         int observedCompletion = observedUsage == null ? 0 : observedUsage.completionTokens();
         int completion = cleanCompletion
                 ? (observedCompletion > 0 ? observedCompletion : estCompletion)

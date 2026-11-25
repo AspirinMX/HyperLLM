@@ -36,10 +36,13 @@ import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import app.pagefault.hyperllm.gateway.outbox.OutboxAdmissionGate;
 import app.pagefault.hyperllm.gateway.routing.ChannelSelector;
 import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
+import app.pagefault.hyperllm.protocol.fast.FastRequestProbe;
+import app.pagefault.hyperllm.protocol.ir.ByteSlice;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
-import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamRequest;
+import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
@@ -49,17 +52,22 @@ import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import app.pagefault.hyperllm.protocol.translate.UpstreamEndpointResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.NettyDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.reactivestreams.Subscription;
 import org.springframework.web.server.ServerWebExchange;
@@ -140,6 +148,9 @@ public class GatewayProxyService {
     private final app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService;
     private final ObjectMapper objectMapper;
     private final TokenEstimator tokenEstimator;
+    private static final NettyDataBufferFactory NETTY_DATA_BUFFER_FACTORY =
+            new NettyDataBufferFactory(ByteBufAllocator.DEFAULT);
+
     private final AtomicLong nextLazyReclaimNanos = new AtomicLong(0L);
 
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
@@ -169,21 +180,20 @@ public class GatewayProxyService {
     ) {
         String rawToken = extractToken(exchange.getRequest(), ProtocolKind.ANTHROPIC_MESSAGES);
         String clientIp = extractClientIp(exchange.getRequest());
-        CanonicalRequest canonical = protocolTranslator.parseRequest(
-                ProtocolKind.ANTHROPIC_MESSAGES, rawBody, inboundContext);
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    if (!isModelAllowed(caller, canonical.model())) {
+                    FastRequestProbe probe = protocolTranslator.probeRequest(
+                            ProtocolKind.ANTHROPIC_MESSAGES, rawBody, inboundContext);
+                    if (!isModelAllowed(caller, probe.model())) {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
-                    return cacheService.resolveModelRoute(canonical.model())
+                    return cacheService.resolveModelRoute(probe.model())
                             .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 if (route.model().status() != ModelStatus.ACTIVE) {
                                     return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
                                 }
-                                int estimated = Math.max(0, tokenEstimator.estimatePromptTokens(canonical));
-                                return Mono.just(Map.<String, Object>of("input_tokens", estimated));
+                                return Mono.just(Map.<String, Object>of("input_tokens", probe.estimatedPromptTokens()));
                             });
                 });
     }
@@ -208,14 +218,13 @@ public class GatewayProxyService {
         String rawToken = extractToken(exchange.getRequest(), protocolKind);
         String clientIp = extractClientIp(exchange.getRequest());
 
-        CanonicalRequest canonical = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
-
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    if (!isModelAllowed(caller, canonical.model())) {
+                    FastRequestProbe probe = protocolTranslator.probeRequest(protocolKind, rawBody, inboundContext);
+                    if (!isModelAllowed(caller, probe.model())) {
                         return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
                     }
-                    return cacheService.resolveModelRoute(canonical.model())
+                    return cacheService.resolveModelRoute(probe.model())
                             .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
                             .flatMap(route -> {
                                 VirtualModel vm = route.model();
@@ -238,9 +247,9 @@ public class GatewayProxyService {
                                             "No active channel available for protocol " + protocolKind
                                     ));
                                 }
-                                return preparePreHold(caller, route, canonical, requestId)
+                                return preparePreHold(caller, route, probe, requestId)
                                         .flatMap(lease -> dispatchWithRetry(
-                                                exchange, canonical, protocolKind, rawBody,
+                                                exchange, probe, protocolKind, inboundContext, rawBody,
                                                 caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
                                         ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
                             });
@@ -249,8 +258,9 @@ public class GatewayProxyService {
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> dispatchWithRetry(
             ServerWebExchange exchange,
-            CanonicalRequest canonical,
+            FastRequestProbe probe,
             ProtocolKind protocolKind,
+            InboundRequestContext inboundContext,
             byte[] rawBody,
             CallerContext caller,
             GatewayModelRoute route,
@@ -263,9 +273,14 @@ public class GatewayProxyService {
     ) {
         Set<UUID> excludedChannels = ConcurrentHashMap.newKeySet();
         AtomicInteger attemptCounter = new AtomicInteger(0);
+        AtomicReference<CanonicalRequest> lazyCanonical = new AtomicReference<>();
         TranslationPolicy policy = TranslationPolicy.parseOrDefault(
                 route.model().translationPolicy(), TranslationPolicy.BEST_EFFORT);
         String thinkingStyle = extractThinkingStyle(route.model().metadataJson());
+        StreamRequestMetadata streamMeta = probe.toStreamMetadata();
+        boolean isStream = probe.stream();
+        String anthropicVersion = probe.anthropicVersion();
+        String anthropicBeta = probe.anthropicBeta();
 
         return Mono.defer(() -> {
             GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels, protocolKind);
@@ -286,11 +301,13 @@ public class GatewayProxyService {
                     route.model().supportsThinking(),
                     route.model().metadataJson()
             );
-            PreparedUpstreamRequest prepared = protocolTranslator.prepareUpstreamRequest(
-                    rawBody, canonical, outboundProtocol, encodingContext);
+            PreparedUpstreamPayload payload = protocolTranslator.prepareUpstreamPayload(
+                    rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical);
+            DataBuffer bodyBuffer = toZeroCopyDataBuffer(payload);
+            long contentLength = payload.contentLength();
             String upstreamApiKey = decryptChannelApiKey(candidate);
             String targetUrl = UpstreamEndpointResolver.buildInferenceUrl(
-                    candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), canonical.stream());
+                    candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
             return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
@@ -302,7 +319,8 @@ public class GatewayProxyService {
                         }
                         return executeSingleAttempt(
                                 exchange, client, targetUrl, candidate, upstreamApiKey,
-                                canonical, prepared, protocolKind, outboundProtocol,
+                                streamMeta, isStream, anthropicVersion, anthropicBeta,
+                                bodyBuffer, contentLength, protocolKind, outboundProtocol,
                                 caller, route, lease, excludedChannels,
                                 requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
                         );
@@ -318,8 +336,12 @@ public class GatewayProxyService {
             String targetUrl,
             GatewayChannelCandidate candidate,
             String upstreamApiKey,
-            CanonicalRequest canonical,
-            PreparedUpstreamRequest prepared,
+            StreamRequestMetadata streamMeta,
+            boolean isStream,
+            String anthropicVersion,
+            String anthropicBeta,
+            DataBuffer initialBodyBuffer,
+            long contentLength,
             ProtocolKind protocolKind,
             ProtocolKind outboundProtocol,
             CallerContext caller,
@@ -335,6 +357,7 @@ public class GatewayProxyService {
     ) {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
+        AtomicReference<DataBuffer> bodyRef = new AtomicReference<>(initialBodyBuffer);
         AtomicBoolean capacityReleased = new AtomicBoolean(false);
         boolean releaseChannelCapacity = channelCapacity.hasConcurrencyLimit(candidate);
         Runnable releaseCapacity = releaseChannelCapacity
@@ -348,8 +371,13 @@ public class GatewayProxyService {
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
                 .contentType(MediaType.APPLICATION_JSON)
-                .headers(headers -> applyUpstreamHeaders(headers, candidate, outboundProtocol, upstreamApiKey, canonical))
-                .bodyValue(prepared.upstreamBody())
+                .contentLength(contentLength)
+                .headers(headers -> applyUpstreamHeaders(headers, candidate, outboundProtocol, upstreamApiKey,
+                        anthropicVersion, anthropicBeta))
+                .body(BodyInserters.fromDataBuffers(Mono.fromSupplier(() -> {
+                    DataBuffer buf = bodyRef.getAndSet(null);
+                    return buf != null ? buf : NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.EMPTY_BUFFER);
+                })))
                 .exchangeToFlux(clientResponse -> {
                     int status = clientResponse.statusCode().value();
                     if (status == 429 || status >= 500) {
@@ -358,11 +386,11 @@ public class GatewayProxyService {
                                 .thenMany(Flux.error(new RetryableUpstreamException(
                                         status, "Upstream returned retryable status " + status)));
                     }
-                    if (!canonical.stream() || !clientResponse.statusCode().is2xxSuccessful()) {
+                    if (!isStream || !clientResponse.statusCode().is2xxSuccessful()) {
                         return clientResponse.bodyToMono(byte[].class)
                                 .defaultIfEmpty(new byte[0])
                                 .flatMapMany(bodyBytes -> handleNonStreamingResponse(
-                                        exchange, canonical, protocolKind, outboundProtocol, status, bodyBytes,
+                                        exchange, streamMeta, protocolKind, outboundProtocol, status, bodyBytes,
                                         caller, route, candidate, lease, requestStartNanos,
                                         requestId, traceId, clientIp, retryCount
                                 ).doFinally(signal -> releaseCapacity.run())
@@ -371,7 +399,7 @@ public class GatewayProxyService {
                                         .thenMany(Flux.empty()));
                     }
                     return bridgeStreamingResponse(
-                            exchange, clientResponse, canonical, protocolKind, outboundProtocol,
+                            exchange, clientResponse, streamMeta, protocolKind, outboundProtocol,
                             caller, route, candidate, lease, requestStartNanos,
                             requestId, traceId, clientIp, retryCount,
                             responseSink, upstreamSubRef, releaseCapacity
@@ -382,6 +410,7 @@ public class GatewayProxyService {
                 .subscribe(
                         ignored -> {},
                         ex -> {
+                            bodyRef.set(null);
                             Throwable mapped = ex;
                             if (!(mapped instanceof RetryableUpstreamException) && !(mapped instanceof HyperLlmException)) {
                                 excludedChannels.add(candidate.channelId());
@@ -392,8 +421,12 @@ public class GatewayProxyService {
                 );
 
         return responseSink.asMono()
-                .doOnError(ex -> releaseCapacity.run())
+                .doOnError(ex -> {
+                    bodyRef.set(null);
+                    releaseCapacity.run();
+                })
                 .doOnCancel(() -> {
+                    bodyRef.set(null);
                     releaseCapacity.run();
                     Subscription sub = upstreamSubRef.get();
                     if (sub != null) {
@@ -402,10 +435,27 @@ public class GatewayProxyService {
                 });
     }
 
+    private static DataBuffer toZeroCopyDataBuffer(PreparedUpstreamPayload payload) {
+        List<ByteSlice> slices = payload.slices();
+        if (slices.isEmpty()) {
+            return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.EMPTY_BUFFER);
+        }
+        if (slices.size() == 1) {
+            ByteSlice s = slices.get(0);
+            return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.wrappedBuffer(s.backing(), s.offset(), s.length()));
+        }
+        ByteBuf[] parts = new ByteBuf[slices.size()];
+        for (int i = 0; i < slices.size(); i++) {
+            ByteSlice s = slices.get(i);
+            parts[i] = Unpooled.wrappedBuffer(s.backing(), s.offset(), s.length());
+        }
+        return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.wrappedBuffer(parts));
+    }
+
     private Flux<Void> bridgeStreamingResponse(
             ServerWebExchange exchange,
             org.springframework.web.reactive.function.client.ClientResponse clientResponse,
-            CanonicalRequest canonical,
+            StreamRequestMetadata streamMeta,
             ProtocolKind protocolKind,
             ProtocolKind outboundProtocol,
             CallerContext caller,
@@ -421,7 +471,7 @@ public class GatewayProxyService {
             AtomicReference<Subscription> upstreamSubRef,
             Runnable releaseCapacity
     ) {
-        StreamBridge bridge = protocolTranslator.newStreamBridge(canonical, outboundProtocol);
+        StreamBridge bridge = protocolTranslator.newStreamBridge(streamMeta, outboundProtocol);
         AtomicBoolean settled = new AtomicBoolean(false);
         AtomicLong firstByteNanos = new AtomicLong(0L);
         DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();
@@ -497,7 +547,7 @@ public class GatewayProxyService {
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> handleNonStreamingResponse(
             ServerWebExchange exchange,
-            CanonicalRequest canonical,
+            StreamRequestMetadata streamMeta,
             ProtocolKind protocolKind,
             ProtocolKind outboundProtocol,
             int status,
@@ -517,7 +567,7 @@ public class GatewayProxyService {
         byte[] clientBody;
         if (status >= 200 && status < 300) {
             ProtocolTranslator.TranslatedResponse translated =
-                    protocolTranslator.translateNonStreamingResponse(canonical, outboundProtocol, bodyBytes);
+                    protocolTranslator.translateNonStreamingResponse(streamMeta, outboundProtocol, bodyBytes);
             usage = translated.usage();
             clientBody = translated.clientBody();
         } else {
@@ -703,15 +753,15 @@ public class GatewayProxyService {
     private Mono<PreHoldService.Lease> preparePreHold(
             CallerContext caller,
             GatewayModelRoute route,
-            CanonicalRequest canonical,
+            FastRequestProbe probe,
             String requestId
     ) {
         outboxAdmissionGate.check();
         GatewayProperties.Billing billing = properties.getBilling();
         String modelCode = route.model().modelCode();
-        long promptEstimate = Math.max(0L, tokenEstimator.estimatePromptTokens(canonical));
-        int outputCap = canonical.maxOutputTokens() != null && canonical.maxOutputTokens() > 0
-                ? canonical.maxOutputTokens()
+        long promptEstimate = Math.max(0L, probe.estimatedPromptTokens());
+        int outputCap = probe.maxOutputTokens() != null && probe.maxOutputTokens() > 0
+                ? probe.maxOutputTokens()
                 : billing.getDefaultOutputTokens();
 
         return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())
@@ -938,14 +988,15 @@ public class GatewayProxyService {
             GatewayChannelCandidate candidate,
             ProtocolKind outboundProtocol,
             String apiKey,
-            CanonicalRequest canonical
+            String anthropicVersion,
+            String anthropicBeta
     ) {
         Map<String, String> authHeaders = UpstreamEndpointResolver.buildAuthHeaders(
                 candidate.authScheme().name(),
                 outboundProtocol,
                 apiKey,
-                canonical.options().anthropicVersion(),
-                canonical.options().anthropicBeta()
+                anthropicVersion,
+                anthropicBeta
         );
         authHeaders.forEach(headers::set);
         if (candidate.extraHeadersJson() != null && !candidate.extraHeadersJson().isBlank()

@@ -22,6 +22,7 @@ import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
@@ -290,13 +291,13 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
     }
 
     @Override
-    public DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
-        return new GeminiStreamEncoder(inboundRequest);
+    public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
+        return new GeminiStreamEncoder(inboundMeta);
     }
 
     @Override
-    public StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-        return new GeminiPassthroughBridge(request, tokenEstimator);
+    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+        return new GeminiPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Decoding helpers ----
@@ -1032,9 +1033,9 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             }
         }
 
-        private GeminiStreamEncoder(CanonicalRequest inboundRequest) {
-            this.model = inboundRequest.model();
-            this.altSse = inboundRequest.options().geminiAltSse();
+        private GeminiStreamEncoder(StreamRequestMetadata inboundMeta) {
+            this.model = inboundMeta.model();
+            this.altSse = inboundMeta.geminiAltSse();
         }
 
         @Override
@@ -1193,21 +1194,21 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
 
     private final class GeminiPassthroughBridge implements StreamBridge {
 
-        private final CanonicalRequest request;
+        private final StreamRequestMetadata inboundMeta;
         private final TokenEstimator tokenEstimator;
         private final SseEventSplitter splitter = new SseEventSplitter();
         private final StringBuilder streamedText = new StringBuilder();
         private TokenUsage observedUsage;
         private boolean emittedJsonArrayStart;
 
-        private GeminiPassthroughBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-            this.request = request;
+        private GeminiPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+            this.inboundMeta = inboundMeta;
             this.tokenEstimator = tokenEstimator;
         }
 
         @Override
         public String contentType() {
-            return request.options().geminiAltSse() ? "text/event-stream" : "application/json";
+            return inboundMeta.geminiAltSse() ? "text/event-stream" : "application/json";
         }
 
         @Override
@@ -1218,7 +1219,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         @Override
         public List<byte[]> complete() {
             List<byte[]> out = new ArrayList<>(inspectEvents(splitter.flushRemainder()));
-            if (!request.options().geminiAltSse()) {
+            if (!inboundMeta.geminiAltSse()) {
                 out.add((emittedJsonArrayStart ? "\n]" : "[]").getBytes(StandardCharsets.UTF_8));
             }
             return out;
@@ -1234,8 +1235,8 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             }
             int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
                     ? observedUsage.promptTokens()
-                    : tokenEstimator.estimatePromptTokens(request);
-            int estCompletion = tokenEstimator.estimateCompletionTokens(request.model(), streamedText);
+                    : inboundMeta.estimatedPromptTokens();
+            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
             return new TokenUsage(
                     estPrompt,
                     observedUsage == null ? 0 : observedUsage.cachedReadTokens(),
@@ -1253,7 +1254,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             List<byte[]> out = new ArrayList<>(events.size());
             for (SseEventSplitter.SseEvent ev : events) {
                 inspectPayload(ev.dataPayload());
-                if (request.options().geminiAltSse()) {
+                if (inboundMeta.geminiAltSse()) {
                     out.add(ev.rawBytes());
                 } else if (!ev.dataPayload().isEmpty()) {
                     String prefix = emittedJsonArrayStart ? ",\n" : "[\n";

@@ -23,6 +23,7 @@ import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
@@ -275,13 +276,13 @@ public final class OpenAiChatCodec implements ProtocolCodec {
     }
 
     @Override
-    public DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
-        return new OpenAiChatStreamEncoder(inboundRequest);
+    public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
+        return new OpenAiChatStreamEncoder(inboundMeta);
     }
 
     @Override
-    public StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-        return new OpenAiChatPassthroughBridge(request, tokenEstimator);
+    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+        return new OpenAiChatPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Request decoding helpers ----
@@ -1242,7 +1243,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
     private final class OpenAiChatStreamEncoder implements DownstreamStreamEncoder {
 
-        private final CanonicalRequest inboundRequest;
+        private final boolean clientRequestedUsage;
         private String responseId = CodecSupport.generateId("chatcmpl-");
         private String model;
         private long created = CodecSupport.nowEpochSeconds();
@@ -1253,9 +1254,9 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         private boolean sawToolCall;
         private TokenUsage latestUsage;
 
-        private OpenAiChatStreamEncoder(CanonicalRequest inboundRequest) {
-            this.inboundRequest = inboundRequest;
-            this.model = inboundRequest.model();
+        private OpenAiChatStreamEncoder(StreamRequestMetadata inboundMeta) {
+            this.clientRequestedUsage = inboundMeta.clientRequestedUsage();
+            this.model = inboundMeta.model();
         }
 
         @Override
@@ -1346,7 +1347,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     if (!doneSent) {
                         ensureRoleChunk(frames);
                         frames.add(buildChunkFrame(mapper.createObjectNode(), encodeFinishReason(mf.stopReason(), sawToolCall)));
-                        if (inboundRequest.clientRequestedUsage() && latestUsage != null) {
+                        if (clientRequestedUsage && latestUsage != null) {
                             frames.add(buildUsageOnlyFrame(latestUsage));
                         }
                         frames.add(SseEventSplitter.buildDataFrame("[DONE]"));
@@ -1377,7 +1378,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             List<byte[]> frames = new ArrayList<>();
             ensureRoleChunk(frames);
             frames.add(buildChunkFrame(mapper.createObjectNode(), sawToolCall ? "tool_calls" : "stop"));
-            if (inboundRequest.clientRequestedUsage() && latestUsage != null) {
+            if (clientRequestedUsage && latestUsage != null) {
                 frames.add(buildUsageOnlyFrame(latestUsage));
             }
             frames.add(SseEventSplitter.buildDataFrame("[DONE]"));
@@ -1431,14 +1432,14 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
     private final class OpenAiChatPassthroughBridge implements StreamBridge {
 
-        private final CanonicalRequest request;
+        private final StreamRequestMetadata inboundMeta;
         private final TokenEstimator tokenEstimator;
         private final SseEventSplitter splitter = new SseEventSplitter();
         private final StringBuilder streamedText = new StringBuilder();
         private TokenUsage observedUsage;
 
-        private OpenAiChatPassthroughBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-            this.request = request;
+        private OpenAiChatPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+            this.inboundMeta = inboundMeta;
             this.tokenEstimator = tokenEstimator;
         }
 
@@ -1462,8 +1463,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             }
             int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
                     ? observedUsage.promptTokens()
-                    : tokenEstimator.estimatePromptTokens(request);
-            int estCompletion = tokenEstimator.estimateCompletionTokens(request.model(), streamedText);
+                    : inboundMeta.estimatedPromptTokens();
+            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
             return new TokenUsage(
                     estPrompt,
                     observedUsage == null ? 0 : observedUsage.cachedReadTokens(),
@@ -1502,7 +1503,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 Optional<TokenUsage> parsed = parseUsageNode(node.get("usage"));
                 if (parsed.isPresent()) {
                     observedUsage = parsed.get();
-                    if (!request.clientRequestedUsage()) {
+                    if (!inboundMeta.clientRequestedUsage()) {
                         if (isUsageOnlyFrame(node)) {
                             return null;
                         }

@@ -23,6 +23,7 @@ import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
@@ -329,13 +330,13 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
     }
 
     @Override
-    public DownstreamStreamEncoder newStreamEncoder(CanonicalRequest inboundRequest) {
-        return new OpenAiResponsesStreamEncoder(inboundRequest);
+    public DownstreamStreamEncoder newStreamEncoder(StreamRequestMetadata inboundMeta) {
+        return new OpenAiResponsesStreamEncoder(inboundMeta);
     }
 
     @Override
-    public StreamBridge newPassthroughStreamBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-        return new OpenAiResponsesPassthroughBridge(request, tokenEstimator);
+    public StreamBridge newPassthroughStreamBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+        return new OpenAiResponsesPassthroughBridge(inboundMeta, tokenEstimator);
     }
 
     // ---- Request decoding helpers ----
@@ -1235,8 +1236,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             }
         }
 
-        private OpenAiResponsesStreamEncoder(CanonicalRequest inboundRequest) {
-            this.model = inboundRequest.model();
+        private OpenAiResponsesStreamEncoder(StreamRequestMetadata inboundMeta) {
+            this.model = inboundMeta.model();
         }
 
         @Override
@@ -1614,14 +1615,14 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     private final class OpenAiResponsesPassthroughBridge implements StreamBridge {
 
-        private final CanonicalRequest request;
+        private final StreamRequestMetadata inboundMeta;
         private final TokenEstimator tokenEstimator;
         private final SseEventSplitter splitter = new SseEventSplitter();
         private final StringBuilder streamedText = new StringBuilder();
         private TokenUsage observedUsage;
 
-        private OpenAiResponsesPassthroughBridge(CanonicalRequest request, TokenEstimator tokenEstimator) {
-            this.request = request;
+        private OpenAiResponsesPassthroughBridge(StreamRequestMetadata inboundMeta, TokenEstimator tokenEstimator) {
+            this.inboundMeta = inboundMeta;
             this.tokenEstimator = tokenEstimator;
         }
 
@@ -1645,8 +1646,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             }
             int estPrompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
                     ? observedUsage.promptTokens()
-                    : tokenEstimator.estimatePromptTokens(request);
-            int estCompletion = tokenEstimator.estimateCompletionTokens(request.model(), streamedText);
+                    : inboundMeta.estimatedPromptTokens();
+            int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
             return new TokenUsage(
                     estPrompt,
                     observedUsage == null ? 0 : observedUsage.cachedReadTokens(),

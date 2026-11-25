@@ -175,15 +175,27 @@ public final class TokenEstimator {
         }
         if (imagePart.source() instanceof ImageSource.Base64Image b64) {
             return ImageDimensionProbe.probeBase64(b64.base64Data())
-                    .map(dim -> {
-                        int clampedW = Math.min(dim.width(), 2048);
-                        int clampedH = Math.min(dim.height(), 2048);
-                        int tilesX = (clampedW + 511) / 512;
-                        int tilesY = (clampedH + 511) / 512;
-                        return tilesX * tilesY * TOKENS_PER_512_TILE + LOW_DETAIL_IMAGE_TOKENS;
-                    })
+                    .map(TokenEstimator::tokensForDimensions)
                     .orElse(detail == ImageDetail.ORIGINAL ? ORIGINAL_IMAGE_TOKENS : DEFAULT_IMAGE_TOKENS);
         }
         return detail == ImageDetail.ORIGINAL ? ORIGINAL_IMAGE_TOKENS : DEFAULT_IMAGE_TOKENS;
+    }
+
+    /**
+     * Estimates tokens for a base64-encoded image directly from raw UTF-8 JSON bytes without
+     * materializing the full base64 string on the heap.
+     */
+    public static int estimateImageTokensFromBase64Utf8(byte[] utf8Bytes, int offset, int length) {
+        return ImageDimensionProbe.probeBase64Utf8(utf8Bytes, offset, length)
+                .map(TokenEstimator::tokensForDimensions)
+                .orElse(DEFAULT_IMAGE_TOKENS);
+    }
+
+    private static int tokensForDimensions(ImageDimensionProbe.Dimensions dim) {
+        int clampedW = Math.min(dim.width(), 2048);
+        int clampedH = Math.min(dim.height(), 2048);
+        int tilesX = (clampedW + 511) / 512;
+        int tilesY = (clampedH + 511) / 512;
+        return tilesX * tilesY * TOKENS_PER_512_TILE + LOW_DETAIL_IMAGE_TOKENS;
     }
 }

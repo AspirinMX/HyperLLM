@@ -34,6 +34,51 @@ public final class ImageDimensionProbe {
         }
     }
 
+    /**
+     * Probes image dimensions directly from raw UTF-8 JSON string bytes containing base64 data
+     * (supporting optional JSON {@code \/} slash escapes and embedded whitespace) without
+     * allocating a {@link String} over the full base64 payload.
+     */
+    public static Optional<Dimensions> probeBase64Utf8(byte[] utf8Bytes, int offset, int length) {
+        if (utf8Bytes == null || offset < 0 || length < 16 || offset + length > utf8Bytes.length) {
+            return Optional.empty();
+        }
+        int cap = Math.min(length, MAX_BASE64_PREFIX_CHARS);
+        byte[] cleaned = new byte[cap];
+        int out = 0;
+        int end = offset + length;
+        for (int i = offset; i < end && out < cap; i++) {
+            byte b = utf8Bytes[i];
+            if (b == '\\' && i + 1 < end) {
+                byte next = utf8Bytes[i + 1];
+                if (next == '/') {
+                    cleaned[out++] = '/';
+                    i++;
+                    continue;
+                }
+                if (next == 'r' || next == 'n' || next == 't') {
+                    i++;
+                    continue;
+                }
+            }
+            if (b == ' ' || b == '\t' || b == '\r' || b == '\n') {
+                continue;
+            }
+            cleaned[out++] = b;
+        }
+        int usableLen = (out / 4) * 4;
+        if (usableLen < 16) {
+            return Optional.empty();
+        }
+        try {
+            byte[] slice = (usableLen == cleaned.length) ? cleaned : java.util.Arrays.copyOf(cleaned, usableLen);
+            byte[] decoded = Base64.getDecoder().decode(slice);
+            return probeBytes(decoded);
+        } catch (IllegalArgumentException ex) {
+            return Optional.empty();
+        }
+    }
+
     public static Optional<Dimensions> probeBytes(byte[] data) {
         if (data == null || data.length < 10) {
             return Optional.empty();
