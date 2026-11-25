@@ -102,8 +102,7 @@ public final class ProtocolTranslator {
         ProtocolCodec outboundCodec = codecFor(outboundProtocol);
         CanonicalRequest normalized = CanonicalRequestNormalizer.normalizeForTranslation(
                 decoded, outboundProtocol, context);
-        byte[] translatedBody = outboundCodec.encodeRequest(normalized, context);
-        return PreparedUpstreamPayload.ofSingleArray(outboundProtocol, translatedBody);
+        return outboundCodec.encodeRequestPayload(normalized, context);
     }
 
     /**

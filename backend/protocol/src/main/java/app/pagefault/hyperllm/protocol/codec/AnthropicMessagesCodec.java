@@ -22,6 +22,7 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
+import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
@@ -87,6 +88,16 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     @Override
     public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
+        return writeRequest(req, context).toExactByteArray();
+    }
+
+    @Override
+    public PreparedUpstreamPayload encodeRequestPayload(CanonicalRequest req, UpstreamEncodingContext context) {
+        CodecSupport.ResizableByteBuffer out = writeRequest(req, context);
+        return PreparedUpstreamPayload.ofSlice(ProtocolKind.ANTHROPIC_MESSAGES, out.backingArray(), out.length());
+    }
+
+    private CodecSupport.ResizableByteBuffer writeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
         CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
                 CodecSupport.estimateEncodedCapacity(req));
         try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
@@ -218,7 +229,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize Anthropic Messages request JSON", ex);
         }
-        return out.toExactByteArray();
+        return out;
     }
 
     // ---- Streaming request decoding (zero inbound DOM tree for large messages[]) ----

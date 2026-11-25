@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalResponse;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
+import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
@@ -20,6 +21,18 @@ public interface ProtocolCodec {
     CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context);
 
     byte[] encodeRequest(CanonicalRequest normalizedRequest, UpstreamEncodingContext context);
+
+    /**
+     * Same as {@link #encodeRequest} but returns the body as slices, which lets a codec expose its
+     * serialization buffer directly instead of copying it into an exactly-sized array. The default
+     * keeps the copying behaviour for codecs that do not override it.
+     */
+    default PreparedUpstreamPayload encodeRequestPayload(
+            CanonicalRequest normalizedRequest,
+            UpstreamEncodingContext context
+    ) {
+        return PreparedUpstreamPayload.ofSingleArray(kind(), encodeRequest(normalizedRequest, context));
+    }
 
     CanonicalResponse decodeResponse(byte[] responseBody, String virtualModel);
 

@@ -27,6 +27,21 @@ public record PreparedUpstreamPayload(
     }
 
     /**
+     * Wraps a prefix of an existing buffer (typically the codec's serialization buffer) without copying.
+     * The backing array is kept alive by the payload, so callers must not reuse it afterwards.
+     */
+    public static PreparedUpstreamPayload ofSlice(ProtocolKind outboundProtocol, byte[] backing, int length) {
+        if (backing == null || length <= 0) {
+            return new PreparedUpstreamPayload(outboundProtocol, List.of(), 0);
+        }
+        return new PreparedUpstreamPayload(
+                outboundProtocol,
+                List.of(new ByteSlice(backing, 0, Math.min(length, backing.length))),
+                Math.min(length, backing.length)
+        );
+    }
+
+    /**
      * Materializes the slices into a single contiguous {@code byte[]} (returning the backing array
      * directly without copying when this payload consists of a single full-array slice).
      */

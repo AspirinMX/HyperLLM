@@ -401,6 +401,15 @@ public final class CodecSupport {
         byte[] toCopiedByteArray() {
             return Arrays.copyOf(buf, count);
         }
+
+        /** Backing array for {@link #size()} bytes; valid until the buffer is reused. */
+        byte[] backingArray() {
+            return buf;
+        }
+
+        int length() {
+            return count;
+        }
     }
 
     static int estimateEncodedCapacity(CanonicalRequest req) {

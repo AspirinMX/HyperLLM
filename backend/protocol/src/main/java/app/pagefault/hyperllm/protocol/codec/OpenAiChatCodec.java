@@ -22,6 +22,7 @@ import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
@@ -79,6 +80,16 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
     @Override
     public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
+        return writeRequest(req, context).toExactByteArray();
+    }
+
+    @Override
+    public PreparedUpstreamPayload encodeRequestPayload(CanonicalRequest req, UpstreamEncodingContext context) {
+        CodecSupport.ResizableByteBuffer out = writeRequest(req, context);
+        return PreparedUpstreamPayload.ofSlice(ProtocolKind.OPENAI_CHAT, out.backingArray(), out.length());
+    }
+
+    private CodecSupport.ResizableByteBuffer writeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
         ProviderCapabilities caps = context.capabilitiesFor(ProtocolKind.OPENAI_CHAT);
         CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
                 CodecSupport.estimateEncodedCapacity(req));
@@ -143,7 +154,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize OpenAI Chat request JSON", ex);
         }
-        return out.toExactByteArray();
+        return out;
     }
 
     // ---- Streaming request decoding (zero inbound DOM tree for large messages[]) ----
