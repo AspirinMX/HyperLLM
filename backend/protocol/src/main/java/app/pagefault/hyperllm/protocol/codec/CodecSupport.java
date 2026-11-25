@@ -388,6 +388,14 @@ public final class CodecSupport {
         byte[] toExactByteArray() {
             return count == buf.length ? buf : Arrays.copyOf(buf, count);
         }
+
+        /**
+         * Always-copy accessor for buffers that are reused across frames: unlike
+         * {@link #toExactByteArray()}, the result never aliases the internal array.
+         */
+        byte[] toCopiedByteArray() {
+            return Arrays.copyOf(buf, count);
+        }
     }
 
     static int estimateEncodedCapacity(CanonicalRequest req) {

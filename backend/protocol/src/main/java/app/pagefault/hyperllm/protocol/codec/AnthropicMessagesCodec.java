@@ -38,6 +38,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -52,6 +53,13 @@ import java.util.Optional;
  * Bidirectional codec for Anthropic Messages API ({@code POST /v1/messages}).
  */
 public final class AnthropicMessagesCodec implements ProtocolCodec {
+
+    /** Constant envelope of a {@code content_block_delta} frame, up to the block index. */
+    private static final byte[] DELTA_EVENT_PREFIX =
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"
+                    .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_EVENT_DELTA_KEY = ",\"delta\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_EVENT_TAIL = "}\n\n".getBytes(StandardCharsets.US_ASCII);
 
     private static final int DEFAULT_MAX_TOKENS = 8192;
 
@@ -1617,6 +1625,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     private final class AnthropicStreamEncoder implements DownstreamStreamEncoder {
 
         private final String model;
+        private final CodecSupport.ResizableByteBuffer frameBuffer = new CodecSupport.ResizableByteBuffer(256);
         private String messageId = CodecSupport.generateId("msg_");
         private boolean started;
         private boolean finished;
@@ -1900,22 +1909,34 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         }
 
         private void emitTypedDelta(int idx, BlockKind kind, String fragment, List<byte[]> frames) {
-            ObjectNode delta = mapper.createObjectNode();
             switch (kind) {
-                case THINKING -> {
-                    delta.put("type", "thinking_delta");
-                    delta.put("thinking", fragment);
-                }
-                case TOOL_CALL -> {
-                    delta.put("type", "input_json_delta");
-                    delta.put("partial_json", fragment);
-                }
-                default -> {
-                    delta.put("type", "text_delta");
-                    delta.put("text", fragment);
-                }
+                case THINKING -> frames.add(buildDeltaFrame(idx, "thinking_delta", "thinking", fragment));
+                case TOOL_CALL -> frames.add(buildDeltaFrame(idx, "input_json_delta", "partial_json", fragment));
+                default -> frames.add(buildDeltaFrame(idx, "text_delta", "text", fragment));
             }
-            emitBlockDelta(idx, delta, frames);
+        }
+
+        /**
+         * Renders a {@code content_block_delta} frame straight into bytes: constant envelope, the block
+         * index, then the delta object produced by Jackson (so escaping stays authoritative). The payload
+         * buffer is reused across frames.
+         */
+        private byte[] buildDeltaFrame(int idx, String deltaType, String field, String fragment) {
+            CodecSupport.ResizableByteBuffer buffer = frameBuffer;
+            buffer.reset();
+            buffer.writeBytes(DELTA_EVENT_PREFIX);
+            buffer.writeBytes(Integer.toString(idx).getBytes(StandardCharsets.US_ASCII));
+            buffer.writeBytes(DELTA_EVENT_DELTA_KEY);
+            try (JsonGenerator generator = CodecSupport.newUtf8Generator(mapper, buffer)) {
+                generator.writeStartObject();
+                generator.writeStringField("type", deltaType);
+                generator.writeStringField(field, fragment);
+                generator.writeEndObject();
+            } catch (IOException ex) {
+                throw new IllegalStateException("Failed to encode Anthropic delta frame", ex);
+            }
+            buffer.writeBytes(DELTA_EVENT_TAIL);
+            return buffer.toCopiedByteArray();
         }
 
         private void emitBlockDelta(int idx, ObjectNode delta, List<byte[]> frames) {

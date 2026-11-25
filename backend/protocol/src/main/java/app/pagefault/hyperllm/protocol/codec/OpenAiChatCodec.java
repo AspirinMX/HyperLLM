@@ -38,6 +38,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -49,6 +50,10 @@ import java.util.Optional;
  * Bidirectional codec for OpenAI Chat Completions ({@code POST /v1/chat/completions}).
  */
 public final class OpenAiChatCodec implements ProtocolCodec {
+
+    /** Constant tail of a single-delta chunk frame: {@code ,"finish_reason":null}]}\n\n}. */
+    private static final byte[] DELTA_FRAME_TAIL =
+            ",\"finish_reason\":null}]}\n\n".getBytes(StandardCharsets.US_ASCII);
 
     private final ObjectMapper mapper;
 
@@ -2088,6 +2093,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         private String model;
         private long created = CodecSupport.nowEpochSeconds();
         private boolean roleSent;
+        private final CodecSupport.ResizableByteBuffer frameBuffer = new CodecSupport.ResizableByteBuffer(320);
+        private byte[] deltaPrefix;
         private boolean doneSent;
         private int nextToolIdx;
         private final Map<Integer, Integer> blockToToolIndex = new HashMap<>();
@@ -2118,25 +2125,20 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     if (start.createdEpochSeconds() > 0) {
                         this.created = start.createdEpochSeconds();
                     }
+                    deltaPrefix = null;
                     ensureRoleChunk(frames);
                 }
                 case CanonicalStreamEvent.TextDelta td -> {
                     ensureRoleChunk(frames);
-                    ObjectNode delta = mapper.createObjectNode();
-                    delta.put("content", td.textDelta());
-                    frames.add(buildChunkFrame(delta, null));
+                    frames.add(buildDeltaFrame("content", td.textDelta()));
                 }
                 case CanonicalStreamEvent.ThinkingDelta th -> {
                     ensureRoleChunk(frames);
-                    ObjectNode delta = mapper.createObjectNode();
-                    delta.put("reasoning_content", th.thinkingDelta());
-                    frames.add(buildChunkFrame(delta, null));
+                    frames.add(buildDeltaFrame("reasoning_content", th.thinkingDelta()));
                 }
                 case CanonicalStreamEvent.RefusalDelta ref -> {
                     ensureRoleChunk(frames);
-                    ObjectNode delta = mapper.createObjectNode();
-                    delta.put("refusal", ref.refusalDelta());
-                    frames.add(buildChunkFrame(delta, null));
+                    frames.add(buildDeltaFrame("refusal", ref.refusalDelta()));
                 }
                 case CanonicalStreamEvent.ToolCallStart tcs -> {
                     ensureRoleChunk(frames);
@@ -2234,6 +2236,52 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 delta.put("content", "");
                 frames.add(buildChunkFrame(delta, null));
             }
+        }
+
+        /**
+         * Everything up to (and including) the {@code "delta":} key, rendered once per stream: the chunk
+         * envelope is identical for every token, so only the delta object is generated per frame.
+         */
+        private byte[] deltaPrefix() {
+            byte[] cached = deltaPrefix;
+            if (cached != null) {
+                return cached;
+            }
+            StringBuilder json = new StringBuilder(180);
+            json.append("{\"id\":").append(quoteJson(responseId))
+                    .append(",\"object\":\"chat.completion.chunk\",\"created\":").append(created)
+                    .append(",\"model\":").append(model == null ? "null" : quoteJson(model))
+                    .append(",\"choices\":[{\"index\":0,\"delta\":");
+            byte[] built = ("data: " + json).getBytes(StandardCharsets.UTF_8);
+            deltaPrefix = built;
+            return built;
+        }
+
+        private String quoteJson(String value) {
+            try {
+                return mapper.writeValueAsString(value);
+            } catch (IOException ex) {
+                throw new IllegalStateException("Failed to quote streaming envelope field", ex);
+            }
+        }
+
+        /**
+         * Emits a single-field delta chunk directly into bytes: template prefix + Jackson-escaped delta
+         * object + constant suffix, with the payload buffer reused across frames.
+         */
+        private byte[] buildDeltaFrame(String field, String text) {
+            CodecSupport.ResizableByteBuffer buffer = frameBuffer;
+            buffer.reset();
+            buffer.writeBytes(deltaPrefix());
+            try (JsonGenerator generator = CodecSupport.newUtf8Generator(mapper, buffer)) {
+                generator.writeStartObject();
+                generator.writeStringField(field, text);
+                generator.writeEndObject();
+            } catch (IOException ex) {
+                throw new IllegalStateException("Failed to encode streaming delta frame", ex);
+            }
+            buffer.writeBytes(DELTA_FRAME_TAIL);
+            return buffer.toCopiedByteArray();
         }
 
         private byte[] buildChunkFrame(ObjectNode delta, String finishReason) {
