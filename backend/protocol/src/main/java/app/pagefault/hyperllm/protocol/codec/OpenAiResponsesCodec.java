@@ -30,12 +30,16 @@ import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import app.pagefault.hyperllm.protocol.translate.StreamBridge;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -61,75 +65,13 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
-        String model = CodecSupport.requireModel(root);
-        boolean stream = root.path("stream").asBoolean(false);
-
-        List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
-        if (root.hasNonNull("previous_response_id") && !root.get("previous_response_id").asText("").isBlank()) {
-            unsupported.add(UnsupportedFeatureFlag.hard("previous_response_id",
-                    "Server-side response chaining requires OpenAI Responses passthrough"));
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
+            return decodeStreamingRoot(parser);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
-        if (root.hasNonNull("conversation")) {
-            unsupported.add(UnsupportedFeatureFlag.hard("conversation",
-                    "Server-side conversation state requires OpenAI Responses passthrough"));
-        }
-        if (root.path("background").asBoolean(false)) {
-            unsupported.add(UnsupportedFeatureFlag.hard("background",
-                    "Asynchronous background execution requires OpenAI Responses passthrough"));
-        }
-
-        List<CanonicalSystemPart> systemParts = new ArrayList<>();
-        String instructions = CodecSupport.asNullableText(root, "instructions");
-        if (instructions != null && !instructions.isBlank()) {
-            systemParts.add(new CanonicalSystemPart(instructions, true, null));
-        }
-
-        JsonNode inputNode = root.get("input");
-        if (inputNode == null || inputNode.isNull()) {
-            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'input' is required");
-        }
-        List<CanonicalTurn> turns = new ArrayList<>();
-        decodeInputItems(inputNode, systemParts, turns, unsupported);
-
-        List<CanonicalToolDefinition> tools = decodeTools(root.get("tools"), unsupported);
-        CanonicalToolChoice toolChoice = decodeToolChoice(
-                root.get("tool_choice"), CodecSupport.asNullableBoolean(root, "parallel_tool_calls"));
-        CanonicalResponseFormat responseFormat = decodeTextFormat(root.path("text").get("format"));
-
-        CanonicalGenerationConfig generation = new CanonicalGenerationConfig(
-                CodecSupport.asNullableInt(root, "max_output_tokens"),
-                CodecSupport.asNullableDouble(root, "temperature"),
-                CodecSupport.asNullableDouble(root, "top_p"),
-                null,
-                List.of(),
-                null,
-                null,
-                null,
-                null
-        );
-
-        CanonicalThinkingConfig thinking = decodeReasoning(root.get("reasoning"));
-        CanonicalCacheConfig cache = new CanonicalCacheConfig(
-                null,
-                CodecSupport.asNullableText(root, "prompt_cache_key"),
-                CodecSupport.asNullableText(root, "prompt_cache_retention"),
-                null
-        );
-        CanonicalProtocolOptions options = new CanonicalProtocolOptions(
-                true,
-                true,
-                null,
-                null,
-                CodecSupport.asNullableText(root, "user"),
-                CodecSupport.asNullableText(root, "service_tier"),
-                CodecSupport.asNullableBoolean(root, "store")
-        );
-
-        return new CanonicalRequest(
-                ProtocolKind.OPENAI_RESPONSES, model, stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
-        );
     }
 
     @Override
@@ -141,68 +83,537 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     @Override
     public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        ObjectNode root = mapper.createObjectNode();
-        root.put("model", context.upstreamModelName() != null && !context.upstreamModelName().isBlank()
-                ? context.upstreamModelName() : req.model());
-        root.put("stream", req.stream());
+        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
+                CodecSupport.estimateEncodedCapacity(req));
+        try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
+            gen.writeStartObject();
+            gen.writeStringField("model", context.upstreamModelName() != null && !context.upstreamModelName().isBlank()
+                    ? context.upstreamModelName() : req.model());
+            gen.writeBooleanField("stream", req.stream());
 
-        if (!req.systemInstructions().isEmpty()) {
-            StringBuilder sys = new StringBuilder();
-            for (CanonicalSystemPart sp : req.systemInstructions()) {
-                if (!sp.text().isEmpty()) {
-                    if (!sys.isEmpty()) {
-                        sys.append("\n\n");
+            if (!req.systemInstructions().isEmpty()) {
+                String singleSys = null;
+                StringBuilder sysSb = null;
+                for (CanonicalSystemPart sp : req.systemInstructions()) {
+                    if (!sp.text().isEmpty()) {
+                        if (singleSys == null && sysSb == null) {
+                            singleSys = sp.text();
+                        } else {
+                            if (sysSb == null) {
+                                sysSb = new StringBuilder(singleSys.length() + sp.text().length() + 2);
+                                sysSb.append(singleSys);
+                                singleSys = null;
+                            }
+                            sysSb.append("\n\n").append(sp.text());
+                        }
                     }
-                    sys.append(sp.text());
+                }
+                String instructions = sysSb != null ? sysSb.toString() : singleSys;
+                if (instructions != null && !instructions.isEmpty()) {
+                    gen.writeStringField("instructions", instructions);
                 }
             }
-            if (!sys.isEmpty()) {
-                root.put("instructions", sys.toString());
+
+            gen.writeArrayFieldStart("input");
+            for (CanonicalTurn turn : req.turns()) {
+                writeTurn(gen, turn);
+            }
+            gen.writeEndArray();
+
+            ProviderCapabilities caps = context.capabilitiesFor(ProtocolKind.OPENAI_RESPONSES);
+            CanonicalGenerationConfig g = req.generation();
+            if (g.maxOutputTokens() != null && g.maxOutputTokens() > 0) {
+                gen.writeNumberField("max_output_tokens", g.maxOutputTokens());
+            }
+            boolean allowSampling = !(caps.forbidsSamplingWithReasoning() && context.policy() != TranslationPolicy.STRICT);
+            if (allowSampling) {
+                if (g.temperature() != null) {
+                    gen.writeNumberField("temperature", g.temperature());
+                }
+                if (g.topP() != null) {
+                    gen.writeNumberField("top_p", g.topP());
+                }
+            }
+
+            writeTools(gen, req);
+            writeTextFormat(gen, req.responseFormat());
+            writeReasoning(gen, req.thinking());
+
+            if (req.cache().promptCacheKey() != null && !req.cache().promptCacheKey().isBlank()) {
+                gen.writeStringField("prompt_cache_key", req.cache().promptCacheKey());
+            }
+            if (req.cache().promptCacheRetention() != null && !req.cache().promptCacheRetention().isBlank()) {
+                gen.writeStringField("prompt_cache_retention", req.cache().promptCacheRetention());
+            }
+            if (req.options().serviceTier() != null && !req.options().serviceTier().isBlank()) {
+                gen.writeStringField("service_tier", req.options().serviceTier());
+            }
+            if (req.options().store() != null) {
+                gen.writeBooleanField("store", req.options().store());
+            }
+            if (req.options().user() != null && !req.options().user().isBlank()) {
+                gen.writeStringField("user", req.options().user());
+            }
+            gen.writeEndObject();
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new IllegalStateException("Failed to serialize OpenAI Responses request JSON", ex);
+        }
+        return out.toExactByteArray();
+    }
+
+    // ---- Streaming request decoding (zero inbound DOM tree for large input[]) ----
+
+    private CanonicalRequest decodeStreamingRoot(JsonParser parser) throws IOException {
+        String model = null;
+        boolean stream = false;
+        boolean inputPresent = false;
+        boolean inputIsNull = false;
+
+        List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
+        List<CanonicalSystemPart> systemParts = new ArrayList<>();
+        List<CanonicalSystemPart> leadingInputSystemParts = new ArrayList<>();
+        List<CanonicalTurn> turns = new ArrayList<>();
+
+        JsonNode toolsNode = null;
+        JsonNode toolChoiceNode = null;
+        Boolean parallelToolCalls = null;
+        JsonNode textNode = null;
+        Integer maxOutputTokens = null;
+        Double temperature = null;
+        Double topP = null;
+        JsonNode reasoningNode = null;
+        String promptCacheKey = null;
+        String promptCacheRetention = null;
+        String user = null;
+        String serviceTier = null;
+        Boolean store = null;
+
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            String field = parser.currentName();
+            JsonToken valTok = parser.nextToken();
+            if (valTok == null) {
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body");
+            }
+            switch (field) {
+                case "model" -> model = CodecSupport.readNullableString(parser);
+                case "stream" -> {
+                    if (valTok == JsonToken.VALUE_TRUE) {
+                        stream = true;
+                    } else if (valTok != JsonToken.VALUE_FALSE) {
+                        parser.skipChildren();
+                    }
+                }
+                case "previous_response_id" -> {
+                    String prev = CodecSupport.readNullableString(parser);
+                    if (prev != null && !prev.isBlank()) {
+                        unsupported.add(UnsupportedFeatureFlag.hard("previous_response_id",
+                                "Server-side response chaining requires OpenAI Responses passthrough"));
+                    }
+                }
+                case "conversation" -> {
+                    if (valTok != JsonToken.VALUE_NULL) {
+                        unsupported.add(UnsupportedFeatureFlag.hard("conversation",
+                                "Server-side conversation state requires OpenAI Responses passthrough"));
+                    }
+                    parser.skipChildren();
+                }
+                case "background" -> {
+                    if (valTok == JsonToken.VALUE_TRUE) {
+                        unsupported.add(UnsupportedFeatureFlag.hard("background",
+                                "Asynchronous background execution requires OpenAI Responses passthrough"));
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                case "instructions" -> {
+                    String instr = CodecSupport.readNullableString(parser);
+                    if (instr != null && !instr.isBlank()) {
+                        systemParts.add(new CanonicalSystemPart(instr, true, null));
+                    }
+                }
+                case "input" -> {
+                    inputPresent = true;
+                    if (valTok == JsonToken.VALUE_NULL) {
+                        inputIsNull = true;
+                    } else if (valTok == JsonToken.VALUE_STRING) {
+                        turns.add(new CanonicalTurn(CanonicalRole.USER,
+                                List.of(new CanonicalContentPart.TextPart(parser.getText()))));
+                    } else if (valTok == JsonToken.START_ARRAY) {
+                        readStreamingInputItems(parser, leadingInputSystemParts, turns, unsupported);
+                    } else {
+                        parser.skipChildren();
+                        throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
+                                "Field 'input' must be a string or an array");
+                    }
+                }
+                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "tool_choice" -> toolChoiceNode = mapper.readTree(parser);
+                case "parallel_tool_calls" -> parallelToolCalls = CodecSupport.readNullableBoolean(parser);
+                case "text" -> textNode = mapper.readTree(parser);
+                case "max_output_tokens" -> maxOutputTokens = CodecSupport.readNullableIntegralInt(parser);
+                case "temperature" -> temperature = CodecSupport.readNullableDouble(parser);
+                case "top_p" -> topP = CodecSupport.readNullableDouble(parser);
+                case "reasoning" -> reasoningNode = mapper.readTree(parser);
+                case "prompt_cache_key" -> promptCacheKey = CodecSupport.readNullableString(parser);
+                case "prompt_cache_retention" -> promptCacheRetention = CodecSupport.readNullableString(parser);
+                case "user" -> user = CodecSupport.readNullableString(parser);
+                case "service_tier" -> serviceTier = CodecSupport.readNullableString(parser);
+                case "store" -> store = CodecSupport.readNullableBoolean(parser);
+                default -> parser.skipChildren();
             }
         }
 
-        ArrayNode inputArr = mapper.createArrayNode();
-        for (CanonicalTurn turn : req.turns()) {
-            encodeTurn(inputArr, turn);
+        if (model == null || model.isBlank()) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'model' is required and must be non-blank");
         }
-        root.set("input", inputArr);
+        if (!inputPresent || inputIsNull) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'input' is required");
+        }
+        if (!leadingInputSystemParts.isEmpty()) {
+            systemParts.addAll(leadingInputSystemParts);
+        }
 
-        ProviderCapabilities caps = context.capabilitiesFor(ProtocolKind.OPENAI_RESPONSES);
-        CanonicalGenerationConfig g = req.generation();
-        if (g.maxOutputTokens() != null && g.maxOutputTokens() > 0) {
-            root.put("max_output_tokens", g.maxOutputTokens());
-        }
-        boolean allowSampling = !(caps.forbidsSamplingWithReasoning() && context.policy() != TranslationPolicy.STRICT);
-        if (allowSampling) {
-            if (g.temperature() != null) {
-                root.put("temperature", g.temperature());
+        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
+        CanonicalToolChoice toolChoice = decodeToolChoice(toolChoiceNode, parallelToolCalls);
+        CanonicalResponseFormat responseFormat = textNode != null ? decodeTextFormat(textNode.get("format")) : null;
+        CanonicalGenerationConfig generation = new CanonicalGenerationConfig(
+                maxOutputTokens, temperature, topP, null, List.of(), null, null, null, null);
+        CanonicalThinkingConfig thinking = decodeReasoning(reasoningNode);
+        CanonicalCacheConfig cache = new CanonicalCacheConfig(null, promptCacheKey, promptCacheRetention, null);
+        CanonicalProtocolOptions options = new CanonicalProtocolOptions(
+                true, true, null, null, user, serviceTier, store);
+
+        return new CanonicalRequest(
+                ProtocolKind.OPENAI_RESPONSES, model.trim(), stream, systemParts, turns, tools, toolChoice,
+                generation, responseFormat, thinking, cache, options, unsupported
+        );
+    }
+
+    private void readStreamingInputItems(
+            JsonParser parser,
+            List<CanonicalSystemPart> leadingSystemParts,
+            List<CanonicalTurn> turns,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        boolean sawNonSystem = false;
+        List<CanonicalContentPart> pendingAssistant = new ArrayList<>();
+
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
             }
-            if (g.topP() != null) {
-                root.put("top_p", g.topP());
+            String type = "";
+            String role = "user";
+            String callId = null;
+            String toolCallId = null;
+            String itemId = null;
+            String name = "";
+            String rawArgs = "{}";
+            String encryptedContent = null;
+            String plainContent = null;
+            List<CanonicalContentPart> arrayContent = null;
+            String plainOutput = null;
+            List<CanonicalContentPart> arrayOutput = null;
+            String summaryText = null;
+
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "type" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            type = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "role" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            role = parser.getText().toLowerCase(Locale.ROOT);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "call_id" -> callId = CodecSupport.readNullableString(parser);
+                    case "tool_call_id" -> toolCallId = CodecSupport.readNullableString(parser);
+                    case "id" -> itemId = CodecSupport.readNullableString(parser);
+                    case "name" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            name = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "arguments" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            rawArgs = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "encrypted_content" -> encryptedContent = CodecSupport.readNullableString(parser);
+                    case "content" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            plainContent = parser.getText();
+                        } else if (t == JsonToken.START_ARRAY) {
+                            arrayContent = readStreamingMessageContentArray(parser, unsupported);
+                        } else if (t != JsonToken.VALUE_NULL) {
+                            plainContent = mapper.readTree(parser).toString();
+                        }
+                    }
+                    case "output" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            plainOutput = parser.getText();
+                        } else if (t == JsonToken.START_ARRAY) {
+                            arrayOutput = readStreamingMessageContentArray(parser, unsupported);
+                        } else if (t != JsonToken.VALUE_NULL) {
+                            plainOutput = mapper.readTree(parser).toString();
+                        }
+                    }
+                    case "summary" -> {
+                        if (t == JsonToken.START_ARRAY) {
+                            summaryText = readStreamingSummaryTexts(parser);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    default -> parser.skipChildren();
+                }
+            }
+
+            if (type.isEmpty() || "message".equals(type)) {
+                switch (role) {
+                    case "system", "developer" -> {
+                        boolean devPriority = "developer".equals(role);
+                        flushPendingAssistant(pendingAssistant, turns);
+                        String text = extractPlainFromStreaming(plainContent, arrayContent);
+                        if (!sawNonSystem) {
+                            leadingSystemParts.add(new CanonicalSystemPart(text, devPriority, null));
+                        } else {
+                            turns.add(new CanonicalTurn(
+                                    devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM,
+                                    List.of(new CanonicalContentPart.TextPart(text))
+                            ));
+                        }
+                    }
+                    case "user" -> {
+                        sawNonSystem = true;
+                        flushPendingAssistant(pendingAssistant, turns);
+                        turns.add(new CanonicalTurn(CanonicalRole.USER, resolveParts(plainContent, arrayContent)));
+                    }
+                    case "assistant" -> {
+                        sawNonSystem = true;
+                        pendingAssistant.addAll(resolveParts(plainContent, arrayContent));
+                    }
+                    case "tool" -> {
+                        sawNonSystem = true;
+                        flushPendingAssistant(pendingAssistant, turns);
+                        String effectiveCallId = callId != null ? callId : toolCallId;
+                        turns.add(new CanonicalTurn(
+                                CanonicalRole.TOOL,
+                                List.of(new CanonicalContentPart.ToolResultPart(
+                                        effectiveCallId, name.isEmpty() ? null : name,
+                                        resolveParts(plainContent, arrayContent), false, null))
+                        ));
+                    }
+                    default -> throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
+                            "Unsupported Responses message role: " + role);
+                }
+            } else if ("function_call".equals(type)) {
+                sawNonSystem = true;
+                // Defer JSON object parsing of rawArgs (zero eager readTree!)
+                pendingAssistant.add(new CanonicalContentPart.ToolCallPart(
+                        callId != null ? callId : itemId,
+                        itemId,
+                        name,
+                        null,
+                        rawArgs,
+                        null,
+                        ProtocolKind.OPENAI_RESPONSES
+                ));
+            } else if ("function_call_output".equals(type)) {
+                sawNonSystem = true;
+                flushPendingAssistant(pendingAssistant, turns);
+                turns.add(new CanonicalTurn(
+                        CanonicalRole.TOOL,
+                        List.of(new CanonicalContentPart.ToolResultPart(
+                                callId, null, resolveParts(plainOutput, arrayOutput), false, null))
+                ));
+            } else if ("reasoning".equals(type)) {
+                sawNonSystem = true;
+                String reasoningText = (summaryText != null && !summaryText.isEmpty())
+                        ? summaryText
+                        : extractPlainFromStreaming(plainContent, arrayContent);
+                if (reasoningText != null && !reasoningText.isEmpty()) {
+                    pendingAssistant.add(new CanonicalContentPart.ThinkingPart(
+                            reasoningText, null, encryptedContent, ProtocolKind.OPENAI_RESPONSES));
+                } else if (encryptedContent != null && !encryptedContent.isBlank()) {
+                    pendingAssistant.add(new CanonicalContentPart.RedactedThinkingPart(
+                            encryptedContent, ProtocolKind.OPENAI_RESPONSES));
+                }
+            } else {
+                unsupported.add(UnsupportedFeatureFlag.degradable("input_item:" + type,
+                        "Responses input item type '" + type + "' is not supported across protocol translation"));
             }
         }
+        flushPendingAssistant(pendingAssistant, turns);
+    }
 
-        encodeTools(root, req);
-        encodeTextFormat(root, req.responseFormat());
-        encodeReasoning(root, req.thinking());
+    private List<CanonicalContentPart> readStreamingMessageContentArray(
+            JsonParser parser,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        List<CanonicalContentPart> parts = new ArrayList<>(4);
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            String type = "";
+            String text = "";
+            String refusal = "";
+            String fileId = null;
+            String imgUrl = null;
+            ImageDetail detail = ImageDetail.AUTO;
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "type" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            type = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "text" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            text = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "refusal" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            refusal = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "file_id" -> fileId = CodecSupport.readNullableString(parser);
+                    case "detail" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            detail = ImageDetail.parseOrDefault(parser.getText(), ImageDetail.AUTO);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "image_url" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            imgUrl = parser.getText();
+                        } else if (t == JsonToken.START_OBJECT) {
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String imf = parser.currentName();
+                                JsonToken imt = parser.nextToken();
+                                if ("url".equals(imf) && imt == JsonToken.VALUE_STRING) {
+                                    imgUrl = parser.getText();
+                                } else {
+                                    parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    default -> parser.skipChildren();
+                }
+            }
+            switch (type) {
+                case "input_text", "output_text", "text", "summary_text" ->
+                        parts.add(new CanonicalContentPart.TextPart(text));
+                case "refusal" -> parts.add(new CanonicalContentPart.RefusalPart(refusal));
+                case "input_image" -> {
+                    if (fileId != null && !fileId.isBlank()) {
+                        parts.add(new CanonicalContentPart.ImagePart(
+                                new ImageSource.FileRefImage(ProtocolKind.OPENAI_RESPONSES, fileId, null), detail, null));
+                    } else if (imgUrl != null) {
+                        parts.add(new CanonicalContentPart.ImagePart(
+                                CodecSupport.parseImageUrlOrDataUri(imgUrl), detail, null));
+                    } else {
+                        throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
+                                "input_image requires either 'image_url' or 'file_id'");
+                    }
+                }
+                default -> unsupported.add(UnsupportedFeatureFlag.degradable("content_part:" + type,
+                        "Responses content part '" + type + "' is not supported across protocol translation"));
+            }
+        }
+        return parts;
+    }
 
-        if (req.cache().promptCacheKey() != null && !req.cache().promptCacheKey().isBlank()) {
-            root.put("prompt_cache_key", req.cache().promptCacheKey());
+    private String readStreamingSummaryTexts(JsonParser parser) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                if ("text".equals(f) && t == JsonToken.VALUE_STRING) {
+                    if (!sb.isEmpty()) {
+                        sb.append('\n');
+                    }
+                    sb.append(parser.getText());
+                } else {
+                    parser.skipChildren();
+                }
+            }
         }
-        if (req.cache().promptCacheRetention() != null && !req.cache().promptCacheRetention().isBlank()) {
-            root.put("prompt_cache_retention", req.cache().promptCacheRetention());
-        }
-        if (req.options().serviceTier() != null && !req.options().serviceTier().isBlank()) {
-            root.put("service_tier", req.options().serviceTier());
-        }
-        if (req.options().store() != null) {
-            root.put("store", req.options().store());
-        }
-        if (req.options().user() != null && !req.options().user().isBlank()) {
-            root.put("user", req.options().user());
-        }
+        return sb.toString();
+    }
 
-        return CodecSupport.writeJsonBytes(mapper, root);
+    private static List<CanonicalContentPart> resolveParts(String plain, List<CanonicalContentPart> arr) {
+        if (arr != null) {
+            return arr;
+        }
+        if (plain != null) {
+            return List.of(new CanonicalContentPart.TextPart(plain));
+        }
+        return List.of();
+    }
+
+    private static String extractPlainFromStreaming(String plain, List<CanonicalContentPart> arr) {
+        if (plain != null) {
+            return plain;
+        }
+        if (arr == null || arr.isEmpty()) {
+            return "";
+        }
+        String single = null;
+        StringBuilder sb = null;
+        for (CanonicalContentPart p : arr) {
+            if (p instanceof CanonicalContentPart.TextPart t) {
+                if (single == null && sb == null) {
+                    single = t.text();
+                } else {
+                    if (sb == null) {
+                        sb = new StringBuilder(single.length() + t.text().length() + 1);
+                        sb.append(single);
+                        single = null;
+                    }
+                    if (!sb.isEmpty()) {
+                        sb.append('\n');
+                    }
+                    sb.append(t.text());
+                }
+            }
+        }
+        return sb != null ? sb.toString() : (single != null ? single : "");
     }
 
     @Override
@@ -659,115 +1070,147 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         return content.toString();
     }
 
-    // ---- Request encoding helpers ----
+    // ---- Streaming request encoding helpers (zero outbound DOM tree) ----
 
-    private void encodeTurn(ArrayNode inputArr, CanonicalTurn turn) {
+    private void writeTurn(JsonGenerator gen, CanonicalTurn turn) throws IOException {
         switch (turn.role()) {
             case SYSTEM, DEVELOPER -> {
-                ArrayNode content = mapper.createArrayNode();
+                gen.writeStartObject();
+                gen.writeStringField("type", "message");
+                gen.writeStringField("role", turn.role() == CanonicalRole.SYSTEM ? "system" : "developer");
+                gen.writeArrayFieldStart("content");
                 for (CanonicalContentPart p : turn.parts()) {
                     if (p instanceof CanonicalContentPart.TextPart t) {
-                        ObjectNode tp = mapper.createObjectNode();
-                        tp.put("type", "input_text");
-                        tp.put("text", t.text());
-                        content.add(tp);
+                        gen.writeStartObject();
+                        gen.writeStringField("type", "input_text");
+                        gen.writeStringField("text", t.text());
+                        gen.writeEndObject();
                     }
                 }
-                ObjectNode msg = mapper.createObjectNode();
-                msg.put("type", "message");
-                msg.put("role", turn.role() == CanonicalRole.SYSTEM ? "system" : "developer");
-                msg.set("content", content);
-                inputArr.add(msg);
+                gen.writeEndArray();
+                gen.writeEndObject();
             }
             case USER, TOOL -> {
-                ArrayNode userParts = mapper.createArrayNode();
+                List<CanonicalContentPart> pending = null;
                 for (CanonicalContentPart p : turn.parts()) {
                     if (p instanceof CanonicalContentPart.ToolResultPart tr) {
-                        if (!userParts.isEmpty()) {
-                            inputArr.add(buildMessageInputItem("user", userParts));
-                            userParts = mapper.createArrayNode();
+                        if (pending != null && !pending.isEmpty()) {
+                            writeUserMessageInputItem(gen, pending);
+                            pending.clear();
                         }
-                        inputArr.add(buildFunctionCallOutputItem(tr));
-                    } else if (p instanceof CanonicalContentPart.TextPart t) {
-                        ObjectNode tp = mapper.createObjectNode();
-                        tp.put("type", "input_text");
-                        tp.put("text", t.text());
-                        userParts.add(tp);
-                    } else if (p instanceof CanonicalContentPart.ImagePart img) {
-                        userParts.add(buildInputImagePart(img));
+                        writeFunctionCallOutputItem(gen, tr);
+                    } else if (p instanceof CanonicalContentPart.TextPart || p instanceof CanonicalContentPart.ImagePart) {
+                        if (pending == null) {
+                            pending = new ArrayList<>(4);
+                        }
+                        pending.add(p);
                     }
                 }
-                if (!userParts.isEmpty()) {
-                    inputArr.add(buildMessageInputItem("user", userParts));
+                if (pending != null && !pending.isEmpty()) {
+                    writeUserMessageInputItem(gen, pending);
                 }
             }
             case ASSISTANT -> {
-                ArrayNode assistantParts = mapper.createArrayNode();
+                List<CanonicalContentPart> pending = null;
                 for (CanonicalContentPart p : turn.parts()) {
                     switch (p) {
                         case CanonicalContentPart.ThinkingPart th -> {
                             if (CodecSupport.isSameOrigin(th.originProtocol(), ProtocolKind.OPENAI_RESPONSES)
                                     && th.encryptedContent() != null) {
-                                ObjectNode r = mapper.createObjectNode();
-                                r.put("type", "reasoning");
-                                ArrayNode summary = mapper.createArrayNode();
+                                gen.writeStartObject();
+                                gen.writeStringField("type", "reasoning");
+                                gen.writeArrayFieldStart("summary");
                                 if (!th.text().isEmpty()) {
-                                    ObjectNode s = mapper.createObjectNode();
-                                    s.put("type", "summary_text");
-                                    s.put("text", th.text());
-                                    summary.add(s);
+                                    gen.writeStartObject();
+                                    gen.writeStringField("type", "summary_text");
+                                    gen.writeStringField("text", th.text());
+                                    gen.writeEndObject();
                                 }
-                                r.set("summary", summary);
-                                r.put("encrypted_content", th.encryptedContent());
-                                inputArr.add(r);
+                                gen.writeEndArray();
+                                gen.writeStringField("encrypted_content", th.encryptedContent());
+                                gen.writeEndObject();
                             }
                         }
                         case CanonicalContentPart.RedactedThinkingPart rt -> {
                             if (CodecSupport.isSameOrigin(rt.originProtocol(), ProtocolKind.OPENAI_RESPONSES)
                                     && rt.opaqueData() != null) {
-                                ObjectNode r = mapper.createObjectNode();
-                                r.put("type", "reasoning");
-                                r.set("summary", mapper.createArrayNode());
-                                r.put("encrypted_content", rt.opaqueData());
-                                inputArr.add(r);
+                                gen.writeStartObject();
+                                gen.writeStringField("type", "reasoning");
+                                gen.writeArrayFieldStart("summary");
+                                gen.writeEndArray();
+                                gen.writeStringField("encrypted_content", rt.opaqueData());
+                                gen.writeEndObject();
                             }
                         }
                         case CanonicalContentPart.TextPart t -> {
-                            ObjectNode tp = mapper.createObjectNode();
-                            tp.put("type", "output_text");
-                            tp.put("text", t.text());
-                            assistantParts.add(tp);
+                            if (pending == null) {
+                                pending = new ArrayList<>(4);
+                            }
+                            pending.add(t);
                         }
                         case CanonicalContentPart.RefusalPart ref -> {
-                            ObjectNode rp = mapper.createObjectNode();
-                            rp.put("type", "refusal");
-                            rp.put("refusal", ref.refusal());
-                            assistantParts.add(rp);
+                            if (pending == null) {
+                                pending = new ArrayList<>(4);
+                            }
+                            pending.add(ref);
                         }
                         case CanonicalContentPart.ToolCallPart tc -> {
-                            if (!assistantParts.isEmpty()) {
-                                inputArr.add(buildMessageInputItem("assistant", assistantParts));
-                                assistantParts = mapper.createArrayNode();
+                            if (pending != null && !pending.isEmpty()) {
+                                writeAssistantMessageInputItem(gen, pending);
+                                pending.clear();
                             }
-                            inputArr.add(buildFunctionCallItem(tc));
+                            writeFunctionCallItem(gen, tc);
                         }
                         case CanonicalContentPart.ImagePart ignored -> {}
                         case CanonicalContentPart.ToolResultPart ignored -> {}
                     }
                 }
-                if (!assistantParts.isEmpty()) {
-                    inputArr.add(buildMessageInputItem("assistant", assistantParts));
+                if (pending != null && !pending.isEmpty()) {
+                    writeAssistantMessageInputItem(gen, pending);
                 }
             }
         }
     }
 
-    private ObjectNode buildMessageInputItem(String role, ArrayNode content) {
-        ObjectNode msg = mapper.createObjectNode();
-        msg.put("type", "message");
-        msg.put("role", role);
-        msg.set("content", content);
-        return msg;
+    private void writeUserMessageInputItem(JsonGenerator gen, List<CanonicalContentPart> parts) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("type", "message");
+        gen.writeStringField("role", "user");
+        gen.writeArrayFieldStart("content");
+        for (CanonicalContentPart p : parts) {
+            if (p instanceof CanonicalContentPart.TextPart t) {
+                gen.writeStartObject();
+                gen.writeStringField("type", "input_text");
+                gen.writeStringField("text", t.text());
+                gen.writeEndObject();
+            } else if (p instanceof CanonicalContentPart.ImagePart img) {
+                writeInputImagePart(gen, img);
+            }
+        }
+        gen.writeEndArray();
+        gen.writeEndObject();
+    }
+
+    private void writeAssistantMessageInputItem(JsonGenerator gen, List<CanonicalContentPart> parts) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("type", "message");
+        gen.writeStringField("role", "assistant");
+        gen.writeArrayFieldStart("content");
+        for (CanonicalContentPart p : parts) {
+            if (p instanceof CanonicalContentPart.TextPart t) {
+                gen.writeStartObject();
+                gen.writeStringField("type", "output_text");
+                gen.writeStringField("text", t.text());
+                gen.writeEndObject();
+            } else if (p instanceof CanonicalContentPart.RefusalPart ref) {
+                gen.writeStartObject();
+                gen.writeStringField("type", "refusal");
+                gen.writeStringField("refusal", ref.refusal());
+                gen.writeEndObject();
+            }
+        }
+        gen.writeEndArray();
+        gen.writeEndObject();
     }
 
     private ObjectNode buildMessageOutputItem(ArrayNode content) {
@@ -778,6 +1221,19 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         msg.put("role", "assistant");
         msg.set("content", content);
         return msg;
+    }
+
+    private void writeFunctionCallItem(JsonGenerator gen, CanonicalContentPart.ToolCallPart tc) throws IOException {
+        String callId = (tc.callId() != null && !tc.callId().isBlank()) ? tc.callId() : CodecSupport.generateId("call_");
+        String itemId = (tc.itemId() != null && !tc.itemId().isBlank()) ? tc.itemId() : CodecSupport.generateId("fc_");
+        gen.writeStartObject();
+        gen.writeStringField("id", itemId);
+        gen.writeStringField("type", "function_call");
+        gen.writeStringField("status", "completed");
+        gen.writeStringField("call_id", callId);
+        gen.writeStringField("name", tc.name());
+        gen.writeStringField("arguments", CodecSupport.serializeArguments(mapper, tc));
+        gen.writeEndObject();
     }
 
     private ObjectNode buildFunctionCallItem(CanonicalContentPart.ToolCallPart tc) {
@@ -792,138 +1248,152 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         return item;
     }
 
-    private ObjectNode buildFunctionCallOutputItem(CanonicalContentPart.ToolResultPart tr) {
-        ObjectNode item = mapper.createObjectNode();
-        item.put("type", "function_call_output");
-        item.put("call_id", tr.callId() != null ? tr.callId() : "");
-        boolean hasImage = tr.content().stream().anyMatch(c -> c instanceof CanonicalContentPart.ImagePart);
+    private void writeFunctionCallOutputItem(JsonGenerator gen, CanonicalContentPart.ToolResultPart tr) throws IOException {
+        List<CanonicalContentPart> children = tr.content();
+        boolean hasImage = false;
+        for (CanonicalContentPart c : children) {
+            if (c instanceof CanonicalContentPart.ImagePart) {
+                hasImage = true;
+                break;
+            }
+        }
+        gen.writeStartObject();
+        gen.writeStringField("type", "function_call_output");
+        gen.writeStringField("call_id", tr.callId() != null ? tr.callId() : "");
         if (!hasImage) {
-            StringBuilder text = new StringBuilder();
-            for (CanonicalContentPart c : tr.content()) {
-                if (c instanceof CanonicalContentPart.TextPart t) {
-                    if (!text.isEmpty()) {
-                        text.append('\n');
+            String outputText;
+            if (children.isEmpty()) {
+                outputText = "";
+            } else if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t) {
+                outputText = (tr.isError() && !t.text().isEmpty()) ? "Error: " + t.text() : t.text();
+            } else {
+                StringBuilder text = new StringBuilder();
+                for (CanonicalContentPart c : children) {
+                    if (c instanceof CanonicalContentPart.TextPart t) {
+                        if (!text.isEmpty()) {
+                            text.append('\n');
+                        }
+                        text.append(t.text());
                     }
-                    text.append(t.text());
                 }
+                outputText = (tr.isError() && !text.isEmpty()) ? "Error: " + text : text.toString();
             }
-            item.put("output", tr.isError() && !text.isEmpty() ? "Error: " + text : text.toString());
+            gen.writeStringField("output", outputText);
         } else {
-            ArrayNode arr = mapper.createArrayNode();
-            for (CanonicalContentPart c : tr.content()) {
+            gen.writeArrayFieldStart("output");
+            for (CanonicalContentPart c : children) {
                 if (c instanceof CanonicalContentPart.TextPart t) {
-                    ObjectNode tp = mapper.createObjectNode();
-                    tp.put("type", "input_text");
-                    tp.put("text", tr.isError() ? "Error: " + t.text() : t.text());
-                    arr.add(tp);
+                    gen.writeStartObject();
+                    gen.writeStringField("type", "input_text");
+                    gen.writeStringField("text", tr.isError() ? "Error: " + t.text() : t.text());
+                    gen.writeEndObject();
                 } else if (c instanceof CanonicalContentPart.ImagePart img) {
-                    arr.add(buildInputImagePart(img));
+                    writeInputImagePart(gen, img);
                 }
             }
-            item.set("output", arr);
+            gen.writeEndArray();
         }
-        return item;
+        gen.writeEndObject();
     }
 
-    private ObjectNode buildInputImagePart(CanonicalContentPart.ImagePart img) {
-        ObjectNode node = mapper.createObjectNode();
-        node.put("type", "input_image");
-        node.put("detail", (img.detail() != null ? img.detail() : ImageDetail.AUTO).toOpenAiValue());
+    private void writeInputImagePart(JsonGenerator gen, CanonicalContentPart.ImagePart img) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("type", "input_image");
+        gen.writeStringField("detail", (img.detail() != null ? img.detail() : ImageDetail.AUTO).toOpenAiValue());
         switch (img.source()) {
-            case ImageSource.Base64Image b64 -> node.put("image_url", b64.toDataUri());
-            case ImageSource.UrlImage u -> node.put("image_url", u.url());
-            case ImageSource.FileRefImage ref -> node.put("file_id", ref.fileRef());
+            case ImageSource.Base64Image b64 -> gen.writeStringField("image_url", b64.toDataUri());
+            case ImageSource.UrlImage u -> gen.writeStringField("image_url", u.url());
+            case ImageSource.FileRefImage ref -> gen.writeStringField("file_id", ref.fileRef());
         }
-        return node;
+        gen.writeEndObject();
     }
 
-    private void encodeTools(ObjectNode root, CanonicalRequest req) {
+    private void writeTools(JsonGenerator gen, CanonicalRequest req) throws IOException {
         if (req.tools().isEmpty()) {
             return;
         }
-        ArrayNode arr = mapper.createArrayNode();
+        gen.writeArrayFieldStart("tools");
         for (CanonicalToolDefinition tool : req.tools()) {
-            ObjectNode t = mapper.createObjectNode();
-            t.put("type", "function");
-            t.put("name", tool.name());
+            gen.writeStartObject();
+            gen.writeStringField("type", "function");
+            gen.writeStringField("name", tool.name());
             if (tool.description() != null) {
-                t.put("description", tool.description());
+                gen.writeStringField("description", tool.description());
             }
+            gen.writeFieldName("parameters");
             if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
-                t.set("parameters", tool.parametersSchema().deepCopy());
+                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
             } else {
-                ObjectNode emptySchema = mapper.createObjectNode();
-                emptySchema.put("type", "object");
-                emptySchema.set("properties", mapper.createObjectNode());
-                t.set("parameters", emptySchema);
+                CodecSupport.writeEmptyObjectSchema(gen);
             }
             if (tool.strict() != null) {
-                t.put("strict", tool.strict());
+                gen.writeBooleanField("strict", tool.strict());
             }
-            arr.add(t);
+            gen.writeEndObject();
         }
-        root.set("tools", arr);
+        gen.writeEndArray();
 
         CanonicalToolChoice tc = req.toolChoice();
         switch (tc.mode()) {
-            case NONE -> root.put("tool_choice", "none");
-            case AUTO -> root.put("tool_choice", "auto");
-            case REQUIRED -> root.put("tool_choice", "required");
+            case NONE -> gen.writeStringField("tool_choice", "none");
+            case AUTO -> gen.writeStringField("tool_choice", "auto");
+            case REQUIRED -> gen.writeStringField("tool_choice", "required");
             case SPECIFIC -> {
-                ObjectNode obj = mapper.createObjectNode();
-                obj.put("type", "function");
-                obj.put("name", tc.specificToolName());
-                root.set("tool_choice", obj);
+                gen.writeObjectFieldStart("tool_choice");
+                gen.writeStringField("type", "function");
+                gen.writeStringField("name", tc.specificToolName());
+                gen.writeEndObject();
             }
             case OMITTED -> {}
         }
         if (tc.parallelToolCalls() != null) {
-            root.put("parallel_tool_calls", tc.parallelToolCalls());
+            gen.writeBooleanField("parallel_tool_calls", tc.parallelToolCalls());
         }
     }
 
-    private void encodeTextFormat(ObjectNode root, CanonicalResponseFormat format) {
+    private void writeTextFormat(JsonGenerator gen, CanonicalResponseFormat format) throws IOException {
         if (format == null) {
             return;
         }
-        ObjectNode fmt = mapper.createObjectNode();
+        gen.writeObjectFieldStart("text");
+        gen.writeObjectFieldStart("format");
         switch (format) {
-            case CanonicalResponseFormat.TextFormat ignored -> fmt.put("type", "text");
-            case CanonicalResponseFormat.JsonObjectFormat ignored -> fmt.put("type", "json_object");
+            case CanonicalResponseFormat.TextFormat ignored -> gen.writeStringField("type", "text");
+            case CanonicalResponseFormat.JsonObjectFormat ignored -> gen.writeStringField("type", "json_object");
             case CanonicalResponseFormat.JsonSchemaFormat js -> {
-                fmt.put("type", "json_schema");
-                fmt.put("name", js.name());
+                gen.writeStringField("type", "json_schema");
+                gen.writeStringField("name", js.name());
                 if (js.description() != null) {
-                    fmt.put("description", js.description());
+                    gen.writeStringField("description", js.description());
                 }
                 if (js.schema() != null) {
-                    fmt.set("schema", js.schema().deepCopy());
+                    gen.writeFieldName("schema");
+                    CodecSupport.writeJsonNode(gen, mapper, js.schema());
                 }
                 if (js.strict() != null) {
-                    fmt.put("strict", js.strict());
+                    gen.writeBooleanField("strict", js.strict());
                 }
             }
         }
-        ObjectNode textNode = mapper.createObjectNode();
-        textNode.set("format", fmt);
-        root.set("text", textNode);
+        gen.writeEndObject();
+        gen.writeEndObject();
     }
 
-    private void encodeReasoning(ObjectNode root, CanonicalThinkingConfig thinking) {
+    private void writeReasoning(JsonGenerator gen, CanonicalThinkingConfig thinking) throws IOException {
         String effort = CodecSupport.toOpenAiReasoningEffort(thinking);
         if (effort == null && thinking.summaryMode() == null && !Boolean.TRUE.equals(thinking.includeThoughts())) {
             return;
         }
-        ObjectNode r = mapper.createObjectNode();
+        gen.writeObjectFieldStart("reasoning");
         if (effort != null) {
-            r.put("effort", effort);
+            gen.writeStringField("effort", effort);
         }
         if (thinking.summaryMode() != null && !thinking.summaryMode().isBlank()) {
-            r.put("summary", thinking.summaryMode());
+            gen.writeStringField("summary", thinking.summaryMode());
         } else if (Boolean.TRUE.equals(thinking.includeThoughts())) {
-            r.put("summary", "auto");
+            gen.writeStringField("summary", "auto");
         }
-        root.set("reasoning", r);
+        gen.writeEndObject();
     }
 
     // ---- Usage & status helpers ----

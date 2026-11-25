@@ -57,6 +57,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
@@ -76,6 +77,7 @@ import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
@@ -94,7 +96,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class GatewayProxyService {
 
     private record CallerContext(
@@ -148,10 +149,45 @@ public class GatewayProxyService {
     private final app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService;
     private final ObjectMapper objectMapper;
     private final TokenEstimator tokenEstimator;
+    private final Scheduler protocolTranslationScheduler;
     private static final NettyDataBufferFactory NETTY_DATA_BUFFER_FACTORY =
             new NettyDataBufferFactory(ByteBufAllocator.DEFAULT);
 
     private final AtomicLong nextLazyReclaimNanos = new AtomicLong(0L);
+
+    public GatewayProxyService(
+            GatewayConfigCacheService cacheService,
+            OutboxAdmissionGate outboxAdmissionGate,
+            PreHoldService preHoldService,
+            ProjectBudgetService projectBudgetService,
+            ChannelCapacityService channelCapacity,
+            GatewayTelemetryService telemetryService,
+            GatewayProperties properties,
+            ProtocolTranslator protocolTranslator,
+            AesGcmCipher aesGcmCipher,
+            ChannelSelector channelSelector,
+            UpstreamWebClientPool webClientPool,
+            app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService,
+            ObjectMapper objectMapper,
+            TokenEstimator tokenEstimator,
+            @Qualifier("protocolTranslationScheduler") Scheduler protocolTranslationScheduler
+    ) {
+        this.cacheService = cacheService;
+        this.outboxAdmissionGate = outboxAdmissionGate;
+        this.preHoldService = preHoldService;
+        this.projectBudgetService = projectBudgetService;
+        this.channelCapacity = channelCapacity;
+        this.telemetryService = telemetryService;
+        this.properties = properties;
+        this.protocolTranslator = protocolTranslator;
+        this.aesGcmCipher = aesGcmCipher;
+        this.channelSelector = channelSelector;
+        this.webClientPool = webClientPool;
+        this.mirrorService = mirrorService;
+        this.objectMapper = objectMapper;
+        this.tokenEstimator = tokenEstimator;
+        this.protocolTranslationScheduler = protocolTranslationScheduler;
+    }
 
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
         String rawToken = extractToken(exchange.getRequest(), ProtocolKind.OPENAI_CHAT);
@@ -301,30 +337,44 @@ public class GatewayProxyService {
                     route.model().supportsThinking(),
                     route.model().metadataJson()
             );
-            PreparedUpstreamPayload payload = protocolTranslator.prepareUpstreamPayload(
-                    rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical);
-            DataBuffer bodyBuffer = toZeroCopyDataBuffer(payload);
-            long contentLength = payload.contentLength();
             String upstreamApiKey = decryptChannelApiKey(candidate);
             String targetUrl = UpstreamEndpointResolver.buildInferenceUrl(
                     candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
-            return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
-                    .flatMap(capacity -> {
-                        if (!"OK".equals(capacity)) {
-                            // Try the next eligible candidate before giving up on the request.
-                            excludedChannels.add(candidate.channelId());
-                            return Mono.error(new RetryableCapacityException());
-                        }
-                        return executeSingleAttempt(
-                                exchange, client, targetUrl, candidate, upstreamApiKey,
-                                streamMeta, isStream, anthropicVersion, anthropicBeta,
-                                bodyBuffer, contentLength, protocolKind, outboundProtocol,
-                                caller, route, lease, excludedChannels,
-                                requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
-                        );
-                    });
+            boolean homomorphicFastPath = (outboundProtocol == protocolKind && !probe.requiresSlowPath());
+            int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
+            boolean offloadTranslation = !homomorphicFastPath
+                    && offloadThreshold >= 0
+                    && rawBody != null
+                    && rawBody.length >= offloadThreshold;
+
+            Mono<PreparedUpstreamPayload> payloadMono = offloadTranslation
+                    ? Mono.fromCallable(() -> protocolTranslator.prepareUpstreamPayload(
+                            rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical))
+                            .subscribeOn(protocolTranslationScheduler)
+                    : Mono.just(protocolTranslator.prepareUpstreamPayload(
+                            rawBody, probe, inboundContext, outboundProtocol, encodingContext, lazyCanonical));
+
+            return payloadMono.flatMap(payload -> {
+                DataBuffer bodyBuffer = toZeroCopyDataBuffer(payload);
+                long contentLength = payload.contentLength();
+                return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
+                        .flatMap(capacity -> {
+                            if (!"OK".equals(capacity)) {
+                                // Try the next eligible candidate before giving up on the request.
+                                excludedChannels.add(candidate.channelId());
+                                return Mono.error(new RetryableCapacityException());
+                            }
+                            return executeSingleAttempt(
+                                    exchange, client, targetUrl, candidate, upstreamApiKey,
+                                    streamMeta, isStream, anthropicVersion, anthropicBeta,
+                                    bodyBuffer, contentLength, protocolKind, outboundProtocol,
+                                    caller, route, lease, excludedChannels,
+                                    requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
+                            );
+                        });
+            });
         }).retryWhen(Retry.max(properties.getUpstream().getMaxRetryAttempts())
                 .filter(ex -> ex instanceof RetryableUpstreamException
                         || ex instanceof RetryableCapacityException));

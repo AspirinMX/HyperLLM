@@ -78,6 +78,12 @@ public class GatewayConfiguration {
         return Schedulers.fromExecutorService(Executors.newVirtualThreadPerTaskExecutor(), "domain-fallback");
     }
 
+    @Bean(name = "protocolTranslationScheduler", destroyMethod = "dispose")
+    public Scheduler protocolTranslationScheduler() {
+        int workers = Math.max(2, Runtime.getRuntime().availableProcessors());
+        return Schedulers.newParallel("protocol-translate", workers, true);
+    }
+
     @SuppressWarnings("rawtypes")
     @Bean(name = "preholdSnapshotLuaScript")
     public RedisScript<java.util.List> preholdSnapshotLuaScript() {

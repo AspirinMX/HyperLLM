@@ -34,19 +34,18 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Capability-driven cross-protocol normalization pipeline modeled after OpenCode's
- * {@code ProviderTransform.normalizeMessages} and Vercel AI SDK prompt converters:
+ * Capability-driven cross-protocol normalization pipeline optimized with copy-on-write fast paths
+ * for large multi-turn agent {@code messages} arrays:
  * <ol>
  *   <li>Enforces feature compatibility ({@link UnsupportedFeatureFlag.Severity#HARD_INCOMPATIBLE}
  *       always fails fast; {@link UnsupportedFeatureFlag.Severity#DEGRADABLE} drops cleanly in
  *       {@code BEST_EFFORT} and rejects in {@code STRICT}).</li>
  *   <li>Strips cross-vendor opaque thinking signatures/redacted blocks and target-disallowed empty text parts.</li>
  *   <li>Bijectively sanitizes tool call IDs to target {@link ProviderCapabilities} charset/length limits
- *       while backfilling missing {@code callId <-> toolName} bindings.</li>
- *   <li>Repairs interrupted agent tool-call turns in {@code BEST_EFFORT} so every assistant tool call
- *       followed by later turns has matching tool results.</li>
- *   <li>Normalizes tool parameter schemas and removes dangling {@code tool_choice} directives when
- *       no tools remain.</li>
+ *       while backfilling missing {@code callId <-> toolName} bindings (lazy map initialization).</li>
+ *   <li>Repairs interrupted agent tool-call turns in {@code BEST_EFFORT} using zero-allocation fast-skip
+ *       on clean histories.</li>
+ *   <li>Normalizes tool parameter schemas (copy-on-write) and removes dangling {@code tool_choice} directives.</li>
  * </ol>
  */
 public final class CanonicalRequestNormalizer {
@@ -112,47 +111,91 @@ public final class CanonicalRequestNormalizer {
             validateStrictParameterCompatibility(request, outboundProtocol);
         }
 
-        // 2. Content sanitization, opaque credential isolation, bijective tool-call ID mapping & backfill
-        Map<String, String> originalToSanitizedId = new HashMap<>();
-        Set<String> usedSanitizedIds = new HashSet<>();
-        Map<String, String> callIdToName = new HashMap<>();
-        Map<String, Deque<String>> pendingIdsByName = new HashMap<>();
+        // 2. Copy-on-write turn normalization with lazy tool-call state allocation
+        ToolTrackingState toolState = null;
+        List<CanonicalTurn> originalTurns = request.turns();
+        List<CanonicalTurn> normalizedTurns = null;
+        boolean sawAnyToolCall = false;
 
-        List<CanonicalTurn> normalizedTurns = new ArrayList<>(request.turns().size());
-        for (int turnIdx = 0; turnIdx < request.turns().size(); turnIdx++) {
-            CanonicalTurn turn = request.turns().get(turnIdx);
-            List<CanonicalContentPart> normalizedParts = new ArrayList<>(turn.parts().size());
-            for (int partIdx = 0; partIdx < turn.parts().size(); partIdx++) {
-                CanonicalContentPart part = turn.parts().get(partIdx);
+        for (int turnIdx = 0; turnIdx < originalTurns.size(); turnIdx++) {
+            CanonicalTurn turn = originalTurns.get(turnIdx);
+            List<CanonicalContentPart> origParts = turn.parts();
+            List<CanonicalContentPart> modifiedParts = null;
+
+            for (int partIdx = 0; partIdx < origParts.size(); partIdx++) {
+                CanonicalContentPart part = origParts.get(partIdx);
+                if (part instanceof CanonicalContentPart.ToolCallPart) {
+                    sawAnyToolCall = true;
+                    if (toolState == null) {
+                        toolState = new ToolTrackingState();
+                    }
+                } else if (part instanceof CanonicalContentPart.ToolResultPart && toolState == null) {
+                    toolState = new ToolTrackingState();
+                }
+
                 CanonicalContentPart normalized = normalizePart(
-                        part, turnIdx, partIdx, outboundProtocol, caps,
-                        originalToSanitizedId, usedSanitizedIds, callIdToName, pendingIdsByName
-                );
-                if (normalized != null) {
-                    normalizedParts.add(normalized);
+                        part, turnIdx, partIdx, outboundProtocol, caps, toolState);
+                if (normalized != part) {
+                    if (modifiedParts == null) {
+                        modifiedParts = new ArrayList<>(origParts.size());
+                        for (int k = 0; k < partIdx; k++) {
+                            modifiedParts.add(origParts.get(k));
+                        }
+                    }
+                    if (normalized != null) {
+                        modifiedParts.add(normalized);
+                    }
+                } else if (modifiedParts != null) {
+                    modifiedParts.add(normalized);
                 }
             }
-            if (!normalizedParts.isEmpty()) {
-                normalizedTurns.add(new CanonicalTurn(turn.role(), normalizedParts));
+
+            if (modifiedParts != null) {
+                if (normalizedTurns == null) {
+                    normalizedTurns = new ArrayList<>(originalTurns.size());
+                    for (int k = 0; k < turnIdx; k++) {
+                        normalizedTurns.add(originalTurns.get(k));
+                    }
+                }
+                if (!modifiedParts.isEmpty()) {
+                    normalizedTurns.add(new CanonicalTurn(turn.role(), modifiedParts));
+                }
+            } else if (origParts.isEmpty()) {
+                if (normalizedTurns == null) {
+                    normalizedTurns = new ArrayList<>(originalTurns.size());
+                    for (int k = 0; k < turnIdx; k++) {
+                        normalizedTurns.add(originalTurns.get(k));
+                    }
+                }
+            } else if (normalizedTurns != null) {
+                normalizedTurns.add(turn);
             }
         }
 
-        // 3. Interrupted agent tool-call repair (BEST_EFFORT)
-        if (effectivePolicy == TranslationPolicy.BEST_EFFORT) {
-            normalizedTurns = repairInterruptedToolCalls(normalizedTurns);
+        List<CanonicalTurn> effectiveTurns = normalizedTurns != null ? normalizedTurns : originalTurns;
+
+        // 3. Interrupted agent tool-call repair (BEST_EFFORT, skipped completely if no tool calls exist)
+        if (effectivePolicy == TranslationPolicy.BEST_EFFORT && sawAnyToolCall) {
+            effectiveTurns = repairInterruptedToolCalls(effectiveTurns);
         }
 
-        // 4. Tool schema defaults & tool_choice coupling guard
+        // 4. Copy-on-write tool schema defaults & tool_choice coupling guard
         List<CanonicalToolDefinition> normalizedTools = normalizeTools(request.tools());
         CanonicalToolChoice normalizedToolChoice = normalizeToolChoice(
                 request.toolChoice(), normalizedTools, effectivePolicy);
+
+        if (effectiveTurns == originalTurns
+                && normalizedTools == request.tools()
+                && normalizedToolChoice == request.toolChoice()) {
+            return request;
+        }
 
         return new CanonicalRequest(
                 request.inboundProtocol(),
                 request.model(),
                 request.stream(),
                 request.systemInstructions(),
-                normalizedTurns,
+                effectiveTurns,
                 normalizedTools,
                 normalizedToolChoice,
                 request.generation(),
@@ -164,16 +207,20 @@ public final class CanonicalRequestNormalizer {
         );
     }
 
+    private static final class ToolTrackingState {
+        final Map<String, String> originalToSanitizedId = new HashMap<>();
+        final Set<String> usedSanitizedIds = new HashSet<>();
+        final Map<String, String> callIdToName = new HashMap<>();
+        final Map<String, Deque<String>> pendingIdsByName = new HashMap<>();
+    }
+
     private static CanonicalContentPart normalizePart(
             CanonicalContentPart part,
             int turnIdx,
             int partIdx,
             ProtocolKind outboundProtocol,
             ProviderCapabilities caps,
-            Map<String, String> originalToSanitizedId,
-            Set<String> usedSanitizedIds,
-            Map<String, String> callIdToName,
-            Map<String, Deque<String>> pendingIdsByName
+            ToolTrackingState toolState
     ) {
         if (part instanceof CanonicalContentPart.TextPart t) {
             if (!caps.allowsEmptyTextBlocks() && t.text().isEmpty()) {
@@ -190,6 +237,9 @@ public final class CanonicalRequestNormalizer {
                 if (th.text().isEmpty()) {
                     return null;
                 }
+                if (th.signature() == null && th.encryptedContent() == null) {
+                    return th;
+                }
                 return new CanonicalContentPart.ThinkingPart(
                         th.text(), null, null, th.originProtocol(), th.wireField());
             }
@@ -202,10 +252,11 @@ public final class CanonicalRequestNormalizer {
             String rawCallId = (tc.callId() != null && !tc.callId().isBlank())
                     ? tc.callId()
                     : "call_ir_" + turnIdx + "_" + partIdx;
-            String sanitizedId = sanitizeToolCallId(rawCallId, caps, originalToSanitizedId, usedSanitizedIds);
+            String sanitizedId = sanitizeToolCallId(
+                    rawCallId, caps, toolState.originalToSanitizedId, toolState.usedSanitizedIds);
             if (tc.name() != null && !tc.name().isBlank()) {
-                callIdToName.put(sanitizedId, tc.name());
-                pendingIdsByName.computeIfAbsent(tc.name(), k -> new ArrayDeque<>()).addLast(sanitizedId);
+                toolState.callIdToName.put(sanitizedId, tc.name());
+                toolState.pendingIdsByName.computeIfAbsent(tc.name(), k -> new ArrayDeque<>()).addLast(sanitizedId);
             }
             boolean keepThoughtSig = tc.thoughtSignature() != null
                     && (outboundProtocol == ProtocolKind.GEMINI_GENERATE_CONTENT
@@ -220,43 +271,62 @@ public final class CanonicalRequestNormalizer {
             );
         }
         if (part instanceof CanonicalContentPart.ToolResultPart tr) {
-            List<CanonicalContentPart> cleanedContent = new ArrayList<>(tr.content().size());
-            for (CanonicalContentPart child : tr.content()) {
+            List<CanonicalContentPart> origContent = tr.content();
+            List<CanonicalContentPart> cleanedContent = null;
+            for (int i = 0; i < origContent.size(); i++) {
+                CanonicalContentPart child = origContent.get(i);
+                boolean keep = true;
                 if (child instanceof CanonicalContentPart.ImagePart childImg) {
                     validateImageSource(childImg.source(), outboundProtocol);
-                    cleanedContent.add(childImg);
                 } else if (child instanceof CanonicalContentPart.TextPart t) {
-                    if (caps.allowsEmptyTextBlocks() || !t.text().isEmpty()) {
-                        cleanedContent.add(t);
+                    keep = caps.allowsEmptyTextBlocks() || !t.text().isEmpty();
+                }
+                if (!keep) {
+                    if (cleanedContent == null) {
+                        cleanedContent = new ArrayList<>(origContent.size());
+                        for (int k = 0; k < i; k++) {
+                            cleanedContent.add(origContent.get(k));
+                        }
                     }
-                } else {
+                } else if (cleanedContent != null) {
                     cleanedContent.add(child);
                 }
             }
             String rawCallId = tr.callId();
             String sanitizedCallId = (rawCallId != null && !rawCallId.isBlank())
-                    ? sanitizeToolCallId(rawCallId, caps, originalToSanitizedId, usedSanitizedIds)
+                    ? sanitizeToolCallId(rawCallId, caps, toolState.originalToSanitizedId, toolState.usedSanitizedIds)
                     : null;
             String toolName = tr.toolName();
             if ((toolName == null || toolName.isBlank()) && sanitizedCallId != null) {
-                toolName = callIdToName.get(sanitizedCallId);
+                toolName = toolState.callIdToName.get(sanitizedCallId);
             }
             if ((sanitizedCallId == null || sanitizedCallId.isBlank()) && toolName != null) {
-                Deque<String> queue = pendingIdsByName.get(toolName);
+                Deque<String> queue = toolState.pendingIdsByName.get(toolName);
                 if (queue != null && !queue.isEmpty()) {
                     sanitizedCallId = queue.pollFirst();
                 } else {
                     sanitizedCallId = sanitizeToolCallId(
-                            "call_ir_" + turnIdx + "_" + partIdx, caps, originalToSanitizedId, usedSanitizedIds);
+                            "call_ir_" + turnIdx + "_" + partIdx, caps,
+                            toolState.originalToSanitizedId, toolState.usedSanitizedIds);
                 }
             } else if (sanitizedCallId != null && toolName != null) {
-                Deque<String> queue = pendingIdsByName.get(toolName);
-                if (queue != null) {
-                    queue.remove(sanitizedCallId);
+                Deque<String> queue = toolState.pendingIdsByName.get(toolName);
+                if (queue != null && !queue.isEmpty()) {
+                    if (sanitizedCallId.equals(queue.peekFirst())) {
+                        queue.pollFirst();
+                    } else {
+                        queue.remove(sanitizedCallId);
+                    }
                 }
             }
+            if (cleanedContent == null
+                    && java.util.Objects.equals(sanitizedCallId, tr.callId())
+                    && java.util.Objects.equals(toolName, tr.toolName())) {
+                return tr;
+            }
             return new CanonicalContentPart.ToolResultPart(
-                    sanitizedCallId, toolName, cleanedContent, tr.isError(), tr.cacheControl()
+                    sanitizedCallId, toolName, cleanedContent != null ? cleanedContent : origContent,
+                    tr.isError(), tr.cacheControl()
             );
         }
         return part;
@@ -349,19 +419,33 @@ public final class CanonicalRequestNormalizer {
     }
 
     /**
-     * When a coding agent cancels/aborts mid-tool-execution and the user sends a subsequent turn,
-     * the conversation history may contain an {@code ASSISTANT} turn with {@code ToolCallPart}s
-     * lacking matching {@code ToolResultPart}s before the next turn. Synthesize error tool results
-     * immediately after the assistant turn so strict upstreams (Anthropic / OpenAI) accept the history.
+     * Copy-on-write interrupted tool-call repair: returns the original list with zero allocations
+     * on clean conversations and only allocates synthetic results when an assistant tool call lacks
+     * a matching tool result before subsequent turns.
      */
     private static List<CanonicalTurn> repairInterruptedToolCalls(List<CanonicalTurn> turns) {
-        List<CanonicalTurn> out = new ArrayList<>(turns.size());
-        for (int i = 0; i < turns.size(); i++) {
+        List<CanonicalTurn> out = null;
+        int n = turns.size();
+        for (int i = 0; i < n; i++) {
             CanonicalTurn turn = turns.get(i);
-            out.add(turn);
-            if (turn.role() != CanonicalRole.ASSISTANT || i == turns.size() - 1) {
+            if (out != null) {
+                out.add(turn);
+            }
+            if (turn.role() != CanonicalRole.ASSISTANT || i == n - 1) {
                 continue;
             }
+            boolean hasCall = false;
+            for (CanonicalContentPart part : turn.parts()) {
+                if (part instanceof CanonicalContentPart.ToolCallPart tc
+                        && tc.callId() != null && !tc.callId().isBlank()) {
+                    hasCall = true;
+                    break;
+                }
+            }
+            if (!hasCall) {
+                continue;
+            }
+
             Map<String, String> expectedCalls = new LinkedHashMap<>();
             for (CanonicalContentPart part : turn.parts()) {
                 if (part instanceof CanonicalContentPart.ToolCallPart tc
@@ -369,26 +453,33 @@ public final class CanonicalRequestNormalizer {
                     expectedCalls.put(tc.callId(), tc.name());
                 }
             }
-            if (expectedCalls.isEmpty()) {
-                continue;
-            }
-            Set<String> answeredIds = new HashSet<>();
-            for (int j = i + 1; j < turns.size(); j++) {
+            int unanswered = expectedCalls.size();
+            Set<String> answeredIds = null;
+            for (int j = i + 1; j < n && unanswered > 0; j++) {
                 CanonicalTurn next = turns.get(j);
                 if (next.role() == CanonicalRole.ASSISTANT) {
                     break;
                 }
                 if (next.role() == CanonicalRole.TOOL || next.role() == CanonicalRole.USER) {
                     for (CanonicalContentPart part : next.parts()) {
-                        if (part instanceof CanonicalContentPart.ToolResultPart tr && tr.callId() != null) {
-                            answeredIds.add(tr.callId());
+                        if (part instanceof CanonicalContentPart.ToolResultPart tr
+                                && tr.callId() != null && expectedCalls.containsKey(tr.callId())) {
+                            if (answeredIds == null) {
+                                answeredIds = new HashSet<>(expectedCalls.size() * 2);
+                            }
+                            if (answeredIds.add(tr.callId())) {
+                                unanswered--;
+                            }
                         }
                     }
                 }
             }
-            List<CanonicalContentPart> synthesized = new ArrayList<>();
+            if (unanswered == 0) {
+                continue;
+            }
+            List<CanonicalContentPart> synthesized = new ArrayList<>(unanswered);
             for (Map.Entry<String, String> entry : expectedCalls.entrySet()) {
-                if (!answeredIds.contains(entry.getKey())) {
+                if (answeredIds == null || !answeredIds.contains(entry.getKey())) {
                     synthesized.add(new CanonicalContentPart.ToolResultPart(
                             entry.getKey(),
                             entry.getValue(),
@@ -398,31 +489,42 @@ public final class CanonicalRequestNormalizer {
                     ));
                 }
             }
-            if (!synthesized.isEmpty()) {
-                out.add(new CanonicalTurn(CanonicalRole.TOOL, synthesized));
+            if (out == null) {
+                out = new ArrayList<>(n + 2);
+                for (int k = 0; k <= i; k++) {
+                    out.add(turns.get(k));
+                }
             }
+            out.add(new CanonicalTurn(CanonicalRole.TOOL, synthesized));
         }
-        return out;
+        return out != null ? out : turns;
     }
 
     private static List<CanonicalToolDefinition> normalizeTools(List<CanonicalToolDefinition> tools) {
         if (tools.isEmpty()) {
-            return List.of();
+            return tools;
         }
-        List<CanonicalToolDefinition> out = new ArrayList<>(tools.size());
-        for (CanonicalToolDefinition tool : tools) {
+        List<CanonicalToolDefinition> out = null;
+        for (int i = 0; i < tools.size(); i++) {
+            CanonicalToolDefinition tool = tools.get(i);
             JsonNode schema = tool.parametersSchema();
             if (schema == null || !schema.isObject()) {
+                if (out == null) {
+                    out = new ArrayList<>(tools.size());
+                    for (int k = 0; k < i; k++) {
+                        out.add(tools.get(k));
+                    }
+                }
                 ObjectNode emptySchema = JsonNodeFactory.instance.objectNode();
                 emptySchema.put("type", "object");
                 emptySchema.set("properties", JsonNodeFactory.instance.objectNode());
                 out.add(new CanonicalToolDefinition(
                         tool.name(), tool.description(), emptySchema, tool.strict(), tool.cacheControl()));
-            } else {
+            } else if (out != null) {
                 out.add(tool);
             }
         }
-        return out;
+        return out != null ? out : tools;
     }
 
     private static CanonicalToolChoice normalizeToolChoice(
@@ -431,7 +533,10 @@ public final class CanonicalRequestNormalizer {
             TranslationPolicy policy
     ) {
         if (normalizedTools.isEmpty()) {
-            return CanonicalToolChoice.omitted();
+            return toolChoice.mode() == CanonicalToolChoice.ToolChoiceMode.OMITTED
+                    && toolChoice.parallelToolCalls() == null
+                    ? toolChoice
+                    : CanonicalToolChoice.omitted();
         }
         if (toolChoice.mode() == CanonicalToolChoice.ToolChoiceMode.SPECIFIC) {
             String targetName = toolChoice.specificToolName();

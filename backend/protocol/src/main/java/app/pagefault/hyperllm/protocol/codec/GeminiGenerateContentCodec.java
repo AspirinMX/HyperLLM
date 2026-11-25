@@ -28,11 +28,15 @@ import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import app.pagefault.hyperllm.protocol.translate.StreamBridge;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,10 +65,110 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        ObjectNode root = CodecSupport.parseObjectRoot(mapper, rawBody);
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
+            return decodeStreamingRoot(parser, context);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
+    }
+
+    @Override
+    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
+        // Model lives in the Gemini URL path; body passes through unmodified.
+        CodecSupport.parseObjectRoot(mapper, rawBody);
+        return rawBody;
+    }
+
+    @Override
+    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
+        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
+                CodecSupport.estimateEncodedCapacity(req));
+        try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
+            gen.writeStartObject();
+
+            boolean hasSystemText = false;
+            for (CanonicalSystemPart sp : req.systemInstructions()) {
+                if (!sp.text().isEmpty()) {
+                    hasSystemText = true;
+                    break;
+                }
+            }
+            if (hasSystemText) {
+                gen.writeObjectFieldStart("systemInstruction");
+                gen.writeArrayFieldStart("parts");
+                for (CanonicalSystemPart sp : req.systemInstructions()) {
+                    if (!sp.text().isEmpty()) {
+                        gen.writeStartObject();
+                        gen.writeStringField("text", sp.text());
+                        gen.writeEndObject();
+                    }
+                }
+                gen.writeEndArray();
+                gen.writeEndObject();
+            }
+
+            boolean injectSkipSig = CodecSupport.isGeminiLevelStyle(context.thinkingStyle(), context.upstreamModelName());
+            writeContents(gen, req.turns(), injectSkipSig);
+
+            writeToolsAndConfig(gen, req);
+            writeGenerationConfigIfNonEmpty(gen, req, context);
+            if (req.cache().geminiCachedContent() != null && !req.cache().geminiCachedContent().isBlank()) {
+                gen.writeStringField("cachedContent", req.cache().geminiCachedContent());
+            }
+
+            gen.writeEndObject();
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new IllegalStateException("Failed to serialize Gemini request JSON", ex);
+        }
+        return out.toExactByteArray();
+    }
+
+    // ---- Streaming request decoding (zero inbound DOM tree for large contents[]) ----
+
+    private CanonicalRequest decodeStreamingRoot(JsonParser parser, InboundRequestContext context) throws IOException {
+        String bodyModel = null;
+        boolean hasContentsArray = false;
+        List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
+        List<CanonicalSystemPart> systemParts = new ArrayList<>();
+        List<CanonicalSystemPart> leadingContentSystemParts = new ArrayList<>();
+        List<CanonicalTurn> turns = new ArrayList<>();
+        JsonNode toolsNode = null;
+        JsonNode toolConfigNode = null;
+        JsonNode genCfgNode = null;
+        String cachedContent = null;
+
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            String field = parser.currentName();
+            JsonToken valTok = parser.nextToken();
+            if (valTok == null) {
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body");
+            }
+            switch (field) {
+                case "model" -> bodyModel = CodecSupport.readNullableString(parser);
+                case "systemInstruction" -> systemParts.addAll(decodeSystemInstruction(mapper.readTree(parser)));
+                case "contents" -> {
+                    if (valTok == JsonToken.START_ARRAY) {
+                        hasContentsArray = true;
+                        readStreamingContents(parser, leadingContentSystemParts, turns, unsupported);
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "toolConfig" -> toolConfigNode = mapper.readTree(parser);
+                case "generationConfig" -> genCfgNode = mapper.readTree(parser);
+                case "cachedContent" -> cachedContent = CodecSupport.readNullableString(parser);
+                default -> parser.skipChildren();
+            }
+        }
+
         String model = (context != null && context.pathModel() != null && !context.pathModel().isBlank())
                 ? context.pathModel().trim()
-                : CodecSupport.asNullableText(root, "model");
+                : (bodyModel != null ? bodyModel.trim() : null);
         if (model == null || model.isBlank()) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
                     "Model must be specified in the Gemini URL path '/v1beta/models/{model}:generateContent'");
@@ -72,28 +176,58 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         boolean stream = context != null && Boolean.TRUE.equals(context.pathStream());
         boolean altSse = context == null || context.geminiAltSse();
 
-        JsonNode contentsNode = root.get("contents");
-        if (contentsNode == null || !contentsNode.isArray() || contentsNode.isEmpty()) {
+        if (!hasContentsArray || (leadingContentSystemParts.isEmpty() && turns.isEmpty())) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'contents' must be a non-empty array");
         }
+        if (!leadingContentSystemParts.isEmpty()) {
+            systemParts.addAll(leadingContentSystemParts);
+        }
 
-        List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
-        List<CanonicalSystemPart> systemParts = new ArrayList<>(decodeSystemInstruction(root.get("systemInstruction")));
-        List<CanonicalTurn> turns = new ArrayList<>(contentsNode.size());
+        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
+        CanonicalToolChoice toolChoice = decodeToolConfig(toolConfigNode);
+        CanonicalGenerationConfig generation = decodeGenerationConfig(genCfgNode);
+        CanonicalResponseFormat responseFormat = decodeResponseFormat(genCfgNode);
+        CanonicalThinkingConfig thinking = decodeThinkingConfig(genCfgNode != null ? genCfgNode.get("thinkingConfig") : null);
+        CanonicalCacheConfig cache = new CanonicalCacheConfig(null, null, null, cachedContent);
+        CanonicalProtocolOptions options = new CanonicalProtocolOptions(true, altSse, null, null, null, null, null);
+
+        return new CanonicalRequest(
+                ProtocolKind.GEMINI_GENERATE_CONTENT, model, stream, systemParts, turns, tools, toolChoice,
+                generation, responseFormat, thinking, cache, options, unsupported
+        );
+    }
+
+    private void readStreamingContents(
+            JsonParser parser,
+            List<CanonicalSystemPart> leadingSystemParts,
+            List<CanonicalTurn> turns,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
         boolean sawNonSystem = false;
-
-        for (JsonNode content : contentsNode) {
-            if (!content.isObject()) {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
                 continue;
             }
-            String roleStr = content.path("role").asText("user").toLowerCase(Locale.ROOT);
+            String roleStr = "user";
+            List<CanonicalContentPart> parts = List.of();
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                if ("role".equals(f) && t == JsonToken.VALUE_STRING) {
+                    roleStr = parser.getText().toLowerCase(Locale.ROOT);
+                } else if ("parts".equals(f) && t == JsonToken.START_ARRAY) {
+                    parts = readStreamingParts(parser, unsupported);
+                } else {
+                    parser.skipChildren();
+                }
+            }
             if ("system".equals(roleStr) || "developer".equals(roleStr)) {
                 boolean devPriority = "developer".equals(roleStr);
-                List<CanonicalContentPart> parts = decodeParts(content.get("parts"), unsupported);
                 if (!sawNonSystem) {
                     for (CanonicalContentPart p : parts) {
                         if (p instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty()) {
-                            systemParts.add(new CanonicalSystemPart(t.text(), devPriority, null));
+                            leadingSystemParts.add(new CanonicalSystemPart(t.text(), devPriority, null));
                         }
                     }
                 } else {
@@ -107,70 +241,183 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 case "function", "tool" -> CanonicalRole.TOOL;
                 default -> CanonicalRole.USER;
             };
-            List<CanonicalContentPart> parts = decodeParts(content.get("parts"), unsupported);
             turns.add(new CanonicalTurn(role, parts));
         }
-
-        List<CanonicalToolDefinition> tools = decodeTools(root.get("tools"), unsupported);
-        CanonicalToolChoice toolChoice = decodeToolConfig(root.get("toolConfig"));
-
-        JsonNode genCfg = root.path("generationConfig");
-        CanonicalGenerationConfig generation = decodeGenerationConfig(genCfg);
-        CanonicalResponseFormat responseFormat = decodeResponseFormat(genCfg);
-        CanonicalThinkingConfig thinking = decodeThinkingConfig(genCfg.get("thinkingConfig"));
-
-        CanonicalCacheConfig cache = new CanonicalCacheConfig(
-                null, null, null, CodecSupport.asNullableText(root, "cachedContent"));
-        CanonicalProtocolOptions options = new CanonicalProtocolOptions(
-                true, altSse, null, null, null, null, null);
-
-        return new CanonicalRequest(
-                ProtocolKind.GEMINI_GENERATE_CONTENT, model, stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
-        );
     }
 
-    @Override
-    public byte[] preparePassthroughRequest(byte[] rawBody, CanonicalRequest decoded, UpstreamEncodingContext context) {
-        // Model lives in the Gemini URL path; body passes through unmodified.
-        CodecSupport.parseObjectRoot(mapper, rawBody);
-        return rawBody;
-    }
+    private List<CanonicalContentPart> readStreamingParts(
+            JsonParser parser,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        List<CanonicalContentPart> out = new ArrayList<>(4);
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            boolean isThought = false;
+            String thoughtSig = null;
+            String text = null;
+            boolean hasInlineData = false;
+            String inlineMime = "image/png";
+            String inlineData = "";
+            boolean hasFileData = false;
+            String fileUri = "";
+            String fileMime = null;
+            boolean hasFunctionCall = false;
+            String fcId = null;
+            String fcName = "";
+            JsonNode fcArgs = null;
+            boolean hasFunctionResponse = false;
+            String frId = null;
+            String frName = "";
+            JsonNode frResp = null;
+            List<CanonicalContentPart> frNestedParts = null;
 
-    @Override
-    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        ObjectNode root = mapper.createObjectNode();
-
-        if (!req.systemInstructions().isEmpty()) {
-            ArrayNode sysParts = mapper.createArrayNode();
-            for (CanonicalSystemPart sp : req.systemInstructions()) {
-                if (!sp.text().isEmpty()) {
-                    ObjectNode p = mapper.createObjectNode();
-                    p.put("text", sp.text());
-                    sysParts.add(p);
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "thought" -> {
+                        if (t == JsonToken.VALUE_TRUE) {
+                            isThought = true;
+                        } else if (t != JsonToken.VALUE_FALSE) {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "thoughtSignature" -> thoughtSig = CodecSupport.readNullableString(parser);
+                    case "text" -> text = CodecSupport.readNullableString(parser);
+                    case "inlineData" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            hasInlineData = true;
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String inf = parser.currentName();
+                                JsonToken intok = parser.nextToken();
+                                if ("mimeType".equals(inf) && intok == JsonToken.VALUE_STRING) {
+                                    inlineMime = parser.getText();
+                                } else if ("data".equals(inf) && intok == JsonToken.VALUE_STRING) {
+                                    inlineData = parser.getText();
+                                } else {
+                                    parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "fileData" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            hasFileData = true;
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String ff = parser.currentName();
+                                JsonToken ft = parser.nextToken();
+                                if ("fileUri".equals(ff) && ft == JsonToken.VALUE_STRING) {
+                                    fileUri = parser.getText();
+                                } else if ("mimeType".equals(ff)) {
+                                    fileMime = CodecSupport.readNullableString(parser);
+                                } else {
+                                    parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "functionCall" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            hasFunctionCall = true;
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String ff = parser.currentName();
+                                JsonToken ft = parser.nextToken();
+                                if ("id".equals(ff)) {
+                                    fcId = CodecSupport.readNullableString(parser);
+                                } else if ("name".equals(ff) && ft == JsonToken.VALUE_STRING) {
+                                    fcName = parser.getText();
+                                } else if ("args".equals(ff)) {
+                                    fcArgs = mapper.readTree(parser);
+                                } else {
+                                    parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "functionResponse" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            hasFunctionResponse = true;
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String ff = parser.currentName();
+                                JsonToken ft = parser.nextToken();
+                                if ("id".equals(ff)) {
+                                    frId = CodecSupport.readNullableString(parser);
+                                } else if ("name".equals(ff) && ft == JsonToken.VALUE_STRING) {
+                                    frName = parser.getText();
+                                } else if ("response".equals(ff)) {
+                                    frResp = mapper.readTree(parser);
+                                } else if ("parts".equals(ff) && ft == JsonToken.START_ARRAY) {
+                                    frNestedParts = readStreamingParts(parser, unsupported);
+                                } else {
+                                    parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    default -> parser.skipChildren();
                 }
             }
-            if (!sysParts.isEmpty()) {
-                ObjectNode sysInst = mapper.createObjectNode();
-                sysInst.set("parts", sysParts);
-                root.set("systemInstruction", sysInst);
+
+            if (isThought) {
+                out.add(new CanonicalContentPart.ThinkingPart(
+                        text != null ? text : "", thoughtSig, null, ProtocolKind.GEMINI_GENERATE_CONTENT));
+            } else if (text != null) {
+                out.add(new CanonicalContentPart.TextPart(text));
+            } else if (hasInlineData) {
+                if (!inlineMime.toLowerCase(Locale.ROOT).startsWith("image/")) {
+                    unsupported.add(new UnsupportedFeatureFlag("inline_media:" + inlineMime,
+                            "Non-image inlineData MIME type '" + inlineMime + "' is outside text/image input scope"));
+                } else {
+                    out.add(new CanonicalContentPart.ImagePart(
+                            new ImageSource.Base64Image(inlineMime, inlineData), ImageDetail.AUTO, null));
+                }
+            } else if (hasFileData) {
+                if (fileUri.startsWith("gs://") || fileUri.contains("generativelanguage.googleapis.com/")) {
+                    out.add(new CanonicalContentPart.ImagePart(
+                            new ImageSource.FileRefImage(ProtocolKind.GEMINI_GENERATE_CONTENT, fileUri, fileMime),
+                            ImageDetail.AUTO, null));
+                } else if (fileUri.startsWith("http://") || fileUri.startsWith("https://")) {
+                    out.add(new CanonicalContentPart.ImagePart(
+                            new ImageSource.UrlImage(fileUri, fileMime != null ? fileMime : CodecSupport.guessMimeFromUrl(fileUri)),
+                            ImageDetail.AUTO, null));
+                } else {
+                    unsupported.add(new UnsupportedFeatureFlag("file_uri", "Unsupported Gemini fileUri: " + fileUri));
+                }
+            } else if (hasFunctionCall) {
+                ObjectNode argsObj = (fcArgs instanceof ObjectNode o) ? o : mapper.createObjectNode();
+                // Defer rawArgumentsJson stringification until needed
+                out.add(new CanonicalContentPart.ToolCallPart(
+                        fcId, null, fcName, argsObj, null, thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
+            } else if (hasFunctionResponse) {
+                List<CanonicalContentPart> resParts = new ArrayList<>();
+                if (frResp != null && !frResp.isNull()) {
+                    if (frResp.isObject() && frResp.size() == 1 && frResp.hasNonNull("output") && frResp.get("output").isTextual()) {
+                        resParts.add(new CanonicalContentPart.TextPart(frResp.get("output").asText()));
+                    } else if (frResp.isObject() && frResp.size() == 1 && frResp.hasNonNull("error") && frResp.get("error").isTextual()) {
+                        resParts.add(new CanonicalContentPart.TextPart(frResp.get("error").asText()));
+                    } else {
+                        resParts.add(new CanonicalContentPart.TextPart(CodecSupport.writeJsonString(mapper, frResp)));
+                    }
+                }
+                if (frNestedParts != null) {
+                    resParts.addAll(frNestedParts);
+                }
+                boolean isErr = frResp != null && frResp.isObject() && frResp.hasNonNull("error") && frResp.size() == 1;
+                out.add(new CanonicalContentPart.ToolResultPart(frId, frName, resParts, isErr, null));
             }
         }
-
-        boolean injectSkipSig = CodecSupport.isGeminiLevelStyle(context.thinkingStyle(), context.upstreamModelName());
-        ArrayNode contents = encodeContents(req.turns(), injectSkipSig);
-        root.set("contents", contents);
-
-        encodeToolsAndConfig(root, req);
-        ObjectNode genCfg = encodeGenerationConfig(req, context);
-        if (!genCfg.isEmpty()) {
-            root.set("generationConfig", genCfg);
-        }
-        if (req.cache().geminiCachedContent() != null && !req.cache().geminiCachedContent().isBlank()) {
-            root.put("cachedContent", req.cache().geminiCachedContent());
-        }
-
-        return CodecSupport.writeJsonBytes(mapper, root);
+        return out;
     }
 
     @Override
@@ -520,91 +767,140 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         return new CanonicalThinkingConfig(mode, effort, budget != null && budget > 0 ? budget : null, includeThoughts, null);
     }
 
-    // ---- Encoding helpers ----
+    // ---- Streaming encoding helpers (zero outbound DOM tree, turn-range grouping) ----
 
-    private ArrayNode encodeContents(List<CanonicalTurn> turns, boolean injectSkipSig) {
-        record PendingContent(String role, List<ObjectNode> parts) {
-        }
-        List<PendingContent> merged = new ArrayList<>();
-
-        for (CanonicalTurn turn : turns) {
-            String role = (turn.role() == CanonicalRole.ASSISTANT) ? "model" : "user";
-            List<ObjectNode> parts = encodeTurnParts(turn, role, injectSkipSig);
-            if (parts.isEmpty()) {
+    private void writeContents(
+            JsonGenerator gen,
+            List<CanonicalTurn> turns,
+            boolean injectSkipSig
+    ) throws IOException {
+        gen.writeArrayFieldStart("contents");
+        int n = turns.size();
+        int i = 0;
+        while (i < n) {
+            CanonicalTurn startTurn = turns.get(i);
+            String groupRole = (startTurn.role() == CanonicalRole.ASSISTANT) ? "model" : "user";
+            if (!hasEmittablePart(startTurn, groupRole)) {
+                i++;
                 continue;
             }
-            if (!merged.isEmpty() && merged.getLast().role().equals(role)) {
-                merged.getLast().parts().addAll(parts);
-            } else {
-                merged.add(new PendingContent(role, new ArrayList<>(parts)));
+            int groupEnd = i + 1;
+            while (groupEnd < n) {
+                CanonicalTurn nextTurn = turns.get(groupEnd);
+                String nextRole = (nextTurn.role() == CanonicalRole.ASSISTANT) ? "model" : "user";
+                if (!hasEmittablePart(nextTurn, nextRole)) {
+                    groupEnd++;
+                    continue;
+                }
+                if (!groupRole.equals(nextRole)) {
+                    break;
+                }
+                groupEnd++;
             }
-        }
 
-        ArrayNode arr = mapper.createArrayNode();
-        for (PendingContent pc : merged) {
-            ObjectNode c = mapper.createObjectNode();
-            c.put("role", pc.role());
-            ArrayNode partsArr = mapper.createArrayNode();
-            for (ObjectNode p : pc.parts()) {
-                partsArr.add(p);
+            gen.writeStartObject();
+            gen.writeStringField("role", groupRole);
+            gen.writeArrayFieldStart("parts");
+            for (int k = i; k < groupEnd; k++) {
+                writeTurnParts(gen, turns.get(k), groupRole, injectSkipSig);
             }
-            c.set("parts", partsArr);
-            arr.add(c);
+            gen.writeEndArray();
+            gen.writeEndObject();
+
+            i = groupEnd;
         }
-        return arr;
+        gen.writeEndArray();
     }
 
-    private List<ObjectNode> encodeTurnParts(CanonicalTurn turn, String targetRole, boolean injectSkipSig) {
-        List<ObjectNode> parts = new ArrayList<>();
-        boolean attachedSigOnFirstCall = false;
-
+    private static boolean hasEmittablePart(CanonicalTurn turn, String targetRole) {
         for (CanonicalContentPart part : turn.parts()) {
             switch (part) {
                 case CanonicalContentPart.TextPart t -> {
                     if (!t.text().isEmpty()) {
-                        ObjectNode p = mapper.createObjectNode();
-                        p.put("text", t.text());
-                        parts.add(p);
+                        return true;
                     }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
                     if (!r.refusal().isEmpty()) {
-                        ObjectNode p = mapper.createObjectNode();
-                        p.put("text", r.refusal());
-                        parts.add(p);
+                        return true;
                     }
                 }
-                case CanonicalContentPart.ImagePart img -> parts.add(encodeImagePart(img));
+                case CanonicalContentPart.ImagePart ignored -> {
+                    return true;
+                }
                 case CanonicalContentPart.ThinkingPart th -> {
                     if ("model".equals(targetRole)
                             && CodecSupport.isSameOrigin(th.originProtocol(), ProtocolKind.GEMINI_GENERATE_CONTENT)) {
-                        ObjectNode p = mapper.createObjectNode();
-                        p.put("thought", true);
-                        p.put("text", th.text());
+                        return true;
+                    }
+                }
+                case CanonicalContentPart.ToolCallPart ignored -> {
+                    return true;
+                }
+                case CanonicalContentPart.ToolResultPart ignored -> {
+                    return true;
+                }
+                case CanonicalContentPart.RedactedThinkingPart ignored -> {}
+            }
+        }
+        return false;
+    }
+
+    private void writeTurnParts(
+            JsonGenerator gen,
+            CanonicalTurn turn,
+            String targetRole,
+            boolean injectSkipSig
+    ) throws IOException {
+        boolean attachedSigOnFirstCall = false;
+        for (CanonicalContentPart part : turn.parts()) {
+            switch (part) {
+                case CanonicalContentPart.TextPart t -> {
+                    if (!t.text().isEmpty()) {
+                        gen.writeStartObject();
+                        gen.writeStringField("text", t.text());
+                        gen.writeEndObject();
+                    }
+                }
+                case CanonicalContentPart.RefusalPart r -> {
+                    if (!r.refusal().isEmpty()) {
+                        gen.writeStartObject();
+                        gen.writeStringField("text", r.refusal());
+                        gen.writeEndObject();
+                    }
+                }
+                case CanonicalContentPart.ImagePart img -> writeImagePart(gen, img);
+                case CanonicalContentPart.ThinkingPart th -> {
+                    if ("model".equals(targetRole)
+                            && CodecSupport.isSameOrigin(th.originProtocol(), ProtocolKind.GEMINI_GENERATE_CONTENT)) {
+                        gen.writeStartObject();
+                        gen.writeBooleanField("thought", true);
+                        gen.writeStringField("text", th.text());
                         if (th.signature() != null && !th.signature().isBlank()) {
-                            p.put("thoughtSignature", th.signature());
+                            gen.writeStringField("thoughtSignature", th.signature());
                         }
-                        parts.add(p);
+                        gen.writeEndObject();
                     }
                 }
                 case CanonicalContentPart.ToolCallPart tc -> {
-                    ObjectNode p = mapper.createObjectNode();
-                    ObjectNode fc = mapper.createObjectNode();
+                    gen.writeStartObject();
+                    gen.writeObjectFieldStart("functionCall");
                     if (tc.callId() != null && !tc.callId().isBlank()) {
-                        fc.put("id", tc.callId());
+                        gen.writeStringField("id", tc.callId());
                     }
-                    fc.put("name", tc.name());
-                    fc.set("args", CodecSupport.argumentsAsObject(mapper, tc));
-                    p.set("functionCall", fc);
+                    gen.writeStringField("name", tc.name());
+                    gen.writeFieldName("args");
+                    CodecSupport.writeArgumentsAsObject(gen, mapper, tc);
+                    gen.writeEndObject();
                     if (CodecSupport.isSameOrigin(tc.originProtocol(), ProtocolKind.GEMINI_GENERATE_CONTENT)
                             && tc.thoughtSignature() != null && !tc.thoughtSignature().isBlank()) {
-                        p.put("thoughtSignature", tc.thoughtSignature());
+                        gen.writeStringField("thoughtSignature", tc.thoughtSignature());
                         attachedSigOnFirstCall = true;
                     } else if (injectSkipSig && !attachedSigOnFirstCall) {
-                        p.put("thoughtSignature", CodecSupport.GEMINI_SKIP_THOUGHT_SIGNATURE);
+                        gen.writeStringField("thoughtSignature", CodecSupport.GEMINI_SKIP_THOUGHT_SIGNATURE);
                         attachedSigOnFirstCall = true;
                     }
-                    parts.add(p);
+                    gen.writeEndObject();
                 }
                 case CanonicalContentPart.ToolResultPart tr -> {
                     if (tr.toolName() == null || tr.toolName().isBlank()) {
@@ -612,191 +908,214 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                                 "Cannot translate tool result '" + tr.callId()
                                         + "' to Gemini: matching tool call name not found in conversation history");
                     }
-                    parts.add(encodeFunctionResponsePart(tr));
+                    writeFunctionResponsePart(gen, tr);
                 }
                 case CanonicalContentPart.RedactedThinkingPart ignored -> {}
             }
         }
-        return parts;
     }
 
-    private ObjectNode encodeImagePart(CanonicalContentPart.ImagePart img) {
-        ObjectNode p = mapper.createObjectNode();
+    private void writeImagePart(JsonGenerator gen, CanonicalContentPart.ImagePart img) throws IOException {
+        gen.writeStartObject();
         switch (img.source()) {
             case ImageSource.Base64Image b64 -> {
-                ObjectNode inline = mapper.createObjectNode();
-                inline.put("mimeType", b64.mediaType());
-                inline.put("data", b64.base64Data());
-                p.set("inlineData", inline);
+                gen.writeObjectFieldStart("inlineData");
+                gen.writeStringField("mimeType", b64.mediaType());
+                gen.writeStringField("data", b64.base64Data());
+                gen.writeEndObject();
             }
             case ImageSource.UrlImage u -> {
-                ObjectNode fd = mapper.createObjectNode();
+                gen.writeObjectFieldStart("fileData");
                 if (u.mediaTypeHint() != null && !u.mediaTypeHint().isBlank()) {
-                    fd.put("mimeType", u.mediaTypeHint());
+                    gen.writeStringField("mimeType", u.mediaTypeHint());
                 }
-                fd.put("fileUri", u.url());
-                p.set("fileData", fd);
+                gen.writeStringField("fileUri", u.url());
+                gen.writeEndObject();
             }
             case ImageSource.FileRefImage ref -> {
-                ObjectNode fd = mapper.createObjectNode();
+                gen.writeObjectFieldStart("fileData");
                 if (ref.mediaTypeHint() != null && !ref.mediaTypeHint().isBlank()) {
-                    fd.put("mimeType", ref.mediaTypeHint());
+                    gen.writeStringField("mimeType", ref.mediaTypeHint());
                 }
-                fd.put("fileUri", ref.fileRef());
-                p.set("fileData", fd);
+                gen.writeStringField("fileUri", ref.fileRef());
+                gen.writeEndObject();
             }
         }
-        return p;
+        gen.writeEndObject();
     }
 
-    private ObjectNode encodeFunctionResponsePart(CanonicalContentPart.ToolResultPart tr) {
-        ObjectNode fr = mapper.createObjectNode();
-        if (tr.callId() != null && !tr.callId().isBlank()) {
-            fr.put("id", tr.callId());
-        }
-        fr.put("name", tr.toolName());
-
-        StringBuilder textOut = new StringBuilder();
-        ArrayNode mediaParts = mapper.createArrayNode();
-        for (CanonicalContentPart child : tr.content()) {
+    private void writeFunctionResponsePart(JsonGenerator gen, CanonicalContentPart.ToolResultPart tr) throws IOException {
+        List<CanonicalContentPart> children = tr.content();
+        String singleText = null;
+        StringBuilder textSb = null;
+        boolean hasImages = false;
+        for (CanonicalContentPart child : children) {
             if (child instanceof CanonicalContentPart.TextPart t) {
-                if (!textOut.isEmpty()) {
-                    textOut.append('\n');
+                if (singleText == null && textSb == null) {
+                    singleText = t.text();
+                } else {
+                    if (textSb == null) {
+                        textSb = new StringBuilder(singleText.length() + t.text().length() + 1);
+                        textSb.append(singleText);
+                        singleText = null;
+                    }
+                    if (!textSb.isEmpty()) {
+                        textSb.append('\n');
+                    }
+                    textSb.append(t.text());
                 }
-                textOut.append(t.text());
-            } else if (child instanceof CanonicalContentPart.ImagePart img) {
-                mediaParts.add(encodeImagePart(img));
+            } else if (child instanceof CanonicalContentPart.ImagePart) {
+                hasImages = true;
             }
         }
-        fr.set("response", buildFunctionResponseObject(textOut.toString(), tr.isError()));
-        if (!mediaParts.isEmpty()) {
-            fr.set("parts", mediaParts);
+        String textOut = textSb != null ? textSb.toString() : (singleText != null ? singleText : "");
+
+        gen.writeStartObject();
+        gen.writeObjectFieldStart("functionResponse");
+        if (tr.callId() != null && !tr.callId().isBlank()) {
+            gen.writeStringField("id", tr.callId());
         }
-
-        ObjectNode wrapper = mapper.createObjectNode();
-        wrapper.set("functionResponse", fr);
-        return wrapper;
-    }
-
-    private ObjectNode buildFunctionResponseObject(String rawText, boolean isError) {
-        if (!isError && rawText != null && !rawText.isBlank()) {
-            try {
-                JsonNode parsed = mapper.readTree(rawText);
-                if (parsed instanceof ObjectNode obj) {
-                    return obj;
+        gen.writeStringField("name", tr.toolName());
+        gen.writeFieldName("response");
+        CodecSupport.writeFunctionResponseObject(gen, mapper, textOut, tr.isError());
+        if (hasImages) {
+            gen.writeArrayFieldStart("parts");
+            for (CanonicalContentPart child : children) {
+                if (child instanceof CanonicalContentPart.ImagePart img) {
+                    writeImagePart(gen, img);
                 }
-            } catch (Exception ignored) {
             }
+            gen.writeEndArray();
         }
-        ObjectNode wrapped = mapper.createObjectNode();
-        wrapped.put(isError ? "error" : "output", rawText != null ? rawText : "");
-        return wrapped;
+        gen.writeEndObject();
+        gen.writeEndObject();
     }
 
-    private void encodeToolsAndConfig(ObjectNode root, CanonicalRequest req) {
+    private void writeToolsAndConfig(JsonGenerator gen, CanonicalRequest req) throws IOException {
         if (req.tools().isEmpty()) {
             return;
         }
-        ArrayNode decls = mapper.createArrayNode();
+        gen.writeArrayFieldStart("tools");
+        gen.writeStartObject();
+        gen.writeArrayFieldStart("functionDeclarations");
         for (CanonicalToolDefinition tool : req.tools()) {
-            ObjectNode d = mapper.createObjectNode();
-            d.put("name", tool.name());
+            gen.writeStartObject();
+            gen.writeStringField("name", tool.name());
             if (tool.description() != null) {
-                d.put("description", tool.description());
+                gen.writeStringField("description", tool.description());
             }
             if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
-                d.set("parametersJsonSchema", tool.parametersSchema().deepCopy());
+                gen.writeFieldName("parametersJsonSchema");
+                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
             }
-            decls.add(d);
+            gen.writeEndObject();
         }
-        ObjectNode toolWrapper = mapper.createObjectNode();
-        toolWrapper.set("functionDeclarations", decls);
-        ArrayNode toolsArr = mapper.createArrayNode();
-        toolsArr.add(toolWrapper);
-        root.set("tools", toolsArr);
+        gen.writeEndArray();
+        gen.writeEndObject();
+        gen.writeEndArray();
 
         CanonicalToolChoice tc = req.toolChoice();
         if (tc.mode() != CanonicalToolChoice.ToolChoiceMode.OMITTED) {
-            ObjectNode fcc = mapper.createObjectNode();
+            gen.writeObjectFieldStart("toolConfig");
+            gen.writeObjectFieldStart("functionCallingConfig");
             switch (tc.mode()) {
-                case NONE -> fcc.put("mode", "NONE");
-                case AUTO -> fcc.put("mode", "AUTO");
-                case REQUIRED -> fcc.put("mode", "ANY");
+                case NONE -> gen.writeStringField("mode", "NONE");
+                case AUTO -> gen.writeStringField("mode", "AUTO");
+                case REQUIRED -> gen.writeStringField("mode", "ANY");
                 case SPECIFIC -> {
-                    fcc.put("mode", "ANY");
-                    ArrayNode allowed = mapper.createArrayNode();
-                    allowed.add(tc.specificToolName());
-                    fcc.set("allowedFunctionNames", allowed);
+                    gen.writeStringField("mode", "ANY");
+                    gen.writeArrayFieldStart("allowedFunctionNames");
+                    gen.writeString(tc.specificToolName());
+                    gen.writeEndArray();
                 }
                 case OMITTED -> {}
             }
-            ObjectNode toolConfig = mapper.createObjectNode();
-            toolConfig.set("functionCallingConfig", fcc);
-            root.set("toolConfig", toolConfig);
+            gen.writeEndObject();
+            gen.writeEndObject();
         }
     }
 
-    private ObjectNode encodeGenerationConfig(CanonicalRequest req, UpstreamEncodingContext context) {
-        ObjectNode cfg = mapper.createObjectNode();
+    private void writeGenerationConfigIfNonEmpty(
+            JsonGenerator gen,
+            CanonicalRequest req,
+            UpstreamEncodingContext context
+    ) throws IOException {
         CanonicalGenerationConfig g = req.generation();
+        CanonicalThinkingConfig thinking = req.thinking();
+        boolean hasThinking = thinking.mode() != CanonicalThinkingConfig.ThinkingMode.OMITTED
+                || thinking.effort() != CanonicalThinkingConfig.ThinkingEffort.OMITTED;
+        boolean hasResponseFmt = req.responseFormat() instanceof CanonicalResponseFormat.JsonObjectFormat
+                || req.responseFormat() instanceof CanonicalResponseFormat.JsonSchemaFormat;
+        boolean hasAny = (g.maxOutputTokens() != null && g.maxOutputTokens() > 0)
+                || g.temperature() != null
+                || g.topP() != null
+                || g.topK() != null
+                || !g.stopSequences().isEmpty()
+                || g.seed() != null
+                || g.presencePenalty() != null
+                || g.frequencyPenalty() != null
+                || (g.candidateCount() != null && g.candidateCount() > 1)
+                || hasResponseFmt
+                || hasThinking;
+        if (!hasAny) {
+            return;
+        }
+        gen.writeObjectFieldStart("generationConfig");
         if (g.maxOutputTokens() != null && g.maxOutputTokens() > 0) {
-            cfg.put("maxOutputTokens", g.maxOutputTokens());
+            gen.writeNumberField("maxOutputTokens", g.maxOutputTokens());
         }
         if (g.temperature() != null) {
-            cfg.put("temperature", g.temperature());
+            gen.writeNumberField("temperature", g.temperature());
         }
         if (g.topP() != null) {
-            cfg.put("topP", g.topP());
+            gen.writeNumberField("topP", g.topP());
         }
         if (g.topK() != null) {
-            cfg.put("topK", g.topK());
+            gen.writeNumberField("topK", g.topK());
         }
         if (!g.stopSequences().isEmpty()) {
-            ArrayNode stops = mapper.createArrayNode();
+            gen.writeArrayFieldStart("stopSequences");
             int limit = Math.min(g.stopSequences().size(), 5);
             for (int i = 0; i < limit; i++) {
-                stops.add(g.stopSequences().get(i));
+                gen.writeString(g.stopSequences().get(i));
             }
-            cfg.set("stopSequences", stops);
+            gen.writeEndArray();
         }
         if (g.seed() != null) {
-            cfg.put("seed", g.seed());
+            gen.writeNumberField("seed", g.seed());
         }
         if (g.presencePenalty() != null) {
-            cfg.put("presencePenalty", g.presencePenalty());
+            gen.writeNumberField("presencePenalty", g.presencePenalty());
         }
         if (g.frequencyPenalty() != null) {
-            cfg.put("frequencyPenalty", g.frequencyPenalty());
+            gen.writeNumberField("frequencyPenalty", g.frequencyPenalty());
         }
         if (g.candidateCount() != null && g.candidateCount() > 1) {
-            cfg.put("candidateCount", g.candidateCount());
+            gen.writeNumberField("candidateCount", g.candidateCount());
         }
-
         if (req.responseFormat() instanceof CanonicalResponseFormat.JsonObjectFormat) {
-            cfg.put("responseMimeType", "application/json");
+            gen.writeStringField("responseMimeType", "application/json");
         } else if (req.responseFormat() instanceof CanonicalResponseFormat.JsonSchemaFormat js) {
-            cfg.put("responseMimeType", "application/json");
+            gen.writeStringField("responseMimeType", "application/json");
             if (js.schema() != null) {
-                cfg.set("responseJsonSchema", js.schema().deepCopy());
+                gen.writeFieldName("responseJsonSchema");
+                CodecSupport.writeJsonNode(gen, mapper, js.schema());
             }
         }
-
-        CanonicalThinkingConfig thinking = req.thinking();
-        if (thinking.mode() != CanonicalThinkingConfig.ThinkingMode.OMITTED
-                || thinking.effort() != CanonicalThinkingConfig.ThinkingEffort.OMITTED) {
-            ObjectNode tc = mapper.createObjectNode();
+        if (hasThinking) {
+            gen.writeObjectFieldStart("thinkingConfig");
             boolean useLevel = CodecSupport.isGeminiLevelStyle(context.thinkingStyle(), context.upstreamModelName());
             if (useLevel) {
-                tc.put("thinkingLevel", CodecSupport.toGeminiThinkingLevel(thinking));
+                gen.writeStringField("thinkingLevel", CodecSupport.toGeminiThinkingLevel(thinking));
             } else {
-                tc.put("thinkingBudget", CodecSupport.toGeminiThinkingBudget(thinking));
+                gen.writeNumberField("thinkingBudget", CodecSupport.toGeminiThinkingBudget(thinking));
             }
             if (Boolean.TRUE.equals(thinking.includeThoughts())) {
-                tc.put("includeThoughts", true);
+                gen.writeBooleanField("includeThoughts", true);
             }
-            cfg.set("thinkingConfig", tc);
+            gen.writeEndObject();
         }
-        return cfg;
+        gen.writeEndObject();
     }
 
     // ---- Usage & stop reason helpers ----

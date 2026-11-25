@@ -5,16 +5,26 @@ import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.protocol.ir.CacheControl;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
+import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
+import app.pagefault.hyperllm.protocol.ir.CanonicalSystemPart;
 import app.pagefault.hyperllm.protocol.ir.CanonicalThinkingConfig;
+import app.pagefault.hyperllm.protocol.ir.CanonicalToolDefinition;
+import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import com.fasterxml.jackson.core.JsonEncoding;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Locale;
 
 /**
@@ -372,5 +382,235 @@ public final class CodecSupport {
 
     public static boolean isSameOrigin(ProtocolKind origin, ProtocolKind target) {
         return origin != null && origin == target;
+    }
+
+    // ---- Streaming JsonParser / JsonGenerator helpers for large messages arrays ----
+
+    /**
+     * Pre-sized {@link ByteArrayOutputStream} avoiding repeated buffer-doubling copies on 100K+ token
+     * requests and exposing the backing array directly when the serialized size matches capacity.
+     */
+    static final class ResizableByteBuffer extends ByteArrayOutputStream {
+
+        ResizableByteBuffer(int initialCapacity) {
+            super(Math.max(512, initialCapacity));
+        }
+
+        byte[] toExactByteArray() {
+            return count == buf.length ? buf : Arrays.copyOf(buf, count);
+        }
+    }
+
+    static int estimateEncodedCapacity(CanonicalRequest req) {
+        if (req == null) {
+            return 1024;
+        }
+        long chars = 512L;
+        for (CanonicalSystemPart sp : req.systemInstructions()) {
+            chars += sp.text().length() + 48L;
+        }
+        for (CanonicalTurn turn : req.turns()) {
+            chars += 48L;
+            for (CanonicalContentPart part : turn.parts()) {
+                chars += estimatePartChars(part);
+            }
+        }
+        for (CanonicalToolDefinition tool : req.tools()) {
+            chars += 256L;
+            if (tool.name() != null) {
+                chars += tool.name().length();
+            }
+            if (tool.description() != null) {
+                chars += tool.description().length();
+            }
+        }
+        long estimated = (chars * 5L) / 4L + 1024L;
+        return (int) Math.min(16L * 1024L * 1024L, Math.max(1024L, estimated));
+    }
+
+    private static long estimatePartChars(CanonicalContentPart part) {
+        return switch (part) {
+            case CanonicalContentPart.TextPart t -> t.text().length() + 32L;
+            case CanonicalContentPart.ThinkingPart th ->
+                    th.text().length() + (th.signature() != null ? th.signature().length() : 0L) + 64L;
+            case CanonicalContentPart.RedactedThinkingPart rt ->
+                    (rt.opaqueData() != null ? rt.opaqueData().length() : 0L) + 64L;
+            case CanonicalContentPart.RefusalPart r -> r.refusal().length() + 32L;
+            case CanonicalContentPart.ImagePart img -> {
+                if (img.source() instanceof ImageSource.Base64Image b64 && b64.base64Data() != null) {
+                    yield b64.base64Data().length() + 128L;
+                }
+                yield 256L;
+            }
+            case CanonicalContentPart.ToolCallPart tc -> {
+                long len = 128L;
+                if (tc.rawArgumentsJson() != null) {
+                    len += tc.rawArgumentsJson().length();
+                }
+                yield len;
+            }
+            case CanonicalContentPart.ToolResultPart tr -> {
+                long len = 96L;
+                for (CanonicalContentPart child : tr.content()) {
+                    len += estimatePartChars(child);
+                }
+                yield len;
+            }
+        };
+    }
+
+    static JsonGenerator newUtf8Generator(ObjectMapper mapper, ResizableByteBuffer out) throws IOException {
+        return mapper.getFactory().createGenerator(out, JsonEncoding.UTF8);
+    }
+
+    static JsonParser openObjectParser(ObjectMapper mapper, byte[] rawBody) {
+        if (rawBody == null || rawBody.length == 0) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
+        }
+        try {
+            JsonParser parser = mapper.getFactory().createParser(rawBody);
+            JsonToken first = parser.nextToken();
+            if (first != JsonToken.START_OBJECT) {
+                parser.close();
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must be a JSON object");
+            }
+            return parser;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
+    }
+
+    static void writeCacheControl(JsonGenerator gen, CacheControl cc) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("type", cc.type() != null ? cc.type() : "ephemeral");
+        if (cc.ttl() != null && !cc.ttl().isBlank()) {
+            gen.writeStringField("ttl", cc.ttl());
+        }
+        gen.writeEndObject();
+    }
+
+    static void writeJsonNode(JsonGenerator gen, ObjectMapper mapper, JsonNode node) throws IOException {
+        mapper.writeTree(gen, node);
+    }
+
+    static void writeEmptyObjectSchema(JsonGenerator gen) throws IOException {
+        gen.writeRawValue("{\"type\":\"object\",\"properties\":{}}");
+    }
+
+    static void writeArgumentsAsObject(
+            JsonGenerator gen,
+            ObjectMapper mapper,
+            CanonicalContentPart.ToolCallPart tc
+    ) throws IOException {
+        if (tc.argumentsJson() instanceof ObjectNode obj) {
+            mapper.writeTree(gen, obj);
+            return;
+        }
+        String rawArgs = tc.rawArgumentsJson();
+        if (rawArgs == null || rawArgs.isBlank()) {
+            gen.writeStartObject();
+            gen.writeEndObject();
+            return;
+        }
+        if (isValidJsonObject(mapper, rawArgs)) {
+            gen.writeRawValue(rawArgs);
+            return;
+        }
+        mapper.writeTree(gen, parseArgumentsToObject(mapper, rawArgs));
+    }
+
+    static void writeFunctionResponseObject(
+            JsonGenerator gen,
+            ObjectMapper mapper,
+            String rawText,
+            boolean isError
+    ) throws IOException {
+        if (!isError && isValidJsonObject(mapper, rawText)) {
+            gen.writeRawValue(rawText);
+            return;
+        }
+        gen.writeStartObject();
+        gen.writeStringField(isError ? "error" : "output", rawText != null ? rawText : "");
+        gen.writeEndObject();
+    }
+
+    static boolean isValidJsonObject(ObjectMapper mapper, String rawText) {
+        if (!startsWithOpenBrace(rawText)) {
+            return false;
+        }
+        try (JsonParser p = mapper.getFactory().createParser(rawText)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) {
+                return false;
+            }
+            p.skipChildren();
+            return p.nextToken() == null;
+        } catch (IOException ex) {
+            return false;
+        }
+    }
+
+    static boolean startsWithOpenBrace(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        int len = s.length();
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (c > ' ') {
+                return c == '{';
+            }
+        }
+        return false;
+    }
+
+    static String readNullableString(JsonParser parser) throws IOException {
+        JsonToken t = parser.currentToken();
+        if (t == JsonToken.VALUE_STRING) {
+            return parser.getText();
+        }
+        if (t == JsonToken.VALUE_NULL) {
+            return null;
+        }
+        parser.skipChildren();
+        return null;
+    }
+
+    static Integer readNullableIntegralInt(JsonParser parser) throws IOException {
+        JsonToken t = parser.currentToken();
+        if (t == JsonToken.VALUE_NUMBER_INT) {
+            return parser.getIntValue();
+        }
+        parser.skipChildren();
+        return null;
+    }
+
+    static Long readNullableIntegralLong(JsonParser parser) throws IOException {
+        JsonToken t = parser.currentToken();
+        if (t == JsonToken.VALUE_NUMBER_INT) {
+            return parser.getLongValue();
+        }
+        parser.skipChildren();
+        return null;
+    }
+
+    static Double readNullableDouble(JsonParser parser) throws IOException {
+        JsonToken t = parser.currentToken();
+        if (t == JsonToken.VALUE_NUMBER_INT || t == JsonToken.VALUE_NUMBER_FLOAT) {
+            return parser.getDoubleValue();
+        }
+        parser.skipChildren();
+        return null;
+    }
+
+    static Boolean readNullableBoolean(JsonParser parser) throws IOException {
+        JsonToken t = parser.currentToken();
+        if (t == JsonToken.VALUE_TRUE) {
+            return Boolean.TRUE;
+        }
+        if (t == JsonToken.VALUE_FALSE) {
+            return Boolean.FALSE;
+        }
+        parser.skipChildren();
+        return null;
     }
 }
