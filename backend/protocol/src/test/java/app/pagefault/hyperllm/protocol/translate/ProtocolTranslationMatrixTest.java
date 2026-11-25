@@ -133,9 +133,7 @@ class ProtocolTranslationMatrixTest {
         ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
         for (int i = 0; i < upstreamStream.length; i += 7) {
             byte[] slice = Arrays.copyOfRange(upstreamStream, i, Math.min(upstreamStream.length, i + 7));
-            for (byte[] frame : bridge.feed(slice)) {
-                clientOut.writeBytes(frame);
-            }
+            clientOut.writeBytes(bridge.feed(slice));
         }
         for (byte[] frame : bridge.complete()) {
             clientOut.writeBytes(frame);
@@ -458,9 +456,7 @@ class ProtocolTranslationMatrixTest {
         assertThat(bridge.contentType()).isEqualTo("application/json");
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (byte[] f : bridge.feed(sampleStreamingSse(ProtocolKind.OPENAI_CHAT))) {
-            out.writeBytes(f);
-        }
+        out.writeBytes(bridge.feed(sampleStreamingSse(ProtocolKind.OPENAI_CHAT)));
         for (byte[] f : bridge.complete()) {
             out.writeBytes(f);
         }
@@ -492,9 +488,7 @@ class ProtocolTranslationMatrixTest {
 
                 """;
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (byte[] f : bridge.feed(interleavedOpenAiSse.getBytes(StandardCharsets.UTF_8))) {
-            out.writeBytes(f);
-        }
+        out.writeBytes(bridge.feed(interleavedOpenAiSse.getBytes(StandardCharsets.UTF_8)));
         for (byte[] f : bridge.complete()) {
             out.writeBytes(f);
         }

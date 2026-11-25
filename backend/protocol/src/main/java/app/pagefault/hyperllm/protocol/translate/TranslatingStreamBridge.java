@@ -20,6 +20,8 @@ import java.util.List;
  */
 public final class TranslatingStreamBridge implements StreamBridge {
 
+    private static final byte[] EMPTY_FRAME = new byte[0];
+
     private final StreamRequestMetadata inboundMeta;
     private final UpstreamStreamDecoder decoder;
     private final DownstreamStreamEncoder encoder;
@@ -60,9 +62,30 @@ public final class TranslatingStreamBridge implements StreamBridge {
     }
 
     @Override
-    public List<byte[]> feed(byte[] upstreamChunk) {
+    public byte[] feed(byte[] upstreamChunk) {
         List<CanonicalStreamEvent> events = decoder.feed(upstreamChunk);
-        return translateEvents(events);
+        return concatenate(translateEvents(events));
+    }
+
+    /** Collapses every frame produced by one upstream chunk into a single downstream write. */
+    private static byte[] concatenate(List<byte[]> frames) {
+        if (frames.isEmpty()) {
+            return EMPTY_FRAME;
+        }
+        if (frames.size() == 1) {
+            return frames.get(0);
+        }
+        int total = 0;
+        for (byte[] frame : frames) {
+            total += frame.length;
+        }
+        byte[] merged = new byte[total];
+        int offset = 0;
+        for (byte[] frame : frames) {
+            System.arraycopy(frame, 0, merged, offset, frame.length);
+            offset += frame.length;
+        }
+        return merged;
     }
 
     @Override

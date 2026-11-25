@@ -15,9 +15,14 @@ public interface StreamBridge {
     }
 
     /**
-     * Feeds a raw upstream chunk and emits zero or more complete downstream frames.
+     * Feeds a raw upstream chunk and returns the downstream bytes for that chunk in one array.
+     *
+     * <p>An upstream read often carries several SSE events; concatenating the frames they translate to
+     * means the gateway performs a single socket write per read instead of one per event, without
+     * changing what the client sees (a sequence of {@code data:} frames is the same wire format).
+     * Returns an empty array when the chunk produced nothing.
      */
-    List<byte[]> feed(byte[] upstreamChunk);
+    byte[] feed(byte[] upstreamChunk);
 
     /**
      * Flushes any trailing state-machine frames when the upstream completes cleanly.

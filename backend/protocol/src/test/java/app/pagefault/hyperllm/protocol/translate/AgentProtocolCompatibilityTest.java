@@ -364,9 +364,7 @@ class AgentProtocolCompatibilityTest {
                 """;
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (byte[] f : bridge.feed(compatSse.getBytes(StandardCharsets.UTF_8))) {
-            out.writeBytes(f);
-        }
+        out.writeBytes(bridge.feed(compatSse.getBytes(StandardCharsets.UTF_8)));
         for (byte[] f : bridge.complete()) {
             out.writeBytes(f);
         }

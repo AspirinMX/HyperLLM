@@ -563,7 +563,8 @@ public class GatewayProxyService {
                     try {
                         byte[] bytes = new byte[dataBuffer.readableByteCount()];
                         dataBuffer.read(bytes);
-                        return bridge.feed(bytes);
+                        byte[] downstream = bridge.feed(bytes);
+                        return downstream.length == 0 ? List.<byte[]>of() : List.of(downstream);
                     } finally {
                         DataBufferUtils.release(dataBuffer);
                     }
