@@ -215,7 +215,7 @@ def jstat_rows(path):
             if len(f) < 19:
                 continue
             ts = int(f[0])
-            v = [float(x) for x in f[1:19]]
+            v = [0.0 if x == '-' else float(x) for x in f[1:19]]
             rows.append((ts, v))
     except FileNotFoundError:
         pass
