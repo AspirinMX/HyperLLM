@@ -1,6 +1,5 @@
 package app.pagefault.hyperllm.protocol.translate;
 
-import app.pagefault.hyperllm.protocol.codec.CodecSupport;
 import app.pagefault.hyperllm.protocol.codec.DownstreamStreamEncoder;
 import app.pagefault.hyperllm.protocol.codec.UpstreamStreamDecoder;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
@@ -25,8 +24,7 @@ public final class TranslatingStreamBridge implements StreamBridge {
     private final StreamRequestMetadata inboundMeta;
     private final UpstreamStreamDecoder decoder;
     private final DownstreamStreamEncoder encoder;
-    private final TokenEstimator tokenEstimator;
-    private final StringBuilder streamedText = new StringBuilder();
+    private final TokenEstimator.TextTokenCounter completionCounter = new TokenEstimator.TextTokenCounter();
     private TokenUsage observedUsage;
     private boolean sawUsage;
 
@@ -39,7 +37,6 @@ public final class TranslatingStreamBridge implements StreamBridge {
         this.inboundMeta = inboundMeta;
         this.decoder = decoder;
         this.encoder = encoder;
-        this.tokenEstimator = tokenEstimator;
     }
 
     public TranslatingStreamBridge(
@@ -104,7 +101,7 @@ public final class TranslatingStreamBridge implements StreamBridge {
         int prompt = (observedUsage != null && observedUsage.totalInputTokens() > 0)
                 ? observedUsage.promptTokens()
                 : inboundMeta.estimatedPromptTokens();
-        int estCompletion = tokenEstimator.estimateCompletionTokens(inboundMeta.model(), streamedText);
+        int estCompletion = completionCounter.estimateTokens();
         int observedCompletion = observedUsage == null ? 0 : observedUsage.completionTokens();
         int completion = cleanCompletion
                 ? (observedCompletion > 0 ? observedCompletion : estCompletion)
@@ -133,11 +130,10 @@ public final class TranslatingStreamBridge implements StreamBridge {
 
     private void observeEvent(CanonicalStreamEvent event) {
         switch (event) {
-            case CanonicalStreamEvent.TextDelta td -> CodecSupport.appendBounded(streamedText, td.textDelta());
-            case CanonicalStreamEvent.ThinkingDelta th -> CodecSupport.appendBounded(streamedText, th.thinkingDelta());
-            case CanonicalStreamEvent.RefusalDelta ref -> CodecSupport.appendBounded(streamedText, ref.refusalDelta());
-            case CanonicalStreamEvent.ToolCallArgsDelta tcad ->
-                    CodecSupport.appendBounded(streamedText, tcad.partialJsonDelta());
+            case CanonicalStreamEvent.TextDelta td -> completionCounter.add(td.textDelta());
+            case CanonicalStreamEvent.ThinkingDelta th -> completionCounter.add(th.thinkingDelta());
+            case CanonicalStreamEvent.RefusalDelta ref -> completionCounter.add(ref.refusalDelta());
+            case CanonicalStreamEvent.ToolCallArgsDelta tcad -> completionCounter.add(tcad.partialJsonDelta());
             case CanonicalStreamEvent.UsageUpdate uu -> {
                 if (uu.usage() != null) {
                     observedUsage = (uu.cumulative() || observedUsage == null)

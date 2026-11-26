@@ -90,4 +90,26 @@ class ImageDimensionProbeAndEstimatorTest {
         // 765 (high-detail 1024x1024 PNG) + 85 (low-detail URL) + tool schema tokens
         assertThat(multiTokens - baseTokens).isGreaterThan(850);
     }
+
+    @Test
+    void incrementalTextTokenCounterMatchesFullStringEstimationAcrossChunkSplits() {
+        String[] samples = {
+                "abcdefghij",
+                "éééé",
+                "你好世界，HyperLLM 流式计费测试！",
+                "😀😀😀😀abcdefghijk",
+                "\uD800\uD800\uD800",
+                "mixed ASCII + 中文 + 🚀🔥 + \uD83D\uDE00 + trailing".repeat(2500) // >100k chars (beyond old 65,536 cap)
+        };
+        for (String sample : samples) {
+            TokenEstimator.TextTokenCounter counter = new TokenEstimator.TextTokenCounter();
+            // Feed 1 char at a time so every supplementary surrogate pair is split across calls
+            for (int i = 0; i < sample.length(); i++) {
+                counter.add(sample.substring(i, i + 1));
+            }
+            assertThat(counter.estimateTokens())
+                    .as("Incremental token estimate for length=%d", sample.length())
+                    .isEqualTo(estimator.countText("gpt-4o", sample));
+        }
+    }
 }

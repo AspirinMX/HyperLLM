@@ -9,7 +9,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
@@ -26,47 +25,33 @@ public class GatewayController {
     private final GatewayProxyService proxyService;
 
     @PostMapping(value = "/chat/completions", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<ResponseEntity<Flux<DataBuffer>>> chatCompletions(
-            ServerWebExchange exchange,
-            @RequestBody(required = false) byte[] body
-    ) {
-        return proxyService.proxy(exchange, ProtocolKind.OPENAI_CHAT, InboundRequestContext.empty(), body);
+    public Mono<ResponseEntity<Flux<DataBuffer>>> chatCompletions(ServerWebExchange exchange) {
+        return proxyService.proxy(exchange, ProtocolKind.OPENAI_CHAT, InboundRequestContext.empty());
     }
 
     @PostMapping(value = "/responses", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<ResponseEntity<Flux<DataBuffer>>> openAiResponses(
-            ServerWebExchange exchange,
-            @RequestBody(required = false) byte[] body
-    ) {
-        return proxyService.proxy(exchange, ProtocolKind.OPENAI_RESPONSES, InboundRequestContext.empty(), body);
+    public Mono<ResponseEntity<Flux<DataBuffer>>> openAiResponses(ServerWebExchange exchange) {
+        return proxyService.proxy(exchange, ProtocolKind.OPENAI_RESPONSES, InboundRequestContext.empty());
     }
 
     @PostMapping(value = "/messages", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<ResponseEntity<Flux<DataBuffer>>> anthropicMessages(
-            ServerWebExchange exchange,
-            @RequestBody(required = false) byte[] body
-    ) {
+    public Mono<ResponseEntity<Flux<DataBuffer>>> anthropicMessages(ServerWebExchange exchange) {
         String version = exchange.getRequest().getHeaders().getFirst("anthropic-version");
         String beta = exchange.getRequest().getHeaders().getFirst("anthropic-beta");
         return proxyService.proxy(
                 exchange,
                 ProtocolKind.ANTHROPIC_MESSAGES,
-                InboundRequestContext.forAnthropic(version, beta),
-                body
+                InboundRequestContext.forAnthropic(version, beta)
         );
     }
 
     @PostMapping(value = "/messages/count_tokens", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<Map<String, Object>> anthropicCountTokens(
-            ServerWebExchange exchange,
-            @RequestBody(required = false) byte[] body
-    ) {
+    public Mono<Map<String, Object>> anthropicCountTokens(ServerWebExchange exchange) {
         String version = exchange.getRequest().getHeaders().getFirst("anthropic-version");
         String beta = exchange.getRequest().getHeaders().getFirst("anthropic-beta");
         return proxyService.countAnthropicTokens(
                 exchange,
-                InboundRequestContext.forAnthropic(version, beta),
-                body
+                InboundRequestContext.forAnthropic(version, beta)
         );
     }
 

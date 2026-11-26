@@ -54,11 +54,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.core.io.buffer.NettyDataBufferFactory;
 import org.springframework.http.HttpHeaders;
@@ -67,9 +69,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.reactivestreams.Subscription;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.Disposable;
 import reactor.core.Exceptions;
@@ -121,6 +125,25 @@ public class GatewayProxyService {
     private record AdmitResult(String status, ProjectBudgetService.BudgetContext budget) {
     }
 
+    /**
+     * Lightweight request metadata extracted immediately after parsing so downstream Reactive
+     * closures never capture raw {@code byte[]} bodies or bare {@link CanonicalRequest} graphs.
+     */
+    private record DecodedRequestSummary(
+            RequestIrHolder irHolder,
+            String model,
+            boolean stream,
+            Integer maxOutputTokens,
+            StreamRequestMetadata streamMeta,
+            int estimatedPromptTokens,
+            int rawBodyBytes
+    ) {
+    }
+
+    private static final byte[] EMPTY_BYTES = new byte[0];
+    private static final Runnable NOOP_RUNNABLE = () -> {};
+    private static final int DEFAULT_MAX_IN_MEMORY_BYTES = 16 * 1024 * 1024;
+
     /** All healthy candidates were tried and none had channel capacity left. */
     private static final class RetryableCapacityException extends RuntimeException {
     }
@@ -157,11 +180,13 @@ public class GatewayProxyService {
     private final ObjectMapper objectMapper;
     private final TokenEstimator tokenEstimator;
     private final Scheduler protocolTranslationScheduler;
+    private final int maxInMemoryBytes;
     private static final NettyDataBufferFactory NETTY_DATA_BUFFER_FACTORY =
             new NettyDataBufferFactory(ByteBufAllocator.DEFAULT);
 
     private final AtomicLong nextLazyReclaimNanos = new AtomicLong(0L);
 
+    @Autowired
     public GatewayProxyService(
             GatewayConfigCacheService cacheService,
             OutboxAdmissionGate outboxAdmissionGate,
@@ -177,7 +202,8 @@ public class GatewayProxyService {
             app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService,
             ObjectMapper objectMapper,
             TokenEstimator tokenEstimator,
-            @Qualifier("protocolTranslationScheduler") Scheduler protocolTranslationScheduler
+            @Qualifier("protocolTranslationScheduler") Scheduler protocolTranslationScheduler,
+            @Value("${spring.codec.max-in-memory-size:16MB}") DataSize maxInMemorySize
     ) {
         this.cacheService = cacheService;
         this.outboxAdmissionGate = outboxAdmissionGate;
@@ -194,6 +220,31 @@ public class GatewayProxyService {
         this.objectMapper = objectMapper;
         this.tokenEstimator = tokenEstimator;
         this.protocolTranslationScheduler = protocolTranslationScheduler;
+        long bytes = maxInMemorySize != null ? maxInMemorySize.toBytes() : DEFAULT_MAX_IN_MEMORY_BYTES;
+        this.maxInMemoryBytes = (int) Math.min(Integer.MAX_VALUE, Math.max(1024L, bytes));
+    }
+
+    public GatewayProxyService(
+            GatewayConfigCacheService cacheService,
+            OutboxAdmissionGate outboxAdmissionGate,
+            PreHoldService preHoldService,
+            ProjectBudgetService projectBudgetService,
+            ChannelCapacityService channelCapacity,
+            GatewayTelemetryService telemetryService,
+            GatewayProperties properties,
+            ProtocolTranslator protocolTranslator,
+            AesGcmCipher aesGcmCipher,
+            ChannelSelector channelSelector,
+            UpstreamWebClientPool webClientPool,
+            app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService,
+            ObjectMapper objectMapper,
+            TokenEstimator tokenEstimator,
+            Scheduler protocolTranslationScheduler
+    ) {
+        this(cacheService, outboxAdmissionGate, preHoldService, projectBudgetService, channelCapacity,
+                telemetryService, properties, protocolTranslator, aesGcmCipher, channelSelector, webClientPool,
+                mirrorService, objectMapper, tokenEstimator, protocolTranslationScheduler,
+                DataSize.ofBytes(DEFAULT_MAX_IN_MEMORY_BYTES));
     }
 
     public Mono<Map<String, Object>> listModels(ServerWebExchange exchange) {
@@ -218,6 +269,20 @@ public class GatewayProxyService {
 
     public Mono<Map<String, Object>> countAnthropicTokens(
             ServerWebExchange exchange,
+            InboundRequestContext inboundContext
+    ) {
+        String rawToken = extractToken(exchange.getRequest(), ProtocolKind.ANTHROPIC_MESSAGES);
+        String clientIp = extractClientIp(exchange.getRequest());
+        return authenticateCaller(rawToken, clientIp)
+                .flatMap(caller -> readAndParseRequest(exchange, ProtocolKind.ANTHROPIC_MESSAGES, inboundContext)
+                        .flatMap(decoded -> {
+                            decoded.irHolder().release();
+                            return resolveCountTokens(caller, decoded.model(), decoded.estimatedPromptTokens());
+                        }));
+    }
+
+    public Mono<Map<String, Object>> countAnthropicTokens(
+            ServerWebExchange exchange,
             InboundRequestContext inboundContext,
             byte[] rawBody
     ) {
@@ -225,20 +290,24 @@ public class GatewayProxyService {
         String clientIp = extractClientIp(exchange.getRequest());
         return authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    CanonicalRequest request = protocolTranslator.parseRequest(
+                    DecodedRequestSummary decoded = parseAndSummarize(
                             ProtocolKind.ANTHROPIC_MESSAGES, rawBody, inboundContext);
-                    if (!isModelAllowed(caller, request.model())) {
-                        return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
+                    decoded.irHolder().release();
+                    return resolveCountTokens(caller, decoded.model(), decoded.estimatedPromptTokens());
+                });
+    }
+
+    private Mono<Map<String, Object>> resolveCountTokens(CallerContext caller, String model, int estimatedPromptTokens) {
+        if (!isModelAllowed(caller, model)) {
+            return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
+        }
+        return cacheService.resolveModelRoute(model)
+                .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
+                .flatMap(route -> {
+                    if (route.model().status() != ModelStatus.ACTIVE) {
+                        return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
                     }
-                    return cacheService.resolveModelRoute(request.model())
-                            .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
-                            .flatMap(route -> {
-                                if (route.model().status() != ModelStatus.ACTIVE) {
-                                    return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
-                                }
-                                return Mono.just(Map.<String, Object>of(
-                                        "input_tokens", tokenEstimator.estimatePromptTokens(request)));
-                            });
+                    return Mono.just(Map.<String, Object>of("input_tokens", estimatedPromptTokens));
                 });
     }
 
@@ -253,6 +322,26 @@ public class GatewayProxyService {
     public Mono<ResponseEntity<Flux<DataBuffer>>> proxy(
             ServerWebExchange exchange,
             ProtocolKind protocolKind,
+            InboundRequestContext inboundContext
+    ) {
+        long requestStartNanos = System.nanoTime();
+        String requestId = UuidV7.next().toString();
+        String traceId = requestId.replace("-", "");
+        String rawToken = extractToken(exchange.getRequest(), protocolKind);
+        String clientIp = extractClientIp(exchange.getRequest());
+
+        // Detach the upward Subscription as soon as response headers emit so DispatcherHandler's
+        // MonoFlatMap$FlatMapInner never pins the pre-TTFT pipeline across a long-lived SSE stream.
+        return DetachUpstreamOperator.detach(authenticateCaller(rawToken, clientIp)
+                .flatMap(caller -> readAndParseRequest(exchange, protocolKind, inboundContext)
+                        .flatMap(decoded -> routeAndDispatch(
+                                exchange, caller, decoded, protocolKind, inboundContext,
+                                requestStartNanos, requestId, traceId, clientIp))));
+    }
+
+    public Mono<ResponseEntity<Flux<DataBuffer>>> proxy(
+            ServerWebExchange exchange,
+            ProtocolKind protocolKind,
             InboundRequestContext inboundContext,
             byte[] rawBody
     ) {
@@ -262,55 +351,115 @@ public class GatewayProxyService {
         String rawToken = extractToken(exchange.getRequest(), protocolKind);
         String clientIp = extractClientIp(exchange.getRequest());
 
-        return authenticateCaller(rawToken, clientIp)
+        AtomicReference<byte[]> bodySlot = new AtomicReference<>(rawBody);
+        return DetachUpstreamOperator.detach(authenticateCaller(rawToken, clientIp)
                 .flatMap(caller -> {
-                    // Single authoritative parse of the downstream body: every later decision
-                    // (routing, admission, billing, outbound bytes) derives from this IR graph.
-                    CanonicalRequest request = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
-                    if (!isModelAllowed(caller, request.model())) {
-                        return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
+                    byte[] raw = bodySlot.getAndSet(null);
+                    DecodedRequestSummary decoded = parseAndSummarize(protocolKind, raw, inboundContext);
+                    return routeAndDispatch(
+                            exchange, caller, decoded, protocolKind, inboundContext,
+                            requestStartNanos, requestId, traceId, clientIp);
+                })
+                .doFinally(sig -> bodySlot.lazySet(null)));
+    }
+
+    private Mono<DecodedRequestSummary> readAndParseRequest(
+            ServerWebExchange exchange,
+            ProtocolKind protocolKind,
+            InboundRequestContext inboundContext
+    ) {
+        return DataBufferUtils.join(exchange.getRequest().getBody(), maxInMemoryBytes)
+                .onErrorMap(DataBufferLimitException.class, ex -> new ResponseStatusException(
+                        HttpStatus.PAYLOAD_TOO_LARGE, "Request body exceeds maximum allowed size", ex))
+                .map(dataBuffer -> {
+                    try {
+                        int size = dataBuffer.readableByteCount();
+                        byte[] raw = new byte[size];
+                        dataBuffer.read(raw);
+                        return parseAndSummarize(protocolKind, raw, inboundContext);
+                    } finally {
+                        DataBufferUtils.release(dataBuffer);
                     }
-                    return cacheService.resolveModelRoute(request.model())
-                            .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
-                            .flatMap(route -> {
-                                VirtualModel vm = route.model();
-                                if (vm.status() != ModelStatus.ACTIVE) {
-                                    return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
-                                }
-                                if (route.activePricing() == null) {
-                                    return Mono.error(new HyperLlmException(
-                                            ErrorCode.MODEL_PRICING_MISSING,
-                                            "Model " + vm.modelCode() + " has no active pricing rule"));
-                                }
-                                List<GatewayChannelCandidate> candidates = vm.allowProtocolTranslation()
-                                        ? route.candidates()
-                                        : route.candidates().stream()
-                                                .filter(c -> c.isHomomorphicFor(protocolKind.name()))
-                                                .toList();
-                                if (candidates.isEmpty()) {
-                                    return Mono.error(new HyperLlmException(
-                                            ErrorCode.CHANNEL_UNAVAILABLE,
-                                            "No active channel available for protocol " + protocolKind
-                                    ));
-                                }
-                                int estimatedPromptTokens = tokenEstimator.estimatePromptTokens(request);
-                                return preparePreHold(caller, route, request, estimatedPromptTokens, requestId)
-                                        .flatMap(lease -> dispatchWithRetry(
-                                                exchange, request, estimatedPromptTokens, protocolKind,
-                                                inboundContext, rawBody,
-                                                caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
-                                        ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
-                            });
-                });
+                })
+                .switchIfEmpty(Mono.fromSupplier(() ->
+                        parseAndSummarize(protocolKind, EMPTY_BYTES, inboundContext)));
+    }
+
+    private DecodedRequestSummary parseAndSummarize(
+            ProtocolKind protocolKind,
+            byte[] rawBody,
+            InboundRequestContext inboundContext
+    ) {
+        // Single authoritative parse of the downstream body: every later decision
+        // (routing, admission, billing, outbound bytes) derives from this IR graph.
+        CanonicalRequest request = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
+        int estimatedPromptTokens = tokenEstimator.estimatePromptTokens(request);
+        StreamRequestMetadata streamMeta = StreamRequestMetadata.fromCanonical(request, estimatedPromptTokens);
+        int rawLength = rawBody != null ? rawBody.length : 0;
+        return new DecodedRequestSummary(
+                new RequestIrHolder(request),
+                request.model(),
+                request.stream(),
+                request.maxOutputTokens(),
+                streamMeta,
+                estimatedPromptTokens,
+                rawLength
+        );
+    }
+
+    private Mono<ResponseEntity<Flux<DataBuffer>>> routeAndDispatch(
+            ServerWebExchange exchange,
+            CallerContext caller,
+            DecodedRequestSummary decoded,
+            ProtocolKind protocolKind,
+            InboundRequestContext inboundContext,
+            long requestStartNanos,
+            String requestId,
+            String traceId,
+            String clientIp
+    ) {
+        if (!isModelAllowed(caller, decoded.model())) {
+            decoded.irHolder().release();
+            return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_ALLOWED));
+        }
+        return cacheService.resolveModelRoute(decoded.model())
+                .switchIfEmpty(Mono.error(() -> new HyperLlmException(ErrorCode.MODEL_NOT_FOUND)))
+                .flatMap(route -> {
+                    VirtualModel vm = route.model();
+                    if (vm.status() != ModelStatus.ACTIVE) {
+                        return Mono.error(new HyperLlmException(ErrorCode.MODEL_NOT_FOUND));
+                    }
+                    if (route.activePricing() == null) {
+                        return Mono.error(new HyperLlmException(
+                                ErrorCode.MODEL_PRICING_MISSING,
+                                "Model " + vm.modelCode() + " has no active pricing rule"));
+                    }
+                    List<GatewayChannelCandidate> candidates = vm.allowProtocolTranslation()
+                            ? route.candidates()
+                            : route.candidates().stream()
+                                    .filter(c -> c.isHomomorphicFor(protocolKind.name()))
+                                    .toList();
+                    if (candidates.isEmpty()) {
+                        return Mono.error(new HyperLlmException(
+                                ErrorCode.CHANNEL_UNAVAILABLE,
+                                "No active channel available for protocol " + protocolKind
+                        ));
+                    }
+                    return preparePreHold(caller, route, decoded.maxOutputTokens(), decoded.estimatedPromptTokens(), requestId)
+                            .flatMap(lease -> dispatchWithRetry(
+                                    exchange, decoded, protocolKind, inboundContext,
+                                    caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
+                            ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
+                })
+                .doOnError(ex -> decoded.irHolder().release())
+                .doOnCancel(decoded.irHolder()::release);
     }
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> dispatchWithRetry(
             ServerWebExchange exchange,
-            CanonicalRequest decodedRequest,
-            int estimatedPromptTokens,
+            DecodedRequestSummary decoded,
             ProtocolKind protocolKind,
             InboundRequestContext inboundContext,
-            byte[] rawBody,
             CallerContext caller,
             GatewayModelRoute route,
             List<GatewayChannelCandidate> candidates,
@@ -325,18 +474,15 @@ public class GatewayProxyService {
         TranslationPolicy policy = TranslationPolicy.parseOrDefault(
                 route.model().translationPolicy(), TranslationPolicy.BEST_EFFORT);
         String thinkingStyle = extractThinkingStyle(route.model().metadataJson());
-        StreamRequestMetadata streamMeta = StreamRequestMetadata.fromCanonical(decodedRequest, estimatedPromptTokens);
-        boolean isStream = decodedRequest.stream();
+        StreamRequestMetadata streamMeta = decoded.streamMeta();
+        boolean isStream = decoded.stream();
+        RequestIrHolder irHolder = decoded.irHolder();
         String anthropicVersion = inboundContext.anthropicVersion();
         String anthropicBeta = inboundContext.anthropicBeta();
+        int maxRetryAttempts = properties.getUpstream().getMaxRetryAttempts();
 
-        // Computed once: the inbound body is only needed to size the translation offload decision, so it
-        // must not be captured by the retry closure - otherwise the whole request body stays reachable
-        // for as long as the attempt (and its retries) live.
         int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
-        boolean offloadTranslation = offloadThreshold >= 0
-                && rawBody != null
-                && rawBody.length >= offloadThreshold;
+        boolean offloadTranslation = offloadThreshold >= 0 && decoded.rawBodyBytes() >= offloadThreshold;
 
         return Mono.defer(() -> {
             GatewayChannelCandidate candidate = channelSelector.selectNext(candidates, excludedChannels, protocolKind);
@@ -346,6 +492,8 @@ public class GatewayProxyService {
             int attemptIndex = attemptCounter.getAndIncrement();
             int retryCount = Math.max(0, attemptIndex - 1);
             String attemptId = lease.holdId() + ":" + attemptIndex;
+            boolean hasFallback = attemptIndex < maxRetryAttempts
+                    && hasAnotherEligibleCandidate(candidates, excludedChannels, candidate.channelId());
 
             ProtocolKind outboundProtocol = resolveOutboundProtocol(candidate, protocolKind);
             UpstreamEncodingContext encodingContext = new UpstreamEncodingContext(
@@ -362,37 +510,90 @@ public class GatewayProxyService {
                     candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
             WebClient client = webClientPool.clientFor(candidate.providerCode());
 
-            // Every combination re-encodes the upstream body from the IR graph, so large bodies are always
-            // translated off the Netty event loop once they exceed the configured threshold.
-            Mono<PreparedUpstreamPayload> payloadMono = offloadTranslation
-                    ? Mono.fromCallable(() -> protocolTranslator.prepareUpstreamPayload(
-                            decodedRequest, outboundProtocol, encodingContext))
-                            .subscribeOn(protocolTranslationScheduler)
-                    : Mono.just(protocolTranslator.prepareUpstreamPayload(
-                            decodedRequest, outboundProtocol, encodingContext));
+            // Check channel capacity BEFORE encoding the upstream body so saturated channels
+            // never pay for a 400 KB serialization and closures never capture the encoded buffer.
+            return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
+                    .flatMap(capacity -> {
+                        if (!"OK".equals(capacity)) {
+                            excludedChannels.add(candidate.channelId());
+                            return Mono.error(new RetryableCapacityException());
+                        }
+                        AtomicBoolean capacityReleased = new AtomicBoolean(false);
+                        Runnable releaseCapacity = channelCapacity.hasConcurrencyLimit(candidate)
+                                ? () -> {
+                                    if (capacityReleased.compareAndSet(false, true)) {
+                                        channelCapacity.release(candidate.channelId(), attemptId, candidate).subscribe();
+                                    }
+                                }
+                                : NOOP_RUNNABLE;
+                        Runnable releaseIrOnCommit = hasFallback ? irHolder::release : NOOP_RUNNABLE;
 
-            return payloadMono.flatMap(payload -> {
-                DataBuffer bodyBuffer = toZeroCopyDataBuffer(payload);
-                long contentLength = payload.contentLength();
-                return channelCapacity.acquire(candidate.channelId(), attemptId, candidate, lease.estimatedTokens())
-                        .flatMap(capacity -> {
-                            if (!"OK".equals(capacity)) {
-                                // Try the next eligible candidate before giving up on the request.
-                                excludedChannels.add(candidate.channelId());
-                                return Mono.error(new RetryableCapacityException());
+                        if (!offloadTranslation) {
+                            PreparedUpstreamPayload payload;
+                            try {
+                                CanonicalRequest req = hasFallback ? irHolder.get() : irHolder.take();
+                                if (req == null) {
+                                    releaseCapacity.run();
+                                    return Mono.error(new IllegalStateException(
+                                            "Request IR already released before upstream encode"));
+                                }
+                                payload = protocolTranslator.prepareUpstreamPayload(
+                                        req, outboundProtocol, encodingContext);
+                            } catch (Throwable ex) {
+                                releaseCapacity.run();
+                                return Mono.error(ex);
                             }
                             return executeSingleAttempt(
                                     exchange, client, targetUrl, candidate, upstreamApiKey,
                                     streamMeta, isStream, anthropicVersion, anthropicBeta,
-                                    bodyBuffer, contentLength, protocolKind, outboundProtocol,
+                                    toZeroCopyDataBuffer(payload), payload.contentLength(),
+                                    protocolKind, outboundProtocol,
                                     caller, route, lease, excludedChannels,
-                                    requestStartNanos, requestId, traceId, clientIp, retryCount, attemptId
+                                    requestStartNanos, requestId, traceId, clientIp, retryCount,
+                                    releaseCapacity, releaseIrOnCommit
                             );
-                        });
-            });
-        }).retryWhen(Retry.max(properties.getUpstream().getMaxRetryAttempts())
+                        }
+
+                        return Mono.fromCallable(() -> {
+                                    CanonicalRequest req = hasFallback ? irHolder.get() : irHolder.take();
+                                    if (req == null) {
+                                        throw new IllegalStateException(
+                                                "Request IR already released before upstream encode");
+                                    }
+                                    return protocolTranslator.prepareUpstreamPayload(
+                                            req, outboundProtocol, encodingContext);
+                                })
+                                .subscribeOn(protocolTranslationScheduler)
+                                .doOnError(ex -> releaseCapacity.run())
+                                .doOnCancel(releaseCapacity)
+                                .flatMap(payload -> executeSingleAttempt(
+                                        exchange, client, targetUrl, candidate, upstreamApiKey,
+                                        streamMeta, isStream, anthropicVersion, anthropicBeta,
+                                        toZeroCopyDataBuffer(payload), payload.contentLength(),
+                                        protocolKind, outboundProtocol,
+                                        caller, route, lease, excludedChannels,
+                                        requestStartNanos, requestId, traceId, clientIp, retryCount,
+                                        releaseCapacity, releaseIrOnCommit
+                                ));
+                    });
+        }).retryWhen(Retry.max(maxRetryAttempts)
                 .filter(ex -> ex instanceof RetryableUpstreamException
-                        || ex instanceof RetryableCapacityException));
+                        || ex instanceof RetryableCapacityException))
+                .doFinally(sig -> irHolder.release());
+    }
+
+    static boolean hasAnotherEligibleCandidate(
+            List<GatewayChannelCandidate> candidates,
+            Set<UUID> excludedChannels,
+            UUID currentChannelId
+    ) {
+        for (GatewayChannelCandidate c : candidates) {
+            UUID id = c.channelId();
+            if (!id.equals(currentChannelId) && !excludedChannels.contains(id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Mono<ResponseEntity<Flux<DataBuffer>>> executeSingleAttempt(
@@ -418,20 +619,12 @@ public class GatewayProxyService {
             String traceId,
             String clientIp,
             int retryCount,
-            String attemptId
+            Runnable releaseCapacity,
+            Runnable onRetryWindowClosed
     ) {
         Sinks.One<ResponseEntity<Flux<DataBuffer>>> responseSink = Sinks.one();
         AtomicReference<Subscription> upstreamSubRef = new AtomicReference<>();
         AtomicReference<DataBuffer> bodyRef = new AtomicReference<>(initialBodyBuffer);
-        AtomicBoolean capacityReleased = new AtomicBoolean(false);
-        boolean releaseChannelCapacity = channelCapacity.hasConcurrencyLimit(candidate);
-        Runnable releaseCapacity = releaseChannelCapacity
-                ? () -> {
-                    if (capacityReleased.compareAndSet(false, true)) {
-                        channelCapacity.release(candidate.channelId(), attemptId, candidate).subscribe();
-                    }
-                }
-                : () -> {};
 
         Flux<Void> upstreamExecution = client.post()
                 .uri(targetUrl)
@@ -451,6 +644,9 @@ public class GatewayProxyService {
                                 .thenMany(Flux.error(new RetryableUpstreamException(
                                         status, "Upstream returned retryable status " + status)));
                     }
+                    // Retry window is now permanently closed (2xx or non-retryable 4xx headers received):
+                    // release the decoded CanonicalRequest immediately before streaming or body buffering.
+                    onRetryWindowClosed.run();
                     if (!isStream || !clientResponse.statusCode().is2xxSuccessful()) {
                         return clientResponse.bodyToMono(byte[].class)
                                 .defaultIfEmpty(new byte[0])
@@ -475,7 +671,10 @@ public class GatewayProxyService {
                 .subscribe(
                         ignored -> {},
                         ex -> {
-                            bodyRef.set(null);
+                            DataBuffer leftover = bodyRef.getAndSet(null);
+                            if (leftover != null) {
+                                DataBufferUtils.release(leftover);
+                            }
                             Throwable mapped = ex;
                             if (!(mapped instanceof RetryableUpstreamException) && !(mapped instanceof HyperLlmException)) {
                                 excludedChannels.add(candidate.channelId());
@@ -487,11 +686,17 @@ public class GatewayProxyService {
 
         return responseSink.asMono()
                 .doOnError(ex -> {
-                    bodyRef.set(null);
+                    DataBuffer leftover = bodyRef.getAndSet(null);
+                    if (leftover != null) {
+                        DataBufferUtils.release(leftover);
+                    }
                     releaseCapacity.run();
                 })
                 .doOnCancel(() -> {
-                    bodyRef.set(null);
+                    DataBuffer leftover = bodyRef.getAndSet(null);
+                    if (leftover != null) {
+                        DataBufferUtils.release(leftover);
+                    }
                     releaseCapacity.run();
                     Subscription sub = upstreamSubRef.get();
                     if (sub != null) {
@@ -831,7 +1036,7 @@ public class GatewayProxyService {
     private Mono<PreHoldService.Lease> preparePreHold(
             CallerContext caller,
             GatewayModelRoute route,
-            CanonicalRequest request,
+            Integer requestedMaxOutputTokens,
             int estimatedPromptTokens,
             String requestId
     ) {
@@ -839,7 +1044,7 @@ public class GatewayProxyService {
         GatewayProperties.Billing billing = properties.getBilling();
         String modelCode = route.model().modelCode();
         long promptEstimate = Math.max(0L, estimatedPromptTokens);
-        int requestedMaxTokens = request.maxOutputTokens() != null ? request.maxOutputTokens() : 0;
+        int requestedMaxTokens = requestedMaxOutputTokens != null ? requestedMaxOutputTokens : 0;
         int outputCap = requestedMaxTokens > 0 ? requestedMaxTokens : billing.getDefaultOutputTokens();
 
         return cacheService.resolvePricingOverride(caller.orgId(), route.model().id())

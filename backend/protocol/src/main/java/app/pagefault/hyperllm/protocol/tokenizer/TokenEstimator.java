@@ -30,6 +30,113 @@ public final class TokenEstimator {
         return estimateTextTokens(text);
     }
 
+    /**
+     * Incremental, zero-allocation completion token counter that replaces per-stream
+     * {@link StringBuilder} accumulation. Produces the exact same result as concatenating all
+     * fragments into a single {@link CharSequence} and calling {@link #estimateCompletionTokens},
+     * including supplementary Unicode code points split across chunk boundaries.
+     */
+    public static final class TextTokenCounter {
+        private long codePoints;
+        private long utf8Bytes;
+        private char pendingHighSurrogate;
+
+        public void add(CharSequence text) {
+            if (text == null || text.isEmpty()) {
+                return;
+            }
+            int len = text.length();
+            int offset = 0;
+            if (pendingHighSurrogate != 0) {
+                char first = text.charAt(0);
+                if (Character.isLowSurrogate(first)) {
+                    codePoints++;
+                    utf8Bytes += 4L;
+                    offset = 1;
+                } else {
+                    // Flush previous unpaired high surrogate (UTF-8 replacement width = 1).
+                    codePoints++;
+                    utf8Bytes += 1L;
+                }
+                pendingHighSurrogate = 0;
+            }
+            while (offset < len) {
+                char c = text.charAt(offset);
+                if (c < 0x80) {
+                    codePoints++;
+                    utf8Bytes += 1L;
+                    offset++;
+                } else if (Character.isHighSurrogate(c)) {
+                    if (offset + 1 < len) {
+                        char next = text.charAt(offset + 1);
+                        if (Character.isLowSurrogate(next)) {
+                            codePoints++;
+                            utf8Bytes += 4L;
+                            offset += 2;
+                        } else {
+                            codePoints++;
+                            utf8Bytes += 1L;
+                            offset++;
+                        }
+                    } else {
+                        pendingHighSurrogate = c;
+                        offset++;
+                    }
+                } else if (Character.isLowSurrogate(c)) {
+                    codePoints++;
+                    utf8Bytes += 1L;
+                    offset++;
+                } else if (c < 0x800) {
+                    codePoints++;
+                    utf8Bytes += 2L;
+                    offset++;
+                } else {
+                    codePoints++;
+                    utf8Bytes += 3L;
+                    offset++;
+                }
+            }
+        }
+
+        public void addUtf8Counts(long addedCodePoints, long addedUtf8Bytes) {
+            if (pendingHighSurrogate != 0) {
+                codePoints++;
+                utf8Bytes += 1L;
+                pendingHighSurrogate = 0;
+            }
+            codePoints += addedCodePoints;
+            utf8Bytes += addedUtf8Bytes;
+        }
+
+        public int estimateTokens() {
+            long totalCp = codePoints + (pendingHighSurrogate != 0 ? 1L : 0L);
+            long totalBytes = utf8Bytes + (pendingHighSurrogate != 0 ? 1L : 0L);
+            if (totalCp == 0L && totalBytes == 0L) {
+                return 0;
+            }
+            long byBytes = (totalBytes + 3L) / 4L;
+            long byCharacters = (totalCp + 2L) / 3L;
+            return (int) Math.max(byBytes, byCharacters);
+        }
+
+        public long codePoints() {
+            return codePoints + (pendingHighSurrogate != 0 ? 1L : 0L);
+        }
+
+        public long utf8Bytes() {
+            return utf8Bytes + (pendingHighSurrogate != 0 ? 1L : 0L);
+        }
+    }
+
+    public static int estimateFromCounts(long codePoints, long utf8Bytes) {
+        if (codePoints <= 0L && utf8Bytes <= 0L) {
+            return 0;
+        }
+        long byBytes = (utf8Bytes + 3L) / 4L;
+        long byCharacters = (codePoints + 2L) / 3L;
+        return (int) Math.max(byBytes, byCharacters);
+    }
+
     private static int estimateTextTokens(CharSequence text) {
         if (text == null || text.isEmpty()) {
             return 0;

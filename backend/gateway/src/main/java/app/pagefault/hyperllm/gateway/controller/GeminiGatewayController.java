@@ -11,7 +11,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
@@ -36,8 +35,7 @@ public class GeminiGatewayController {
     @PostMapping(value = "/{modelAction}", consumes = MediaType.APPLICATION_JSON_VALUE)
     public Mono<ResponseEntity<Flux<DataBuffer>>> generateContent(
             ServerWebExchange exchange,
-            @PathVariable("modelAction") String modelAction,
-            @RequestBody(required = false) byte[] body
+            @PathVariable("modelAction") String modelAction
     ) {
         if (modelAction == null || modelAction.isBlank()) {
             return Mono.error(new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Missing Gemini model and action"));
@@ -63,8 +61,7 @@ public class GeminiGatewayController {
         return proxyService.proxy(
                 exchange,
                 ProtocolKind.GEMINI_GENERATE_CONTENT,
-                InboundRequestContext.forGemini(model, stream, altSse),
-                body
+                InboundRequestContext.forGemini(model, stream, altSse)
         );
     }
 }
