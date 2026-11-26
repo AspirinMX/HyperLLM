@@ -65,6 +65,48 @@ class DetachUpstreamOperatorTest {
     }
 
     @Test
+    void detachesDownstreamGraphWhenLongLivedUpstreamRetainsSubscriberReference() throws Exception {
+        // Simulates Netty's HttpServerOperations -> FluxReceive, which holds a strong reference to
+        // its subscribed CoreSubscriber for the entire lifetime of the HTTP connection.
+        java.util.concurrent.atomic.AtomicReference<org.reactivestreams.Subscriber<?>> pinnedReceiver =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Mono<String> fluxReceiveLike = new Mono<>() {
+            @Override
+            public void subscribe(reactor.core.CoreSubscriber<? super String> actual) {
+                pinnedReceiver.set(actual);
+                actual.onSubscribe(reactor.core.publisher.Operators.emptySubscription());
+                actual.onNext("body");
+                actual.onComplete();
+            }
+        };
+
+        WeakReference<byte[]> downstreamPayloadRef = subscribeWithPinnedDownstream(fluxReceiveLike);
+        assertThat(pinnedReceiver.get()).isNotNull();
+
+        boolean collected = false;
+        for (int i = 0; i < 30; i++) {
+            System.gc();
+            if (downstreamPayloadRef.get() == null) {
+                collected = true;
+                break;
+            }
+            Thread.sleep(20);
+        }
+        assertThat(collected)
+                .as("Downstream flatMap payload must become GC-eligible even when upstream publisher pins its subscriber")
+                .isTrue();
+    }
+
+    private WeakReference<byte[]> subscribeWithPinnedDownstream(Mono<String> fluxReceiveLike) {
+        byte[] arenaBytes = new byte[256 * 1024];
+        WeakReference<byte[]> ref = new WeakReference<>(arenaBytes);
+        DetachUpstreamOperator.detach(fluxReceiveLike)
+                .flatMap(ignored -> Mono.fromCallable(() -> arenaBytes.length))
+                .subscribe();
+        return ref;
+    }
+
+    @Test
     void propagatesCancellationToUpstreamBeforeEmission() {
         AtomicBoolean cancelled = new AtomicBoolean(false);
         Mono<String> upstream = Mono.<String>never().doOnCancel(() -> cancelled.set(true));

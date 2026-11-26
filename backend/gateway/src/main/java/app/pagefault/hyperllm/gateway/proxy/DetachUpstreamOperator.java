@@ -50,7 +50,7 @@ final class DetachUpstreamOperator {
         private static final AtomicReferenceFieldUpdater<DetachingSubscriber, Subscription> UPSTREAM =
                 AtomicReferenceFieldUpdater.newUpdater(DetachingSubscriber.class, Subscription.class, "upstream");
 
-        private final CoreSubscriber<? super T> actual;
+        private volatile CoreSubscriber<? super T> actual;
         private volatile Subscription upstream;
         private volatile boolean cancelled;
         private boolean done;
@@ -61,51 +61,61 @@ final class DetachUpstreamOperator {
 
         @Override
         public Context currentContext() {
-            return actual.currentContext();
+            CoreSubscriber<? super T> a = this.actual;
+            return a != null ? a.currentContext() : Context.empty();
         }
 
         @Override
         public void onSubscribe(Subscription s) {
-            if (Operators.setOnce(UPSTREAM, this, s)) {
-                actual.onSubscribe(this);
+            CoreSubscriber<? super T> a = this.actual;
+            if (a != null && Operators.setOnce(UPSTREAM, this, s)) {
+                a.onSubscribe(this);
             }
         }
 
         @Override
         public void onNext(T value) {
-            if (done) {
-                Operators.onNextDropped(value, actual.currentContext());
+            CoreSubscriber<? super T> a = this.actual;
+            if (done || a == null) {
+                Operators.onNextDropped(value, a != null ? a.currentContext() : Context.empty());
                 return;
             }
             done = true;
-            // Clear the upward subscription pointer BEFORE forwarding downstream so any long-lived
-            // downstream flatMap inner cannot reach the upstream subscriber chain.
+            // Clear BOTH upward and downward references BEFORE forwarding downstream:
+            // - upstream = null prevents a long-lived downstream flatMap from pinning upstream state
+            // - actual = null prevents a long-lived upstream publisher (like Netty's FluxReceive on
+            //   HttpServerOperations) from pinning downstream flatMap closures across the response stream.
             UPSTREAM.lazySet(this, null);
-            actual.onNext(value);
+            this.actual = null;
+            a.onNext(value);
             if (!cancelled) {
-                actual.onComplete();
+                a.onComplete();
             }
         }
 
         @Override
         public void onError(Throwable t) {
-            if (done) {
-                Operators.onErrorDropped(t, actual.currentContext());
+            CoreSubscriber<? super T> a = this.actual;
+            if (done || a == null) {
+                Operators.onErrorDropped(t, a != null ? a.currentContext() : Context.empty());
                 return;
             }
             done = true;
             UPSTREAM.lazySet(this, null);
-            actual.onError(t);
+            this.actual = null;
+            a.onError(t);
         }
 
         @Override
         public void onComplete() {
-            if (done) {
+            CoreSubscriber<? super T> a = this.actual;
+            if (done || a == null) {
                 return;
             }
             done = true;
             UPSTREAM.lazySet(this, null);
-            actual.onComplete();
+            this.actual = null;
+            a.onComplete();
         }
 
         @Override
@@ -122,6 +132,7 @@ final class DetachUpstreamOperator {
         @Override
         public void cancel() {
             cancelled = true;
+            this.actual = null;
             Subscription s = UPSTREAM.getAndSet(this, null);
             if (s != null && s != Operators.cancelledSubscription()) {
                 s.cancel();

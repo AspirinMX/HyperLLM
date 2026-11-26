@@ -25,14 +25,30 @@ public final class RequestByteArena {
     private static final byte[] EMPTY_BYTES = new byte[0];
     public static final RequestByteArena EMPTY = new RequestByteArena(EMPTY_BYTES, null, 0);
 
-    private final byte[] contiguous;
-    private final byte[][] pages;
+    private byte[] contiguous;
+    private byte[][] pages;
     private final int totalBytes;
 
     private RequestByteArena(byte[] contiguous, byte[][] pages, int totalBytes) {
         this.contiguous = contiguous;
         this.pages = pages;
         this.totalBytes = totalBytes;
+    }
+
+    /**
+     * Releases backing byte arrays held by this arena once parsing has completed.
+     *
+     * <p>Zero-copy slices inside {@link CanonicalRequest} keep their own direct references to the
+     * underlying {@code byte[]} for the duration of the pre-first-byte retry window; clearing the
+     * arena ensures no upstream reactive closure (such as {@code Mono.fromCallable}) can keep the
+     * raw payload pinned after {@link RequestIrHolder#release()} drops the IR.
+     */
+    public void clear() {
+        if (this == EMPTY) {
+            return;
+        }
+        this.contiguous = null;
+        this.pages = null;
     }
 
     public static RequestByteArena readFrom(DataBuffer dataBuffer) {

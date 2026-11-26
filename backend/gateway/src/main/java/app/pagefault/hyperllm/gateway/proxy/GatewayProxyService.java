@@ -412,7 +412,11 @@ public class GatewayProxyService {
             InboundRequestContext inboundContext
     ) {
         int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
-        return DataBufferUtils.join(exchange.getRequest().getBody(), maxInMemoryBytes)
+        // Detach immediately after DataBufferUtils.join completes so Netty's long-lived
+        // HttpServerOperations -> FluxReceive cannot pin the downstream flatMap/Callable chain
+        // (and RequestByteArena) for the duration of a streaming response.
+        return DetachUpstreamOperator.detach(
+                        DataBufferUtils.join(exchange.getRequest().getBody(), maxInMemoryBytes))
                 .onErrorMap(DataBufferLimitException.class, ex -> new ResponseStatusException(
                         HttpStatus.PAYLOAD_TOO_LARGE, "Request body exceeds maximum allowed size", ex))
                 .flatMap(dataBuffer -> {
@@ -427,7 +431,8 @@ public class GatewayProxyService {
                         return Mono.just(parseAndSummarize(protocolKind, arena, inboundContext));
                     }
                     return Mono.fromCallable(() -> parseAndSummarize(protocolKind, arena, inboundContext))
-                            .subscribeOn(protocolTranslationScheduler);
+                            .subscribeOn(protocolTranslationScheduler)
+                            .doFinally(sig -> arena.clear());
                 })
                 .switchIfEmpty(Mono.fromSupplier(() ->
                         parseAndSummarize(protocolKind, RequestByteArena.EMPTY, inboundContext)));
@@ -448,7 +453,13 @@ public class GatewayProxyService {
     ) {
         // Single authoritative parse of the downstream body: every later decision
         // (routing, admission, billing, outbound bytes) derives from this IR graph.
-        CanonicalRequest request = arena.parse(protocolTranslator, protocolKind, inboundContext);
+        int rawBytes = arena.size();
+        CanonicalRequest request;
+        try {
+            request = arena.parse(protocolTranslator, protocolKind, inboundContext);
+        } finally {
+            arena.clear();
+        }
         int estimatedPromptTokens = tokenEstimator.estimatePromptTokens(request);
         int estimatedEncodedBytes = CodecSupport.estimateEncodedCapacity(request);
         StreamRequestMetadata streamMeta = StreamRequestMetadata.fromCanonical(request, estimatedPromptTokens);
@@ -460,7 +471,7 @@ public class GatewayProxyService {
                 streamMeta,
                 estimatedPromptTokens,
                 estimatedEncodedBytes,
-                arena.size()
+                rawBytes
         );
     }
 
