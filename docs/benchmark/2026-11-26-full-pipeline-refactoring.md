@@ -14,6 +14,7 @@
   - 此前 3,000 并发即打满 5g 堆（TTFT P99 `1,917 ms`，2 次 Full GC）；重构后 3,000 并发 **0 Full GC、TTFT P99 `943.3 ms`（−50.8%）**；
   - 新增 **3,500 并发** 档位在 4C ARM64 + 5g 堆直接稳过（G1：`295.85 RPS`、TTFT P99 `1,116.0 ms`、0 Full GC；Generational ZGC：**`311.32 RPS`、`124,838 SSE 帧/s`、`624,190 OutTPS`、全周期 STW 仅 `2 ms`、全流 P99 `12.02 s`**），此时压测机 `mock-upstream` CPU 已达 `87.9%`，逼近单机 harness 上限。
 - **跨协议零额外代价**：Anthropic Messages → OpenAI Chat 在 `2,000 / 3,000` 并发下吞吐与延迟与同协议完全持平（`3,000` 并发：`278.20 RPS`、TTFT P50 `673.9 ms` / P99 `943.8 ms`、0 Full GC）。
+- **x86 4 vCPU（2 物理核 × 2 HT）/ 6g 堆稳态突破 5,000 并发（较基线 +56.3%）**：此前 Intel Xeon Platinum 8372C 在 8g 堆上稳态上限 3,200（3,800 即 Full GC）、10g 堆 4,000 并发 TTFT P99 飙到 `2,501 ms` + Full GC；重构后仅用 **6g 堆**，`4,000` 并发 TTFT P99 降至 **`894.0 ms`（−64.3%）**，**`5,000` 并发 0 错误、TTFT P99 `1,103.7 ms`、老年代仅 `244 MB`、0 Full / 0 Mixed / 0 Concurrent GC**（甚至压到 7,000 并发仍 0 错误、0 Full GC、老年代 318 MB，仅受 2 物理核 ~142k 帧/s CPU 平台排队限制）。
 
 ---
 
@@ -125,24 +126,51 @@
 
 ---
 
-## 七、当前瓶颈判断与后续建议
+## 七、第二台机器（x86 Intel Xeon Platinum 8372C）5,000 并发复测
 
-1. **内存与 GC 已不再是瓶颈**：3,500 并发下老年代仅 171 MB（占 5g 堆 3.3%），GC 停顿占比 <0.7%（ZGC <0.003%）。相同内存预算下，网关在内存维度具备支撑 **>10,000 并发长流** 的余量。
-2. **当前 4C 上限由内核网络收发 + 事件循环 CPU 决定**：`c3500` 时网关 4 核 `sut_busy = 93.4% ~ 94.7%`（且单机 `mock-upstream` 2 核已达 `87.9%`），进一步提升单机并发上限主要依赖更多 CPU 核心或独立发压机验证 SSE 帧合并窗口（`-Dgateway.stream.coalesce-window-ms=12`）在高帧率上游下的 `writev` 降幅。
-3. **小堆部署可行性**：由于 3,000 并发真实存活集仅 153 MB，生产环境可显著下调单副本 JVM 堆配额（例如 2g–3g 即可充裕承接 3,000 并发），提升容器密布度。
+在另一台 8 vCPU x86 机器上（`VM-16-11-debian` / `Intel Xeon Platinum 8372C @ 3.20GHz`，**4 物理核 × 2 HT = 8 vCPU** / 15 GiB RAM / 内核 `6.12.115+deb13.1-amd64`）复现与 [2026-11-26-frame-path-optimizations.md](./2026-11-26-frame-path-optimizations.md) 第八节完全一致的核布局与上游形状：
+- 核拓扑（`lscpu -e` 实测）：网关绑定 `0-3`（**独占 2 颗完整物理核 × 2 HT**，`-XX:ActiveProcessorCount=4 -Xms6g -Xmx6g -XX:+UseG1GC`，`nettyEpoll=true`、`upstreamMaxConnPerProvider=10000`）；infra 核 `4`；`mock-upstream` 核 `5-6`；`loadgen` 核 `7`。
+- 下列所有档位均满足 **0 错误、`%steal = 0.00`、`in-flight maintained = 100%`、`valid = yes`**。
+
+| 并发 | 版本 / 堆 | RPS | 入站 / SSE 帧率 | TTFT P50 / P99 (ms) | StreamTPS P50 | YGC / 暂停 | Full / Mixed / Conc | 老年代峰值 (MB) | Direct (MB) | 网关 CPU | mock CPU |
+| --: | :-- | --: | --: | --: | --: | --: | :--: | --: | --: | --: | --: |
+| 3,000 | 基线 x86 (8g) | 270.3 | — | 643 / 1,117 | — | 42 / 3,646 ms | 0 / — / — | 7,162（堆峰） | — | 85.7% | — |
+| **3,000** | **重构后 (6g)** | 255.10 | 97.6 MB/s / 102.3k/s | **587.6 / 881.4** | 183.8 | **8 / 565 ms** | 0 / 4 / 2 | **288** | 48.8 | 86.0% | 60.4% |
+| 3,800 | 基线 x86 (8g) | 318.6 | — | 960 / 1,946 | — | 60 / 4,691 ms | **1 (511ms)** | **8,191（满）** | — | 89.1% | — |
+| 4,000 | 基线 x86 (10g) | 333.9 | — | 1,092 / 2,501 | — | 53 / 4,942 ms | **1 (601ms)** | 9,283（堆峰） | — | 89.6% | — |
+| **4,000** | **重构后 (6g)** | **349.87** | **133.8 MB/s / 140.3k/s** | **646.7 / 894.0** | **188.9** | **9 / 647 ms** | **0 / 0 / 0** | **234** | 52.8 | 87.8% | 80.6% |
+| **4,500** | **重构后 (6g)** | **350.72** | **134.2 MB/s / 140.6k/s** | **695.8 / 1,029.0** | 173.7 | **9 / 724 ms** | **0 / 0 / 0** | **241** | 44.8 | 89.6% | 85.3% |
+| **5,000** | **重构后 (6g)** | **353.97** | **135.4 MB/s / 141.9k/s** | **716.6 / 1,103.7** | 156.9 | **10 / 833 ms** | **0 / 0 / 0** | **244** | 48.8 | 89.9% | 86.5% |
+| 6,000* | 重构后 (6g) | 338.80 | 129.6 MB/s / 135.9k/s | 800.1 / 1,412.3 | 131.9 | 10 / 1,105 ms | 0 / — / — | 245 | 64.8 | 91.4% | 88.4% |
+| 7,000* | 重构后 (6g) | 333.72 | 127.7 MB/s / 133.8k/s | 866.7 / 1,569.1 | 114.0 | 10 / 1,212 ms | 0 / — / — | 318 | 40.8 | 92.4% | 89.9% |
+
+> `*` `6,000 / 7,000` 档在 0 错误、0 Full GC、老年代仅 245–318 MB 下仍可跑完，但受 2 物理核 ~354 RPS / ~142k 帧/s 吞吐平台限制，单流速率下降且 TTFT P99 超过 1.4s，不作为稳态推荐容量。
+
+结论：
+- **4,000 并发是舒适黄金档**：相比此前 10g 堆的 4,000 并发，堆减小 4 GB 的同时 TTFT P99 从 `2,501 ms` 暴降至 **`894.0 ms`（−64.3%）**，YGC 从 53 次降至 **9 次（−83%）**，Full GC 从 1 次归零，老年代仅 **234 MB**；
+- **5,000 并发是该 4 vCPU（2 物理核）x86 节点的可用稳态上限**：比重构前 3,200 并发提升 **+56.3%**，吞吐达 **`353.97 RPS` / `141,941 SSE 帧/s` / `709,703 OutTPS`**，TTFT P99 仍压在 **`1,103.7 ms`**（低于重构前 3,000 并发的 `1,117 ms`），老年代仅 **244 MB**，**0 Full / 0 Mixed / 0 Concurrent GC**。
 
 ---
 
-## 八、复现命令与原始数据
+## 八、当前瓶颈判断与后续建议
+
+1. **内存与 GC 已不再是瓶颈**：ARM64 3,500 并发老年代仅 171 MB，x86 5,000 并发老年代仅 244 MB（7,000 并发也仅 318 MB），GC 停顿占比 <0.9%（ZGC <0.003%）。内存维度已不再制约高并发扩展。
+2. **当前上限完全由物理 CPU 核数（内核网络收发 + 事件循环）决定**：ARM64 4C 约 `311 RPS / 125k 帧/s`（3,500 并发），x86 2 物理核（4 HT vCPU）约 `354 RPS / 142k 帧/s`（4,000–5,000 并发）；若分配更多物理核或用独立发压机验证 SSE 帧合并窗口（`-Dgateway.stream.coalesce-window-ms=12`），可进一步线性抬高吞吐上限。
+3. **小堆部署可行性**：由于 3,000 并发真实存活集仅 153 MB、5,000 并发老年代仅 244 MB，生产环境可显著下调单副本 JVM 堆配额（如 2g–4g），大幅提高单机部署密度。
+
+---
+
+## 九、复现命令与原始数据
 
 ```bash
-# 1. 启动网关（G1GC 默认；切换 Generational ZGC 仅需 GATEWAY_GC=zgc）
-GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=5g GATEWAY_GC=g1 \
+# 1. 启动网关（G1GC 默认；切换 Generational ZGC 仅需 GATEWAY_GC=zgc；5,000+ 并发需调高单上游连接池上限）
+GATEWAY_PORT=18081 GATEWAY_CPUS=0-3 GATEWAY_CPU_COUNT=4 GATEWAY_HEAP=6g GATEWAY_GC=g1 \
+  HYPERLLM_UPSTREAM_MAX_CONNECTIONS_PER_PROVIDER=10000 \
   ./benchmark/scripts/run-gateway.sh
 
-# 2. 同协议流式高并发扫描
-TARGET=http://127.0.0.1:18081 CONCURRENCIES="2000 3000 3500" MODES=stream PAIRS=same \
-  TAG=refactor-g1v2-same ./benchmark/scripts/run-suite.sh
+# 2. 同协议流式高并发扫描（ARM64 5g / x86 6g）
+TARGET=http://127.0.0.1:18081 CONCURRENCIES="3000 4000 4500 5000" MODES=stream PAIRS=same \
+  TAG=x86-g1-sweep ./benchmark/scripts/run-suite.sh
 
 # 3. 跨协议流式扫描（Anthropic Messages -> OpenAI Chat）
 TARGET=http://127.0.0.1:18081 CONCURRENCIES="2000 3000" MODES=stream PAIRS=cross \
@@ -155,9 +183,13 @@ TARGET=http://127.0.0.1:18081 CONCURRENCIES="2000 3000 3500" MODES=stream PAIRS=
   TAG=refactor-zgc-full ./benchmark/scripts/run-suite.sh
 ```
 
-原始数据保留于压测机 `tp8tp6n2.pagefault.app`（不随仓库提交）：
-- `/opt/HyperLLM/benchmark/results/refactor-g1-same-20261126-202722/`（`6f27f90`，G1 5g 500–3500）
-- `/opt/HyperLLM/benchmark/results/refactor-g1-cross-20261126-203812/`（`6f27f90`，跨协议 G1 5g 2000–3000）
-- `/opt/HyperLLM/benchmark/results/refactor-g1v2-same-20261126-204823/`（`9e6d413`，G1 5g 2000–3500）
-- `/opt/HyperLLM/benchmark/results/refactor-zgc-full-20261126-205952/`（`9e6d413`，Generational ZGC 5g 2000–3500）
-- `/tmp/liveset-v2-hist.txt`（`9e6d413`，3,000 并发稳态 `jcmd GC.class_histogram`）
+原始数据保留于两台压测机（不随仓库提交）：
+- ARM64 (`tp8tp6n2.pagefault.app`)：
+  - `/opt/HyperLLM/benchmark/results/refactor-g1-same-20261126-202722/`（`6f27f90`，G1 5g 500–3500）
+  - `/opt/HyperLLM/benchmark/results/refactor-g1-cross-20261126-203812/`（`6f27f90`，跨协议 G1 5g 2000–3000）
+  - `/opt/HyperLLM/benchmark/results/refactor-g1v2-same-20261126-204823/`（`9e6d413`，G1 5g 2000–3500）
+  - `/opt/HyperLLM/benchmark/results/refactor-zgc-full-20261126-205952/`（`9e6d413`，Generational ZGC 5g 2000–3500）
+  - `/tmp/liveset-v2-hist.txt`（`9e6d413`，3,000 并发稳态 `jcmd GC.class_histogram`）
+- x86 (`110.40.188.131`)：
+  - `/opt/HyperLLM/benchmark/results/x86-g1-sweep-20261126-212210/`（`d9f3293`，G1 6g 3000–5000）
+  - `/opt/HyperLLM/benchmark/results/x86-g1-push-20261126-212902/`（`d9f3293`，G1 6g 6000–7000）
