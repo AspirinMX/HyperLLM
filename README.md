@@ -52,18 +52,18 @@
 
 ### Hetzner Cost-Optimized `CAX 31` (ARM64)
 
-- **Instance Configuration**: 8 vCPU ARM Neoverse-N1 / 16 GiB RAM (Gateway hard-isolated to 4 vCPU; `5 GiB` heap; meets 4C8G per-instance resource quota; `nettyEpoll=true`)
+- **Instance Configuration**: 8 vCPU ARM Neoverse-N1 / 16 GiB RAM (Gateway hard-isolated to 4 vCPU; `5 GiB` heap; meets 4C8G per-instance resource quota; `nettyEpoll=true`, Thread-per-Core shared Epoll + isolated Lettuce I/O, Rust benchmark harness)
 
-| Concurrency, Protocol Path & GC | `ΔTTFT` P50 / P99 (Gateway Overhead) | YGC / Total Pause | Full GC | Old Gen Peak | Gateway CPU |
-| :--- | --: | --: | --: | --: | --: |
-| 2,000 · OpenAI → OpenAI (G1) | +60.2 / +149.8 ms | 6 / 291 ms | **0** | 139 MB | 89.2% |
-| 2,000 · Anthropic → OpenAI (G1) | +59.3 / +156.3 ms | 5 / 239 ms | **0** | 137 MB | 89.0% |
-| 3,000 · OpenAI → OpenAI (G1) | +176.8 / +378.6 ms | 8 / 508 ms | **0** | 131 MB | 93.6% |
-| 3,000 · Anthropic → OpenAI (G1) | +174.6 / +370.0 ms | 8 / 487 ms | **0** | 141 MB | 93.3% |
-| **3,500 · OpenAI → OpenAI (G1)** | **+262.5 / +512.8 ms** | **9 / 652 ms** | **0** | **134 MB** | **94.4%** |
-| **3,500 · Anthropic → OpenAI (G1)** | **+255.5 / +532.5 ms** | **10 / 659 ms** | **0** | **144 MB** | **94.6%** |
+| Concurrency, Protocol Path & GC | RPS / Frame Rate | `ΔTTFT` P50 / P99 (Gateway Overhead) | YGC / Total Pause | Full GC | Old Gen Peak | Gateway CPU |
+| :--- | --: | --: | --: | --: | --: | --: |
+| 3,000 · Anthropic → OpenAI (G1) | 275.70 / 110.3k fps | +157.7 / +380.5 ms *(warmed +143.4/+237.6)* | 9 / 587 ms | **0** | **91 MB** | 94.3% |
+| 3,500 · Anthropic → OpenAI (G1) | 318.80 / 127.5k fps | +182.6 / +315.9 ms | 10 / 671 ms | **0** | **96 MB** | 94.5% |
+| **4,000 · Anthropic → OpenAI (G1)** | **360.92 / 144.4k fps** | **+234.4 / +398.8 ms** | **11 / 811 ms** | **0** | **99 MB** | **95.2%** |
+| 5,000* · Anthropic → OpenAI (G1, burst peak) | 384.02 / 153.6k fps | +357.1 / +608.1 ms | 13 / 1,227 ms | **0** | 337 MB | 96.7% |
 
-> See the full benchmark suite ([`docs/benchmark/README.md`](./docs/benchmark/README.md)) for the 6-version ARM64 optimization evolution (`V0 → V4`, 43 scenarios), 30 verbatim `async-profiler` HTML flamegraphs (CPU / Alloc / Lock), 7 SVG charts, 3,000-stream live-set audit, and G1GC vs Generational ZGC analysis.
+> `*` On Hetzner `CAX 31` (4 vCPU Neoverse-N1), **4,000 concurrent streams** is the full-rate steady-state sweet spot (`StreamTPS P50 = 195.6 tok/s`, Old Gen `99 MB`); above 4,000 this instance hits its `~153.6k fps` hardware throughput ceiling while still sustaining **5,000 concurrent streams** with zero errors and zero Full GCs.
+>
+> See the full benchmark suite ([`docs/benchmark/README.md`](./docs/benchmark/README.md)) and the V5 P0 deep-dive ([`04-v5-p0-optimization-and-reflections.md`](./docs/benchmark/04-v5-p0-optimization-and-reflections.md)) for the full `V0 → V5` ARM64 evolution (49 scenarios), 33 verbatim `async-profiler` HTML flamegraphs (CPU / Alloc / Lock), 7 SVG charts, 3,000-stream live-set audit, and G1GC vs Generational ZGC analysis.
 
 ## Quickstart
 
@@ -151,7 +151,7 @@ curl http://localhost:8080/v1/messages \
 - **[Newcomer Takeover & Onboarding Handbook](./docs/onboarding/README.md)** — 8-lesson guide covering local setup, architecture invariants, storage model, gateway lifecycle, Redis authority and Lua scripts, control planes, frontend BFF patterns, and troubleshooting runbooks.
 - **[OpenAPI 3.1 Specifications](./docs/openapi/README.md)** — machine-readable contracts for Swagger UI, Postman, and TypeScript SDK generation: [Gateway](./docs/openapi/gateway-api.yaml) · [Console](./docs/openapi/console-api.yaml) · [Admin](./docs/openapi/admin-api.yaml).
 - **[Benchmark & Load-Testing Suite](./benchmark/README.md)** — how to run reproducible CPU-isolated load tests and capture `async-profiler` flamegraphs.
-- **[Performance Benchmark & Evolution Reports](./docs/benchmark/README.md)** — 6-version ARM64 optimization evolution (`V0 → V4`, 43 scenarios), 30 verbatim `async-profiler` HTML flamegraphs (CPU / Alloc / Lock), 7 SVG charts, live-set audit, G1GC vs Generational ZGC, and dual-host capacity comparison across Hetzner `CAX 31` (ARM64) and Tencent Cloud `C6.2XLARGE16` (x86_64).
+- **[Performance Benchmark & Evolution Reports](./docs/benchmark/README.md)** — full ARM64 optimization evolution (`V0 → V5`, 49 scenarios), 33 verbatim `async-profiler` HTML flamegraphs (CPU / Alloc / Lock), 7 SVG charts, live-set audit, G1GC vs Generational ZGC, V5 P0 deep-dive ([`04-v5-p0-optimization-and-reflections.md`](./docs/benchmark/04-v5-p0-optimization-and-reflections.md)), and dual-host capacity comparison across Hetzner `CAX 31` (ARM64, 4,000 steady-state / 5,000 peak) and Tencent Cloud `C6.2XLARGE16` (x86_64, 5,000 steady-state).
 
 ## Contributing & License
 

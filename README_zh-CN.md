@@ -36,7 +36,7 @@
 
 ## 性能压测
 
-**网关在 4C8G 单机部署下，保证 200 token/s 的输出速度和 500 ms TTFT 情况下，可稳定维持 5,000 个并发 SSE 连接**
+**网关在 4C8G 单机部署下，保证 200 token/s 的输出速度和 500 ms TTFT 情况下，可稳定维持 5,000 个并发 SSE 连接。**
 
 > 因为网关未区分同协议/跨协议路径，所有经过网关的请求一律转为中间级表示，再请求上游（出于安全考虑），所以下述同协议测量结果与跨协议测量结果相差不大。
 
@@ -54,18 +54,18 @@
 
 ### Hetzner Cost-Optimized `CAX 31`（ARM64）
 
-- **机型配置**：8 vCPU ARM Neoverse-N1 / 16 GiB 内存（网关硬隔离 4 vCPU，`5 GiB` 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`）
+- **机型配置**：8 vCPU ARM Neoverse-N1 / 16 GiB 内存（网关硬隔离 4 vCPU，`5 GiB` 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`，Thread-per-Core 共享 Epoll + Lettuce 独立 I/O 隔离，Rust 压测套件）
 
-| 并发、协议路径与 GC | `ΔTTFT` P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
-| :--- | --: | --: | --: | --: | --: |
-| 2,000 · OpenAI → OpenAI（G1） | +60.2 / +149.8 ms | 6 / 291 ms | **0** | 139 MB | 89.2% |
-| 2,000 · Anthropic → OpenAI（G1） | +59.3 / +156.3 ms | 5 / 239 ms | **0** | 137 MB | 89.0% |
-| 3,000 · OpenAI → OpenAI（G1） | +176.8 / +378.6 ms | 8 / 508 ms | **0** | 131 MB | 93.6% |
-| 3,000 · Anthropic → OpenAI（G1） | +174.6 / +370.0 ms | 8 / 487 ms | **0** | 141 MB | 93.3% |
-| **3,500 · OpenAI → OpenAI（G1）** | **+262.5 / +512.8 ms** | **9 / 652 ms** | **0** | **134 MB** | **94.4%** |
-| **3,500 · Anthropic → OpenAI（G1）** | **+255.5 / +532.5 ms** | **10 / 659 ms** | **0** | **144 MB** | **94.6%** |
+| 并发、协议路径与 GC | RPS / 帧率 | `ΔTTFT` P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
+| :--- | --: | --: | --: | --: | --: | --: |
+| 3,000 · Anthropic → OpenAI（G1） | 275.70 / 110.3k fps | +157.7 / +380.5 ms *(充分预热 +143.4/+237.6)* | 9 / 587 ms | **0** | **91 MB** | 94.3% |
+| 3,500 · Anthropic → OpenAI（G1） | 318.80 / 127.5k fps | +182.6 / +315.9 ms | 10 / 671 ms | **0** | **96 MB** | 94.5% |
+| **4,000 · Anthropic → OpenAI（G1）** | **360.92 / 144.4k fps** | **+234.4 / +398.8 ms** | **11 / 811 ms** | **0** | **99 MB** | **95.2%** |
+| 5,000* · Anthropic → OpenAI（G1，吞吐峰值） | 384.02 / 153.6k fps | +357.1 / +608.1 ms | 13 / 1,227 ms | **0** | 337 MB | 96.7% |
 
-> 完整基准报告见 **[`docs/benchmark/README.md`](./docs/benchmark/README.md)**，包含 ARM64 六代版本（`V0 → V4`，43 场景）完整演进、30 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计及 G1GC vs Generational ZGC 对比。
+> `*` 在 Hetzner `CAX 31`（4 vCPU Neoverse-N1）上，**4,000 并发**为全速稳态推荐上限（`StreamTPS P50 = 195.6 tok/s`，老年代仅 `99 MB`）；超过 4,000 后该机型触发 `~153.6k fps` CPU 吞吐硬顶，但仍可在 **5,000 并发**下保持 `0 错误 / 0 Full GC` 稳定跑通。
+>
+> 完整基准报告见 **[`docs/benchmark/README.md`](./docs/benchmark/README.md)** 与 V5 深度复盘 **[`04-v5-p0-optimization-and-reflections.md`](./docs/benchmark/04-v5-p0-optimization-and-reflections.md)**，包含 ARM64 七代版本（`V0 → V5`，49 场景）完整演进、33 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计及 G1GC vs Generational ZGC 对比。
 
 ## 快速开始
 
@@ -153,7 +153,7 @@ curl http://localhost:8080/v1/messages \
 - **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook。
 - **[OpenAPI 3.1 接口契约文档](./docs/openapi/README.md)** — 可直接导入 Swagger UI / Postman / `openapi-typescript` 的标准规范：[Gateway 数据面](./docs/openapi/gateway-api.yaml) · [Console 开发者控制面](./docs/openapi/console-api.yaml) · [Admin 运营控制面](./docs/openapi/admin-api.yaml)。
 - **[压测与火焰图剖析套件](./benchmark/README.md)** — 如何在核隔离环境下复现网关压力测试并抓取 `async-profiler` 火焰图。
-- **[性能基准与六代演进报告](./docs/benchmark/README.md)** — ARM64（Hetzner `CAX 31`）六代版本全演进（`V0 → V4`，43 场景）、30 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计、G1GC vs Generational ZGC 对比及腾讯云 `C6.2XLARGE16`（x86_64）5,000 并发容量边界报告。
+- **[性能基准与七代演进报告](./docs/benchmark/README.md)** — Hetzner `CAX 31`（ARM Neoverse-N1）七代版本全演进（`V0 → V5`，49 场景）、33 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计、G1GC vs Generational ZGC 对比、V5 P0 深度复盘（[`04-v5-p0-optimization-and-reflections.md`](./docs/benchmark/04-v5-p0-optimization-and-reflections.md)）及双机容量边界报告（Hetzner `CAX 31` 4,000 稳态 / 5,000 峰值，腾讯云 `C6.2XLARGE16` 5,000 稳态）。
 
 ## 参与贡献与开源协议
 
