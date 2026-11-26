@@ -2,6 +2,7 @@ package app.pagefault.hyperllm.protocol.codec;
 
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CacheControl;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
@@ -22,13 +23,16 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
-import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
+import app.pagefault.hyperllm.protocol.ir.JsonUtf8Text;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
+import app.pagefault.hyperllm.protocol.ir.ValidatedJsonObject;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -39,6 +43,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -77,8 +82,13 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
-            return decodeStreamingRoot(parser, context);
+        return decodeRequest(rawBody, 0, rawBody != null ? rawBody.length : 0, context);
+    }
+
+    @Override
+    public CanonicalRequest decodeRequest(byte[] rawBody, int offset, int length, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody, offset, length)) {
+            return decodeStreamingRoot(parser, context, rawBody, offset, offset + length);
         } catch (HyperLlmException ex) {
             throw ex;
         } catch (IOException ex) {
@@ -87,19 +97,18 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     }
 
     @Override
-    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        return writeRequest(req, context).toExactByteArray();
+    public CanonicalRequest decodeRequest(InputStream bodyStream, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, bodyStream)) {
+            return decodeStreamingRoot(parser, context, null, 0, 0);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
     }
 
     @Override
-    public PreparedUpstreamPayload encodeRequestPayload(CanonicalRequest req, UpstreamEncodingContext context) {
-        CodecSupport.ResizableByteBuffer out = writeRequest(req, context);
-        return PreparedUpstreamPayload.ofSlice(ProtocolKind.ANTHROPIC_MESSAGES, out.backingArray(), out.length());
-    }
-
-    private CodecSupport.ResizableByteBuffer writeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
-                CodecSupport.estimateEncodedCapacity(req));
+    public void encodeRequest(CanonicalRequest req, UpstreamEncodingContext context, ByteSink out) {
         try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
             gen.writeStartObject();
             String upstreamModel = context.upstreamModelName() != null && !context.upstreamModelName().isBlank()
@@ -148,7 +157,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             boolean hasSystem = addJsonHint;
             if (!hasSystem) {
                 for (CanonicalSystemPart sp : req.systemInstructions()) {
-                    if (!sp.text().isEmpty()) {
+                    if (!sp.isEmpty()) {
                         hasSystem = true;
                         break;
                     }
@@ -157,8 +166,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             if (hasSystem) {
                 gen.writeArrayFieldStart("system");
                 for (CanonicalSystemPart sp : req.systemInstructions()) {
-                    if (!sp.text().isEmpty()) {
-                        writeTextBlock(gen, sp.text(), sp.cacheControl());
+                    if (!sp.isEmpty()) {
+                        writeTextBlock(gen, sp.utf8Text(), sp.cacheControl());
                     }
                 }
                 if (addJsonHint) {
@@ -229,12 +238,17 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize Anthropic Messages request JSON", ex);
         }
-        return out;
     }
 
-    // ---- Streaming request decoding (zero inbound DOM tree for large messages[]) ----
+    // ---- Streaming request decoding (zero inbound DOM tree for system[], messages[], tools[]) ----
 
-    private CanonicalRequest decodeStreamingRoot(JsonParser parser, InboundRequestContext context) throws IOException {
+    private CanonicalRequest decodeStreamingRoot(
+            JsonParser parser,
+            InboundRequestContext context,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         String model = null;
         Integer parsedMaxTokens = null;
         boolean stream = false;
@@ -243,9 +257,9 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         List<CanonicalSystemPart> systemParts = new ArrayList<>();
         List<CanonicalSystemPart> leadingMsgSystemParts = new ArrayList<>();
         List<CanonicalTurn> turns = new ArrayList<>();
+        List<CanonicalToolDefinition> tools = new ArrayList<>();
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
 
-        JsonNode toolsNode = null;
         JsonNode toolChoiceNode = null;
         JsonNode outputConfigNode = null;
         JsonNode thinkingNode = null;
@@ -289,19 +303,22 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                         parser.skipChildren();
                     }
                 }
-                case "system" -> {
-                    JsonNode sysNode = mapper.readTree(parser);
-                    systemParts.addAll(decodeSystem(sysNode, false));
-                }
+                case "system" -> readStreamingSystem(parser, rawBacking, baseOffset, endOffset, systemParts);
                 case "messages" -> {
                     if (valTok == JsonToken.START_ARRAY) {
                         hasMessagesArray = true;
-                        readStreamingMessages(parser, leadingMsgSystemParts, turns, unsupported);
+                        readStreamingMessages(parser, rawBacking, baseOffset, endOffset, leadingMsgSystemParts, turns, unsupported);
                     } else {
                         parser.skipChildren();
                     }
                 }
-                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "tools" -> {
+                    if (valTok == JsonToken.START_ARRAY) {
+                        readStreamingTools(parser, rawBacking, baseOffset, endOffset, tools, unsupported);
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
                 case "tool_choice" -> toolChoiceNode = mapper.readTree(parser);
                 case "output_config" -> outputConfigNode = mapper.readTree(parser);
                 case "thinking" -> thinkingNode = mapper.readTree(parser);
@@ -352,7 +369,6 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             systemParts.addAll(leadingMsgSystemParts);
         }
 
-        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
         CanonicalToolChoice toolChoice = decodeToolChoice(toolChoiceNode);
         CanonicalResponseFormat responseFormat = outputConfigNode != null
                 ? decodeOutputFormat(outputConfigNode.get("format")) : null;
@@ -369,14 +385,115 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 userId, serviceTier, null
         );
 
-        return new CanonicalRequest(
+        RequestMetrics metrics = TokenEstimator.computeRequestMetrics(systemParts, turns, tools);
+        return CanonicalRequest.ofOwned(
                 ProtocolKind.ANTHROPIC_MESSAGES, model.trim(), stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
+                generation, responseFormat, thinking, cache, options, unsupported, metrics
         );
+    }
+
+    private void readStreamingSystem(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalSystemPart> systemParts
+    ) throws IOException {
+        JsonToken tok = parser.currentToken();
+        if (tok == JsonToken.VALUE_STRING) {
+            systemParts.add(CanonicalSystemPart.ofUtf8(
+                    JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset), false, null));
+        } else if (tok == JsonToken.START_ARRAY) {
+            while (parser.nextToken() != JsonToken.END_ARRAY) {
+                JsonToken bt = parser.currentToken();
+                if (bt == JsonToken.VALUE_STRING) {
+                    systemParts.add(CanonicalSystemPart.ofUtf8(
+                            JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset), false, null));
+                } else if (bt == JsonToken.START_OBJECT) {
+                    JsonUtf8Text text = null;
+                    CacheControl cc = null;
+                    while (parser.nextToken() != JsonToken.END_OBJECT) {
+                        String sf = parser.currentName();
+                        JsonToken st = parser.nextToken();
+                        if ("text".equals(sf) && st == JsonToken.VALUE_STRING) {
+                            text = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
+                        } else if ("cache_control".equals(sf)) {
+                            cc = readStreamingCacheControl(parser);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    if (text != null) {
+                        systemParts.add(CanonicalSystemPart.ofUtf8(text, false, cc));
+                    }
+                } else {
+                    parser.skipChildren();
+                }
+            }
+        } else {
+            parser.skipChildren();
+        }
+    }
+
+    private void readStreamingTools(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalToolDefinition> out,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            String type = null;
+            String name = "";
+            String description = null;
+            ValidatedJsonObject inputSchema = null;
+            Boolean strict = null;
+            CacheControl cc = null;
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "type" -> type = CodecSupport.readNullableString(parser);
+                    case "name" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            name = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "description" -> description = CodecSupport.readNullableString(parser);
+                    case "input_schema" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            inputSchema = ValidatedJsonObject.readFromParser(
+                                    parser, mapper, rawBacking, baseOffset, endOffset);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "strict" -> strict = CodecSupport.readNullableBoolean(parser);
+                    case "cache_control" -> cc = readStreamingCacheControl(parser);
+                    default -> parser.skipChildren();
+                }
+            }
+            if (type != null && !type.isBlank() && !"custom".equals(type)) {
+                unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + type,
+                        "Anthropic built-in/server tool '" + type + "' cannot be translated across vendors"));
+                continue;
+            }
+            out.add(CanonicalToolDefinition.ofValidated(name, description, inputSchema, strict, cc));
+        }
     }
 
     private void readStreamingMessages(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<CanonicalSystemPart> leadingSystemParts,
             List<CanonicalTurn> turns,
             List<UnsupportedFeatureFlag> unsupported
@@ -388,7 +505,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 continue;
             }
             String roleStr = "user";
-            String plainText = null;
+            JsonUtf8Text plainText = null;
             List<CanonicalContentPart> blocks = null;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 String f = parser.currentName();
@@ -403,14 +520,14 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     }
                     case "content" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            plainText = parser.getText();
+                            plainText = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else if (t == JsonToken.START_ARRAY) {
-                            blocks = readStreamingContentBlocks(parser, unsupported);
+                            blocks = readStreamingContentBlocks(parser, rawBacking, baseOffset, endOffset, unsupported);
                         } else if (t == JsonToken.VALUE_NULL) {
                             // null content
                         } else {
                             JsonNode fallback = mapper.readTree(parser);
-                            plainText = fallback.toString();
+                            plainText = JsonUtf8Text.ofString(fallback.toString());
                         }
                     }
                     default -> parser.skipChildren();
@@ -422,31 +539,31 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     boolean devPriority = "developer".equals(roleStr);
                     if (!sawNonSystem) {
                         if (plainText != null) {
-                            leadingSystemParts.add(new CanonicalSystemPart(plainText, devPriority, null));
+                            leadingSystemParts.add(CanonicalSystemPart.ofUtf8(plainText, devPriority, null));
                         } else if (blocks != null) {
                             for (CanonicalContentPart p : blocks) {
                                 if (p instanceof CanonicalContentPart.TextPart tp) {
-                                    leadingSystemParts.add(new CanonicalSystemPart(tp.text(), devPriority, tp.cacheControl()));
+                                    leadingSystemParts.add(CanonicalSystemPart.ofUtf8(tp.utf8Text(), devPriority, tp.cacheControl()));
                                 }
                             }
                         }
                     } else {
                         List<CanonicalContentPart> parts = blocks != null ? blocks
-                                : (plainText != null ? List.of(new CanonicalContentPart.TextPart(plainText)) : List.of());
-                        turns.add(new CanonicalTurn(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
+                                : (plainText != null ? List.of(CanonicalContentPart.TextPart.ofUtf8(plainText)) : List.of());
+                        turns.add(CanonicalTurn.ofOwned(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
                     }
                 }
                 case "user" -> {
                     sawNonSystem = true;
                     List<CanonicalContentPart> parts = blocks != null ? blocks
-                            : (plainText != null ? List.of(new CanonicalContentPart.TextPart(plainText)) : List.of());
-                    turns.add(new CanonicalTurn(CanonicalRole.USER, parts));
+                            : (plainText != null ? List.of(CanonicalContentPart.TextPart.ofUtf8(plainText)) : List.of());
+                    turns.add(CanonicalTurn.ofOwned(CanonicalRole.USER, parts));
                 }
                 case "assistant" -> {
                     sawNonSystem = true;
                     List<CanonicalContentPart> parts = blocks != null ? blocks
-                            : (plainText != null ? List.of(new CanonicalContentPart.TextPart(plainText)) : List.of());
-                    turns.add(new CanonicalTurn(CanonicalRole.ASSISTANT, parts));
+                            : (plainText != null ? List.of(CanonicalContentPart.TextPart.ofUtf8(plainText)) : List.of());
+                    turns.add(CanonicalTurn.ofOwned(CanonicalRole.ASSISTANT, parts));
                 }
                 default -> throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
                         "Unsupported Anthropic role: " + roleStr);
@@ -456,13 +573,17 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
 
     private List<CanonicalContentPart> readStreamingContentBlocks(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<UnsupportedFeatureFlag> unsupported
     ) throws IOException {
         List<CanonicalContentPart> out = new ArrayList<>(4);
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             JsonToken t = parser.currentToken();
             if (t == JsonToken.VALUE_STRING) {
-                out.add(new CanonicalContentPart.TextPart(parser.getText()));
+                out.add(CanonicalContentPart.TextPart.ofUtf8(
+                        JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset)));
                 continue;
             }
             if (t != JsonToken.START_OBJECT) {
@@ -470,8 +591,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 continue;
             }
             String type = "";
-            String text = "";
-            String thinking = "";
+            JsonUtf8Text text = JsonUtf8Text.EMPTY;
+            JsonUtf8Text thinking = JsonUtf8Text.EMPTY;
             String signature = null;
             String data = "";
             String id = null;
@@ -479,8 +600,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             String toolUseId = null;
             boolean isError = false;
             CacheControl cc = null;
-            JsonNode inputNode = null;
-            String nestedPlainText = null;
+            ValidatedJsonObject validatedInput = null;
+            JsonUtf8Text nestedPlainText = null;
             List<CanonicalContentPart> nestedBlocks = null;
 
             // Image source fields (streamed without building an ObjectNode!)
@@ -503,14 +624,14 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     }
                     case "text" -> {
                         if (bt == JsonToken.VALUE_STRING) {
-                            text = parser.getText();
+                            text = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
                     }
                     case "thinking" -> {
                         if (bt == JsonToken.VALUE_STRING) {
-                            thinking = parser.getText();
+                            thinking = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -531,7 +652,14 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                             parser.skipChildren();
                         }
                     }
-                    case "input" -> inputNode = mapper.readTree(parser);
+                    case "input" -> {
+                        if (bt == JsonToken.START_OBJECT) {
+                            validatedInput = ValidatedJsonObject.readFromParser(
+                                    parser, mapper, rawBacking, baseOffset, endOffset);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
                     case "tool_use_id" -> toolUseId = CodecSupport.readNullableString(parser);
                     case "is_error" -> {
                         if (bt == JsonToken.VALUE_TRUE) {
@@ -544,11 +672,11 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     }
                     case "content" -> {
                         if (bt == JsonToken.VALUE_STRING) {
-                            nestedPlainText = parser.getText();
+                            nestedPlainText = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else if (bt == JsonToken.START_ARRAY) {
-                            nestedBlocks = readStreamingContentBlocks(parser, unsupported);
+                            nestedBlocks = readStreamingContentBlocks(parser, rawBacking, baseOffset, endOffset, unsupported);
                         } else if (bt != JsonToken.VALUE_NULL) {
-                            nestedPlainText = mapper.readTree(parser).toString();
+                            nestedPlainText = JsonUtf8Text.ofString(mapper.readTree(parser).toString());
                         }
                     }
                     case "cache_control" -> cc = readStreamingCacheControl(parser);
@@ -605,7 +733,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             }
 
             switch (type) {
-                case "text" -> out.add(new CanonicalContentPart.TextPart(text, cc));
+                case "text" -> out.add(CanonicalContentPart.TextPart.ofUtf8(text, cc));
                 case "image" -> {
                     CanonicalContentPart imgPart = switch (imgSrcType) {
                         case "base64" -> new CanonicalContentPart.ImagePart(
@@ -622,19 +750,17 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     };
                     out.add(imgPart);
                 }
-                case "thinking" -> out.add(new CanonicalContentPart.ThinkingPart(
+                case "thinking" -> out.add(CanonicalContentPart.ThinkingPart.ofUtf8(
                         thinking, signature, null, ProtocolKind.ANTHROPIC_MESSAGES));
                 case "redacted_thinking" -> out.add(new CanonicalContentPart.RedactedThinkingPart(
                         data, ProtocolKind.ANTHROPIC_MESSAGES));
-                case "tool_use" -> {
-                    ObjectNode inputObj = (inputNode instanceof ObjectNode o) ? o : mapper.createObjectNode();
-                    // Defer rawArgumentsJson stringification until needed by OpenAI encoders
-                    out.add(new CanonicalContentPart.ToolCallPart(
-                            id, null, name, inputObj, null, null, ProtocolKind.ANTHROPIC_MESSAGES));
-                }
+                case "tool_use" -> out.add(CanonicalContentPart.ToolCallPart.ofValidatedObjectArgs(
+                        id, null, name,
+                        validatedInput != null ? validatedInput : ValidatedJsonObject.EMPTY_OBJECT,
+                        null, ProtocolKind.ANTHROPIC_MESSAGES));
                 case "tool_result" -> {
                     List<CanonicalContentPart> nested = nestedBlocks != null ? nestedBlocks
-                            : (nestedPlainText != null ? List.of(new CanonicalContentPart.TextPart(nestedPlainText)) : List.of());
+                            : (nestedPlainText != null ? List.of(CanonicalContentPart.TextPart.ofUtf8(nestedPlainText)) : List.of());
                     out.add(new CanonicalContentPart.ToolResultPart(toolUseId, null, nested, isError, cc));
                 }
                 default -> unsupported.add(UnsupportedFeatureFlag.degradable("content_block:" + type,
@@ -1058,8 +1184,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 for (int k = i; k < groupEnd; k++) {
                     for (CanonicalContentPart p : turns.get(k).parts()) {
                         if (p instanceof CanonicalContentPart.TextPart t) {
-                            if (!t.text().isEmpty()) {
-                                writeTextBlock(gen, t.text(), t.cacheControl());
+                            if (!t.isEmpty()) {
+                                writeTextBlock(gen, t.utf8Text(), t.cacheControl());
                             }
                         } else if (p instanceof CanonicalContentPart.ImagePart img) {
                             writeImageBlock(gen, img);
@@ -1092,12 +1218,12 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                         }
                     }
                     case CanonicalContentPart.TextPart t -> {
-                        if (!t.text().isEmpty()) {
+                        if (!t.isEmpty()) {
                             return true;
                         }
                     }
                     case CanonicalContentPart.RefusalPart r -> {
-                        if (!r.refusal().isEmpty()) {
+                        if (!r.isEmpty()) {
                             return true;
                         }
                     }
@@ -1110,7 +1236,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             return false;
         }
         for (CanonicalContentPart p : turn.parts()) {
-            if (p instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty()) {
+            if (p instanceof CanonicalContentPart.TextPart t && !t.isEmpty()) {
                 return true;
             }
             if (p instanceof CanonicalContentPart.ImagePart || p instanceof CanonicalContentPart.ToolResultPart) {
@@ -1128,7 +1254,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                             && th.signature() != null && !th.signature().isBlank()) {
                         gen.writeStartObject();
                         gen.writeStringField("type", "thinking");
-                        gen.writeStringField("thinking", th.text());
+                        gen.writeFieldName("thinking");
+                        th.writeJsonValue(gen);
                         gen.writeStringField("signature", th.signature());
                         gen.writeEndObject();
                     }
@@ -1143,13 +1270,13 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     }
                 }
                 case CanonicalContentPart.TextPart t -> {
-                    if (!t.text().isEmpty()) {
-                        writeTextBlock(gen, t.text(), t.cacheControl());
+                    if (!t.isEmpty()) {
+                        writeTextBlock(gen, t.utf8Text(), t.cacheControl());
                     }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
-                    if (!r.refusal().isEmpty()) {
-                        writeTextBlock(gen, r.refusal(), null);
+                    if (!r.isEmpty()) {
+                        writeTextBlock(gen, r.utf8Text(), null);
                     }
                 }
                 case CanonicalContentPart.ToolCallPart tc -> {
@@ -1165,6 +1292,18 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 case CanonicalContentPart.ToolResultPart ignored -> {}
             }
         }
+    }
+
+    private void writeTextBlock(JsonGenerator gen, JsonUtf8Text text, CacheControl cc) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("type", "text");
+        gen.writeFieldName("text");
+        text.writeJsonValue(gen);
+        if (cc != null) {
+            gen.writeFieldName("cache_control");
+            CodecSupport.writeCacheControl(gen, cc);
+        }
+        gen.writeEndObject();
     }
 
     private void writeTextBlock(JsonGenerator gen, String text, CacheControl cc) throws IOException {
@@ -1216,11 +1355,12 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         if (children.isEmpty()) {
             gen.writeStringField("content", "");
         } else if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t) {
-            gen.writeStringField("content", t.text());
+            gen.writeFieldName("content");
+            t.writeJsonValue(gen);
         } else {
             boolean anyContent = false;
             for (CanonicalContentPart child : children) {
-                if ((child instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty())
+                if ((child instanceof CanonicalContentPart.TextPart t && !t.isEmpty())
                         || child instanceof CanonicalContentPart.ImagePart) {
                     anyContent = true;
                     break;
@@ -1232,8 +1372,8 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 gen.writeArrayFieldStart("content");
                 for (CanonicalContentPart child : children) {
                     if (child instanceof CanonicalContentPart.TextPart t) {
-                        if (!t.text().isEmpty()) {
-                            writeTextBlock(gen, t.text(), null);
+                        if (!t.isEmpty()) {
+                            writeTextBlock(gen, t.utf8Text(), null);
                         }
                     } else if (child instanceof CanonicalContentPart.ImagePart img) {
                         writeImageBlock(gen, img);
@@ -1266,11 +1406,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 gen.writeStringField("description", tool.description());
             }
             gen.writeFieldName("input_schema");
-            if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
-                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
-            } else {
-                CodecSupport.writeEmptyObjectSchema(gen);
-            }
+            tool.writeParametersSchema(gen, mapper);
             if (tool.strict() != null) {
                 gen.writeBooleanField("strict", tool.strict());
             }

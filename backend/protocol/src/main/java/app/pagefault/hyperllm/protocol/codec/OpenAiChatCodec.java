@@ -2,6 +2,7 @@ package app.pagefault.hyperllm.protocol.codec;
 
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -21,14 +22,17 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
+import app.pagefault.hyperllm.protocol.ir.JsonUtf8Text;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
-import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
+import app.pagefault.hyperllm.protocol.ir.ValidatedJsonObject;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -39,6 +43,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -69,8 +74,13 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
-            return decodeStreamingRoot(parser);
+        return decodeRequest(rawBody, 0, rawBody != null ? rawBody.length : 0, context);
+    }
+
+    @Override
+    public CanonicalRequest decodeRequest(byte[] rawBody, int offset, int length, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody, offset, length)) {
+            return decodeStreamingRoot(parser, rawBody, offset, offset + length);
         } catch (HyperLlmException ex) {
             throw ex;
         } catch (IOException ex) {
@@ -79,20 +89,19 @@ public final class OpenAiChatCodec implements ProtocolCodec {
     }
 
     @Override
-    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        return writeRequest(req, context).toExactByteArray();
+    public CanonicalRequest decodeRequest(InputStream bodyStream, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, bodyStream)) {
+            return decodeStreamingRoot(parser, null, 0, 0);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
     }
 
     @Override
-    public PreparedUpstreamPayload encodeRequestPayload(CanonicalRequest req, UpstreamEncodingContext context) {
-        CodecSupport.ResizableByteBuffer out = writeRequest(req, context);
-        return PreparedUpstreamPayload.ofSlice(ProtocolKind.OPENAI_CHAT, out.backingArray(), out.length());
-    }
-
-    private CodecSupport.ResizableByteBuffer writeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
+    public void encodeRequest(CanonicalRequest req, UpstreamEncodingContext context, ByteSink out) {
         ProviderCapabilities caps = context.capabilitiesFor(ProtocolKind.OPENAI_CHAT);
-        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
-                CodecSupport.estimateEncodedCapacity(req));
         try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
             gen.writeStartObject();
             gen.writeStringField("model", context.upstreamModelName() != null && !context.upstreamModelName().isBlank()
@@ -107,10 +116,11 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             gen.writeArrayFieldStart("messages");
             int emittedMessages = 0;
             for (CanonicalSystemPart sys : req.systemInstructions()) {
-                if (!sys.text().isEmpty()) {
+                if (!sys.isEmpty()) {
                     gen.writeStartObject();
                     gen.writeStringField("role", (sys.developerPriority() && caps.supportsDeveloperRole()) ? "developer" : "system");
-                    gen.writeStringField("content", sys.text());
+                    gen.writeFieldName("content");
+                    sys.writeJsonValue(gen);
                     gen.writeEndObject();
                     emittedMessages++;
                 }
@@ -154,12 +164,16 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize OpenAI Chat request JSON", ex);
         }
-        return out;
     }
 
-    // ---- Streaming request decoding (zero inbound DOM tree for large messages[]) ----
+    // ---- Streaming request decoding (zero inbound DOM tree for messages[] and tools[]) ----
 
-    private CanonicalRequest decodeStreamingRoot(JsonParser parser) throws IOException {
+    private CanonicalRequest decodeStreamingRoot(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         String model = null;
         boolean stream = false;
         boolean clientRequestedUsage = false;
@@ -167,9 +181,9 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
         List<CanonicalSystemPart> systemParts = new ArrayList<>();
         List<CanonicalTurn> turns = new ArrayList<>();
+        List<CanonicalToolDefinition> tools = new ArrayList<>();
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
 
-        JsonNode toolsNode = null;
         JsonNode toolChoiceNode = null;
         Boolean parallelToolCalls = null;
         JsonNode responseFormatNode = null;
@@ -218,12 +232,18 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 case "messages" -> {
                     if (valTok == JsonToken.START_ARRAY) {
                         hasMessagesArray = true;
-                        readStreamingMessages(parser, systemParts, turns, unsupported);
+                        readStreamingMessages(parser, rawBacking, baseOffset, endOffset, systemParts, turns, unsupported);
                     } else {
                         parser.skipChildren();
                     }
                 }
-                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "tools" -> {
+                    if (valTok == JsonToken.START_ARRAY) {
+                        readStreamingTools(parser, rawBacking, baseOffset, endOffset, tools, unsupported);
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
                 case "tool_choice" -> toolChoiceNode = mapper.readTree(parser);
                 case "parallel_tool_calls" -> parallelToolCalls = CodecSupport.readNullableBoolean(parser);
                 case "response_format" -> responseFormatNode = mapper.readTree(parser);
@@ -265,7 +285,6 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Field 'messages' must be a non-empty array");
         }
 
-        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
         CanonicalToolChoice toolChoice = decodeToolChoice(toolChoiceNode, parallelToolCalls);
         CanonicalResponseFormat responseFormat = decodeResponseFormat(responseFormatNode);
         Integer effectiveMaxTokens = maxCompletionTokens != null ? maxCompletionTokens : maxTokens;
@@ -281,14 +300,89 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             unsupported.add(UnsupportedFeatureFlag.hard("audio_output", "Audio modalities are outside text-output scope"));
         }
 
-        return new CanonicalRequest(
+        RequestMetrics metrics = TokenEstimator.computeRequestMetrics(systemParts, turns, tools);
+        return CanonicalRequest.ofOwned(
                 ProtocolKind.OPENAI_CHAT, model.trim(), stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
+                generation, responseFormat, thinking, cache, options, unsupported, metrics
         );
+    }
+
+    private void readStreamingTools(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalToolDefinition> out,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            String type = "function";
+            String fnName = "";
+            String fnDescription = null;
+            ValidatedJsonObject fnSchema = null;
+            Boolean fnStrict = null;
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "type" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            type = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "function" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String ff = parser.currentName();
+                                JsonToken ft = parser.nextToken();
+                                switch (ff) {
+                                    case "name" -> {
+                                        if (ft == JsonToken.VALUE_STRING) {
+                                            fnName = parser.getText();
+                                        } else {
+                                            parser.skipChildren();
+                                        }
+                                    }
+                                    case "description" -> fnDescription = CodecSupport.readNullableString(parser);
+                                    case "parameters" -> {
+                                        if (ft == JsonToken.START_OBJECT) {
+                                            fnSchema = ValidatedJsonObject.readFromParser(
+                                                    parser, mapper, rawBacking, baseOffset, endOffset);
+                                        } else {
+                                            parser.skipChildren();
+                                        }
+                                    }
+                                    case "strict" -> fnStrict = CodecSupport.readNullableBoolean(parser);
+                                    default -> parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    default -> parser.skipChildren();
+                }
+            }
+            if (!"function".equals(type)) {
+                unsupported.add(UnsupportedFeatureFlag.degradable(
+                        "builtin_tool:" + type, "Only custom function tools are translatable"));
+                continue;
+            }
+            out.add(CanonicalToolDefinition.ofValidated(fnName, fnDescription, fnSchema, fnStrict, null));
+        }
     }
 
     private void readStreamingMessages(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<CanonicalSystemPart> systemParts,
             List<CanonicalTurn> turns,
             List<UnsupportedFeatureFlag> unsupported
@@ -300,11 +394,11 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 continue;
             }
             String role = "user";
-            String plainTextContent = null;
+            JsonUtf8Text plainTextContent = null;
             List<CanonicalContentPart> arrayContentParts = null;
-            String refusal = null;
-            String reasoningContent = null;
-            String reasoning = null;
+            JsonUtf8Text refusal = null;
+            JsonUtf8Text reasoningContent = null;
+            JsonUtf8Text reasoning = null;
             JsonNode reasoningDetails = null;
             List<CanonicalContentPart.ToolCallPart> toolCalls = null;
             CanonicalContentPart.ToolCallPart legacyFnCall = null;
@@ -324,32 +418,32 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     }
                     case "content" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            plainTextContent = parser.getText();
+                            plainTextContent = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else if (t == JsonToken.START_ARRAY) {
-                            arrayContentParts = readStreamingUserContentArray(parser, unsupported);
+                            arrayContentParts = readStreamingUserContentArray(parser, rawBacking, baseOffset, endOffset, unsupported);
                         } else if (t == JsonToken.VALUE_NULL) {
                             // null content
                         } else {
                             JsonNode fallback = mapper.readTree(parser);
-                            plainTextContent = fallback.toString();
+                            plainTextContent = JsonUtf8Text.ofString(fallback.toString());
                         }
                     }
                     case "tool_call_id" -> toolCallId = CodecSupport.readNullableString(parser);
                     case "name" -> name = CodecSupport.readNullableString(parser);
-                    case "refusal" -> refusal = CodecSupport.readNullableString(parser);
-                    case "reasoning_content" -> reasoningContent = CodecSupport.readNullableString(parser);
-                    case "reasoning" -> reasoning = CodecSupport.readNullableString(parser);
+                    case "refusal" -> refusal = JsonUtf8Text.readNullableFromParser(parser, rawBacking, baseOffset, endOffset);
+                    case "reasoning_content" -> reasoningContent = JsonUtf8Text.readNullableFromParser(parser, rawBacking, baseOffset, endOffset);
+                    case "reasoning" -> reasoning = JsonUtf8Text.readNullableFromParser(parser, rawBacking, baseOffset, endOffset);
                     case "reasoning_details" -> reasoningDetails = mapper.readTree(parser);
                     case "tool_calls" -> {
                         if (t == JsonToken.START_ARRAY) {
-                            toolCalls = readStreamingToolCalls(parser);
+                            toolCalls = readStreamingToolCalls(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
                     }
                     case "function_call" -> {
                         if (t == JsonToken.START_OBJECT) {
-                            legacyFnCall = readStreamingLegacyFunctionCall(parser);
+                            legacyFnCall = readStreamingLegacyFunctionCall(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -361,25 +455,25 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             switch (role) {
                 case "system", "developer" -> {
                     boolean devPriority = "developer".equals(role);
-                    String text = plainTextContent != null ? plainTextContent
-                            : (arrayContentParts != null ? joinTextParts(arrayContentParts) : "");
+                    JsonUtf8Text text = plainTextContent != null ? plainTextContent
+                            : (arrayContentParts != null ? joinTextPartsUtf8(arrayContentParts) : JsonUtf8Text.EMPTY);
                     if (!sawNonSystem) {
-                        systemParts.add(new CanonicalSystemPart(text, devPriority, null));
+                        systemParts.add(CanonicalSystemPart.ofUtf8(text, devPriority, null));
                     } else {
-                        turns.add(new CanonicalTurn(
+                        turns.add(CanonicalTurn.ofOwned(
                                 devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM,
-                                List.of(new CanonicalContentPart.TextPart(text))
+                                List.of(CanonicalContentPart.TextPart.ofUtf8(text))
                         ));
                     }
                 }
                 case "user" -> {
                     sawNonSystem = true;
                     List<CanonicalContentPart> parts = resolveContentParts(plainTextContent, arrayContentParts);
-                    turns.add(new CanonicalTurn(CanonicalRole.USER, parts));
+                    turns.add(CanonicalTurn.ofOwned(CanonicalRole.USER, parts));
                 }
                 case "assistant" -> {
                     sawNonSystem = true;
-                    ExtractedReasoning extracted = resolveExtractedReasoning(reasoningContent, reasoning, reasoningDetails);
+                    ExtractedUtf8Reasoning extracted = resolveExtractedUtf8Reasoning(reasoningContent, reasoning, reasoningDetails);
                     boolean onlyPlainText = extracted == null
                             && (refusal == null || refusal.isEmpty())
                             && (toolCalls == null || toolCalls.isEmpty())
@@ -387,35 +481,35 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                             && arrayContentParts == null;
                     if (onlyPlainText) {
                         List<CanonicalContentPart> parts = plainTextContent != null
-                                ? List.of(new CanonicalContentPart.TextPart(plainTextContent))
+                                ? List.of(CanonicalContentPart.TextPart.ofUtf8(plainTextContent))
                                 : List.of();
-                        turns.add(new CanonicalTurn(CanonicalRole.ASSISTANT, parts));
+                        turns.add(CanonicalTurn.ofOwned(CanonicalRole.ASSISTANT, parts));
                     } else {
                         List<CanonicalContentPart> parts = new ArrayList<>(4);
                         if (extracted != null) {
-                            parts.add(new CanonicalContentPart.ThinkingPart(
+                            parts.add(CanonicalContentPart.ThinkingPart.ofUtf8(
                                     extracted.text(), null, null, ProtocolKind.OPENAI_CHAT, extracted.wireField()));
                         }
                         if (plainTextContent != null) {
-                            parts.add(new CanonicalContentPart.TextPart(plainTextContent));
+                            parts.add(CanonicalContentPart.TextPart.ofUtf8(plainTextContent));
                         } else if (arrayContentParts != null) {
                             parts.addAll(arrayContentParts);
                         }
                         if (refusal != null && !refusal.isEmpty()) {
-                            parts.add(new CanonicalContentPart.RefusalPart(refusal));
+                            parts.add(CanonicalContentPart.RefusalPart.ofUtf8(refusal));
                         }
                         if (toolCalls != null && !toolCalls.isEmpty()) {
                             parts.addAll(toolCalls);
                         } else if (legacyFnCall != null) {
                             parts.add(legacyFnCall);
                         }
-                        turns.add(new CanonicalTurn(CanonicalRole.ASSISTANT, parts));
+                        turns.add(CanonicalTurn.ofOwned(CanonicalRole.ASSISTANT, parts));
                     }
                 }
                 case "tool", "function" -> {
                     sawNonSystem = true;
                     List<CanonicalContentPart> resultContent = resolveContentParts(plainTextContent, arrayContentParts);
-                    turns.add(new CanonicalTurn(
+                    turns.add(CanonicalTurn.ofOwned(
                             CanonicalRole.TOOL,
                             List.of(new CanonicalContentPart.ToolResultPart(toolCallId, name, resultContent, false, null))
                     ));
@@ -426,27 +520,31 @@ public final class OpenAiChatCodec implements ProtocolCodec {
     }
 
     private static List<CanonicalContentPart> resolveContentParts(
-            String plainTextContent,
+            JsonUtf8Text plainTextContent,
             List<CanonicalContentPart> arrayContentParts
     ) {
         if (arrayContentParts != null) {
             return arrayContentParts;
         }
         if (plainTextContent != null) {
-            return List.of(new CanonicalContentPart.TextPart(plainTextContent));
+            return List.of(CanonicalContentPart.TextPart.ofUtf8(plainTextContent));
         }
         return List.of();
     }
 
     private List<CanonicalContentPart> readStreamingUserContentArray(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<UnsupportedFeatureFlag> unsupported
     ) throws IOException {
         List<CanonicalContentPart> parts = new ArrayList<>(4);
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             JsonToken t = parser.currentToken();
             if (t == JsonToken.VALUE_STRING) {
-                parts.add(new CanonicalContentPart.TextPart(parser.getText()));
+                parts.add(CanonicalContentPart.TextPart.ofUtf8(
+                        JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset)));
                 continue;
             }
             if (t != JsonToken.START_OBJECT) {
@@ -454,8 +552,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 continue;
             }
             String type = "text";
-            String text = "";
-            String refusal = "";
+            JsonUtf8Text text = JsonUtf8Text.EMPTY;
+            JsonUtf8Text refusal = JsonUtf8Text.EMPTY;
             String imgUrl = "";
             ImageDetail imgDetail = ImageDetail.AUTO;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -471,14 +569,14 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     }
                     case "text" -> {
                         if (pt == JsonToken.VALUE_STRING) {
-                            text = parser.getText();
+                            text = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
                     }
                     case "refusal" -> {
                         if (pt == JsonToken.VALUE_STRING) {
-                            refusal = parser.getText();
+                            refusal = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -506,8 +604,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 }
             }
             switch (type) {
-                case "text" -> parts.add(new CanonicalContentPart.TextPart(text));
-                case "refusal" -> parts.add(new CanonicalContentPart.RefusalPart(refusal));
+                case "text" -> parts.add(CanonicalContentPart.TextPart.ofUtf8(text));
+                case "refusal" -> parts.add(CanonicalContentPart.RefusalPart.ofUtf8(refusal));
                 case "image_url" -> parts.add(new CanonicalContentPart.ImagePart(
                         CodecSupport.parseImageUrlOrDataUri(imgUrl), imgDetail, null));
                 default -> unsupported.add(UnsupportedFeatureFlag.degradable("content_part:" + type,
@@ -517,7 +615,12 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         return parts;
     }
 
-    private List<CanonicalContentPart.ToolCallPart> readStreamingToolCalls(JsonParser parser) throws IOException {
+    private List<CanonicalContentPart.ToolCallPart> readStreamingToolCalls(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         List<CanonicalContentPart.ToolCallPart> list = new ArrayList<>(4);
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             if (parser.currentToken() != JsonToken.START_OBJECT) {
@@ -526,7 +629,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             }
             String id = null;
             String name = "";
-            String rawArgs = "{}";
+            JsonUtf8Text rawArgs = JsonUtf8Text.ofString("{}");
             String thoughtSig = null;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 String f = parser.currentName();
@@ -541,7 +644,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                                 if ("name".equals(ff) && ft == JsonToken.VALUE_STRING) {
                                     name = parser.getText();
                                 } else if ("arguments".equals(ff) && ft == JsonToken.VALUE_STRING) {
-                                    rawArgs = parser.getText();
+                                    rawArgs = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                                 } else {
                                     parser.skipChildren();
                                 }
@@ -577,39 +680,46 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 }
             }
             ProtocolKind origin = (thoughtSig != null) ? ProtocolKind.GEMINI_GENERATE_CONTENT : ProtocolKind.OPENAI_CHAT;
-            // Defer JSON object parsing of rawArgs (zero eager readTree on 100+ historical tool calls!)
-            list.add(new CanonicalContentPart.ToolCallPart(id, null, name, null, rawArgs, thoughtSig, origin));
+            list.add(CanonicalContentPart.ToolCallPart.ofRawUtf8Args(id, null, name, rawArgs, thoughtSig, origin));
         }
         return list;
     }
 
-    private CanonicalContentPart.ToolCallPart readStreamingLegacyFunctionCall(JsonParser parser) throws IOException {
+    private CanonicalContentPart.ToolCallPart readStreamingLegacyFunctionCall(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         String name = "";
-        String rawArgs = "{}";
+        JsonUtf8Text rawArgs = JsonUtf8Text.ofString("{}");
         while (parser.nextToken() != JsonToken.END_OBJECT) {
             String f = parser.currentName();
             JsonToken t = parser.nextToken();
             if ("name".equals(f) && t == JsonToken.VALUE_STRING) {
                 name = parser.getText();
             } else if ("arguments".equals(f) && t == JsonToken.VALUE_STRING) {
-                rawArgs = parser.getText();
+                rawArgs = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
             } else {
                 parser.skipChildren();
             }
         }
-        return new CanonicalContentPart.ToolCallPart(null, null, name, null, rawArgs, null, ProtocolKind.OPENAI_CHAT);
+        return CanonicalContentPart.ToolCallPart.ofRawUtf8Args(null, null, name, rawArgs, null, ProtocolKind.OPENAI_CHAT);
     }
 
-    private static ExtractedReasoning resolveExtractedReasoning(
-            String reasoningContent,
-            String reasoning,
+    private record ExtractedUtf8Reasoning(JsonUtf8Text text, String wireField) {
+    }
+
+    private static ExtractedUtf8Reasoning resolveExtractedUtf8Reasoning(
+            JsonUtf8Text reasoningContent,
+            JsonUtf8Text reasoning,
             JsonNode reasoningDetails
     ) {
         if (reasoningContent != null && !reasoningContent.isEmpty()) {
-            return new ExtractedReasoning(reasoningContent, "reasoning_content");
+            return new ExtractedUtf8Reasoning(reasoningContent, "reasoning_content");
         }
         if (reasoning != null && !reasoning.isEmpty()) {
-            return new ExtractedReasoning(reasoning, "reasoning");
+            return new ExtractedUtf8Reasoning(reasoning, "reasoning");
         }
         if (reasoningDetails != null && reasoningDetails.isArray()) {
             StringBuilder sb = new StringBuilder();
@@ -629,7 +739,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 }
             }
             if (!sb.isEmpty()) {
-                return new ExtractedReasoning(sb.toString(), "reasoning_content");
+                return new ExtractedUtf8Reasoning(JsonUtf8Text.ofString(sb.toString()), "reasoning_content");
             }
         }
         return null;
@@ -1157,11 +1267,12 @@ public final class OpenAiChatCodec implements ProtocolCodec {
     ) throws IOException {
         return switch (turn.role()) {
             case SYSTEM, DEVELOPER -> {
-                String content = joinTextParts(turn.parts());
+                JsonUtf8Text content = joinTextPartsUtf8(turn.parts());
                 gen.writeStartObject();
                 boolean useDeveloper = turn.role() == CanonicalRole.DEVELOPER && caps.supportsDeveloperRole();
                 gen.writeStringField("role", useDeveloper ? "developer" : "system");
-                gen.writeStringField("content", content);
+                gen.writeFieldName("content");
+                content.writeJsonValue(gen);
                 gen.writeEndObject();
                 yield 1;
             }
@@ -1183,7 +1294,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         if (parts.size() == 1 && parts.getFirst() instanceof CanonicalContentPart.TextPart t) {
             gen.writeStartObject();
             gen.writeStringField("role", "user");
-            gen.writeStringField("content", t.text());
+            gen.writeFieldName("content");
+            t.writeJsonValue(gen);
             gen.writeEndObject();
             return 1;
         }
@@ -1240,11 +1352,21 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             List<CanonicalContentPart> hoistedImages
     ) throws IOException {
         List<CanonicalContentPart> children = tr.content();
+        if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t && !tr.isError()) {
+            gen.writeStartObject();
+            gen.writeStringField("role", "tool");
+            gen.writeStringField("tool_call_id", tr.callId() != null ? tr.callId() : "");
+            gen.writeFieldName("content");
+            t.writeJsonValue(gen);
+            gen.writeEndObject();
+            return hoistedImages;
+        }
+
         String contentText;
         if (children.isEmpty()) {
             contentText = "";
         } else if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t) {
-            contentText = (tr.isError() && !t.text().isEmpty()) ? "Error: " + t.text() : t.text();
+            contentText = !t.isEmpty() ? "Error: " + t.text() : "";
         } else {
             StringBuilder textOut = new StringBuilder();
             for (CanonicalContentPart child : children) {
@@ -1288,30 +1410,33 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         if (parts.size() == 1 && parts.getFirst() instanceof CanonicalContentPart.TextPart t) {
             gen.writeStartObject();
             gen.writeStringField("role", "assistant");
-            gen.writeStringField("content", t.text());
+            gen.writeFieldName("content");
+            t.writeJsonValue(gen);
             gen.writeEndObject();
             return;
         }
 
-        String singleText = null;
+        JsonUtf8Text singleText = null;
         StringBuilder textSb = null;
-        String singleThinking = null;
+        JsonUtf8Text singleThinking = null;
         StringBuilder thinkingSb = null;
         String observedThinkingField = null;
-        String singleRefusal = null;
+        JsonUtf8Text singleRefusal = null;
         StringBuilder refusalSb = null;
         boolean hasToolCalls = false;
 
         for (CanonicalContentPart p : parts) {
             switch (p) {
                 case CanonicalContentPart.TextPart t -> {
-                    if (!t.text().isEmpty()) {
+                    if (!t.isEmpty()) {
                         if (singleText == null && textSb == null) {
-                            singleText = t.text();
+                            singleText = t.utf8Text();
                         } else {
                             if (textSb == null) {
-                                textSb = new StringBuilder(singleText.length() + t.text().length());
-                                textSb.append(singleText);
+                                String first = singleText.asString();
+                                String next = t.text();
+                                textSb = new StringBuilder(first.length() + next.length());
+                                textSb.append(first);
                                 singleText = null;
                             }
                             textSb.append(t.text());
@@ -1319,13 +1444,15 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
-                    if (!r.refusal().isEmpty()) {
+                    if (!r.isEmpty()) {
                         if (singleRefusal == null && refusalSb == null) {
-                            singleRefusal = r.refusal();
+                            singleRefusal = r.utf8Text();
                         } else {
                             if (refusalSb == null) {
-                                refusalSb = new StringBuilder(singleRefusal.length() + r.refusal().length());
-                                refusalSb.append(singleRefusal);
+                                String first = singleRefusal.asString();
+                                String next = r.refusal();
+                                refusalSb = new StringBuilder(first.length() + next.length());
+                                refusalSb.append(first);
                                 singleRefusal = null;
                             }
                             refusalSb.append(r.refusal());
@@ -1334,18 +1461,20 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 }
                 case CanonicalContentPart.ToolCallPart ignored -> hasToolCalls = true;
                 case CanonicalContentPart.ThinkingPart th -> {
-                    if (!caps.openAiNativeProvider() && !th.text().isEmpty()) {
+                    if (!caps.openAiNativeProvider() && !th.isEmpty()) {
                         String targetField = resolveTargetReasoningField(caps, th);
                         if (targetField != null) {
                             if (observedThinkingField == null) {
                                 observedThinkingField = targetField;
                             }
                             if (singleThinking == null && thinkingSb == null) {
-                                singleThinking = th.text();
+                                singleThinking = th.utf8Text();
                             } else {
                                 if (thinkingSb == null) {
-                                    thinkingSb = new StringBuilder(singleThinking.length() + th.text().length() + 1);
-                                    thinkingSb.append(singleThinking);
+                                    String first = singleThinking.asString();
+                                    String next = th.text();
+                                    thinkingSb = new StringBuilder(first.length() + next.length() + 1);
+                                    thinkingSb.append(first);
                                     singleThinking = null;
                                 }
                                 thinkingSb.append('\n').append(th.text());
@@ -1359,24 +1488,39 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             }
         }
 
-        String finalText = textSb != null ? textSb.toString() : singleText;
-        String finalThinking = thinkingSb != null ? thinkingSb.toString() : singleThinking;
-        String finalRefusal = refusalSb != null ? refusalSb.toString() : singleRefusal;
+        boolean hasText = (textSb != null && !textSb.isEmpty()) || (singleText != null && !singleText.isEmpty());
+        boolean hasThinking = (thinkingSb != null && !thinkingSb.isEmpty()) || (singleThinking != null && !singleThinking.isEmpty());
+        boolean hasRefusal = (refusalSb != null && !refusalSb.isEmpty()) || (singleRefusal != null && !singleRefusal.isEmpty());
 
         gen.writeStartObject();
         gen.writeStringField("role", "assistant");
-        if (finalText != null && !finalText.isEmpty()) {
-            gen.writeStringField("content", finalText);
-        } else if (hasToolCalls || (finalRefusal != null && !finalRefusal.isEmpty())) {
+        if (hasText) {
+            gen.writeFieldName("content");
+            if (textSb != null) {
+                gen.writeString(textSb.toString());
+            } else {
+                singleText.writeJsonValue(gen);
+            }
+        } else if (hasToolCalls || hasRefusal) {
             gen.writeNullField("content");
         } else {
             gen.writeStringField("content", "");
         }
-        if (observedThinkingField != null && finalThinking != null && !finalThinking.isEmpty()) {
-            gen.writeStringField(observedThinkingField, finalThinking);
+        if (observedThinkingField != null && hasThinking) {
+            gen.writeFieldName(observedThinkingField);
+            if (thinkingSb != null) {
+                gen.writeString(thinkingSb.toString());
+            } else {
+                singleThinking.writeJsonValue(gen);
+            }
         }
-        if (finalRefusal != null && !finalRefusal.isEmpty()) {
-            gen.writeStringField("refusal", finalRefusal);
+        if (hasRefusal) {
+            gen.writeFieldName("refusal");
+            if (refusalSb != null) {
+                gen.writeString(refusalSb.toString());
+            } else {
+                singleRefusal.writeJsonValue(gen);
+            }
         }
         if (hasToolCalls) {
             gen.writeArrayFieldStart("tool_calls");
@@ -1390,24 +1534,26 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         gen.writeEndObject();
     }
 
-    private static String joinTextParts(List<CanonicalContentPart> parts) {
-        String single = null;
+    private static JsonUtf8Text joinTextPartsUtf8(List<CanonicalContentPart> parts) {
+        JsonUtf8Text single = null;
         StringBuilder sb = null;
         for (CanonicalContentPart p : parts) {
-            if (p instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty()) {
+            if (p instanceof CanonicalContentPart.TextPart t && !t.isEmpty()) {
                 if (single == null && sb == null) {
-                    single = t.text();
+                    single = t.utf8Text();
                 } else {
                     if (sb == null) {
-                        sb = new StringBuilder(single.length() + t.text().length() + 1);
-                        sb.append(single);
+                        String first = single.asString();
+                        String next = t.text();
+                        sb = new StringBuilder(first.length() + next.length() + 1);
+                        sb.append(first);
                         single = null;
                     }
                     sb.append('\n').append(t.text());
                 }
             }
         }
-        return sb != null ? sb.toString() : (single != null ? single : "");
+        return sb != null ? JsonUtf8Text.ofString(sb.toString()) : (single != null ? single : JsonUtf8Text.EMPTY);
     }
 
     private static String resolveTargetReasoningField(
@@ -1425,7 +1571,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
 
     private void writeUserParts(JsonGenerator gen, List<CanonicalContentPart> parts) throws IOException {
         if (parts.size() == 1 && parts.getFirst() instanceof CanonicalContentPart.TextPart t) {
-            gen.writeString(t.text());
+            t.writeJsonValue(gen);
             return;
         }
         gen.writeStartArray();
@@ -1433,7 +1579,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             if (p instanceof CanonicalContentPart.TextPart t) {
                 gen.writeStartObject();
                 gen.writeStringField("type", "text");
-                gen.writeStringField("text", t.text());
+                gen.writeFieldName("text");
+                t.writeJsonValue(gen);
                 gen.writeEndObject();
             } else if (p instanceof CanonicalContentPart.ImagePart img) {
                 gen.writeStartObject();
@@ -1462,7 +1609,8 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         gen.writeStringField("type", "function");
         gen.writeObjectFieldStart("function");
         gen.writeStringField("name", tc.name());
-        gen.writeStringField("arguments", CodecSupport.serializeArguments(mapper, tc));
+        gen.writeFieldName("arguments");
+        CodecSupport.writeArgumentsAsJsonString(gen, mapper, tc);
         gen.writeEndObject();
         if (tc.thoughtSignature() != null && !tc.thoughtSignature().isBlank()) {
             gen.writeObjectFieldStart("extra_content");
@@ -1547,11 +1695,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 gen.writeStringField("description", tool.description());
             }
             gen.writeFieldName("parameters");
-            if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
-                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
-            } else {
-                CodecSupport.writeEmptyObjectSchema(gen);
-            }
+            tool.writeParametersSchema(gen, mapper);
             if (tool.strict() != null && caps.supportsStrictToolSchema()) {
                 gen.writeBooleanField("strict", tool.strict());
             }

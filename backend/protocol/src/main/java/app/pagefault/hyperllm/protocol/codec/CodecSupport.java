@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.common.id.UuidV7;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.CacheControl;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
@@ -12,6 +13,7 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalToolDefinition;
 import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.core.JsonEncoding;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
@@ -23,6 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Locale;
@@ -178,8 +181,14 @@ public final class CodecSupport {
     }
 
     public static String serializeArguments(ObjectMapper mapper, CanonicalContentPart.ToolCallPart tc) {
+        if (tc.rawArgumentsUtf8() != null && !tc.rawArgumentsUtf8().isEmpty()) {
+            return tc.rawArgumentsUtf8().asString();
+        }
         if (tc.rawArgumentsJson() != null && !tc.rawArgumentsJson().isBlank()) {
             return tc.rawArgumentsJson();
+        }
+        if (tc.validatedArguments() != null) {
+            return tc.validatedArguments().rawString();
         }
         if (tc.argumentsJson() != null && !tc.argumentsJson().isNull()) {
             return writeJsonString(mapper, tc.argumentsJson());
@@ -188,6 +197,12 @@ public final class CodecSupport {
     }
 
     public static ObjectNode argumentsAsObject(ObjectMapper mapper, CanonicalContentPart.ToolCallPart tc) {
+        if (tc.validatedArguments() != null) {
+            JsonNode node = tc.validatedArguments().asJsonNode(mapper);
+            if (node instanceof ObjectNode obj) {
+                return obj.deepCopy();
+            }
+        }
         if (tc.argumentsJson() instanceof ObjectNode obj) {
             return obj.deepCopy();
         }
@@ -412,80 +427,67 @@ public final class CodecSupport {
         }
     }
 
-    static int estimateEncodedCapacity(CanonicalRequest req) {
+    public static int estimateEncodedCapacity(CanonicalRequest req) {
         if (req == null) {
             return 1024;
         }
-        long chars = 512L;
-        for (CanonicalSystemPart sp : req.systemInstructions()) {
-            chars += sp.text().length() + 48L;
+        if (req.metrics().computed()) {
+            return req.metrics().estimatedEncodedBytes();
         }
-        for (CanonicalTurn turn : req.turns()) {
-            chars += 48L;
-            for (CanonicalContentPart part : turn.parts()) {
-                chars += estimatePartChars(part);
-            }
-        }
-        for (CanonicalToolDefinition tool : req.tools()) {
-            chars += 256L;
-            if (tool.name() != null) {
-                chars += tool.name().length();
-            }
-            if (tool.description() != null) {
-                chars += tool.description().length();
-            }
-        }
-        long estimated = (chars * 5L) / 4L + 1024L;
-        return (int) Math.min(16L * 1024L * 1024L, Math.max(1024L, estimated));
-    }
-
-    private static long estimatePartChars(CanonicalContentPart part) {
-        return switch (part) {
-            case CanonicalContentPart.TextPart t -> t.text().length() + 32L;
-            case CanonicalContentPart.ThinkingPart th ->
-                    th.text().length() + (th.signature() != null ? th.signature().length() : 0L) + 64L;
-            case CanonicalContentPart.RedactedThinkingPart rt ->
-                    (rt.opaqueData() != null ? rt.opaqueData().length() : 0L) + 64L;
-            case CanonicalContentPart.RefusalPart r -> r.refusal().length() + 32L;
-            case CanonicalContentPart.ImagePart img -> {
-                if (img.source() instanceof ImageSource.Base64Image b64 && b64.base64Data() != null) {
-                    yield b64.base64Data().length() + 128L;
-                }
-                yield 256L;
-            }
-            case CanonicalContentPart.ToolCallPart tc -> {
-                long len = 128L;
-                if (tc.rawArgumentsJson() != null) {
-                    len += tc.rawArgumentsJson().length();
-                }
-                yield len;
-            }
-            case CanonicalContentPart.ToolResultPart tr -> {
-                long len = 96L;
-                for (CanonicalContentPart child : tr.content()) {
-                    len += estimatePartChars(child);
-                }
-                yield len;
-            }
-        };
+        return TokenEstimator.computeRequestMetrics(req.systemInstructions(), req.turns(), req.tools())
+                .estimatedEncodedBytes();
     }
 
     static JsonGenerator newUtf8Generator(ObjectMapper mapper, ResizableByteBuffer out) throws IOException {
         return mapper.getFactory().createGenerator(out, JsonEncoding.UTF8);
     }
 
+    public static JsonGenerator newUtf8Generator(ObjectMapper mapper, ByteSink out) throws IOException {
+        return mapper.getFactory().createGenerator(out.asOutputStream(), JsonEncoding.UTF8);
+    }
+
     static JsonParser openObjectParser(ObjectMapper mapper, byte[] rawBody) {
         if (rawBody == null || rawBody.length == 0) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
         }
+        return openObjectParser(mapper, rawBody, 0, rawBody.length);
+    }
+
+    static JsonParser openObjectParser(ObjectMapper mapper, byte[] rawBody, int offset, int length) {
+        if (rawBody == null || length <= 0 || offset < 0 || offset + length > rawBody.length) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
+        }
         try {
-            JsonParser parser = mapper.getFactory().createParser(rawBody);
+            JsonParser parser = mapper.getFactory().createParser(rawBody, offset, length);
             JsonToken first = parser.nextToken();
             if (first != JsonToken.START_OBJECT) {
                 parser.close();
                 throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must be a JSON object");
             }
             return parser;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
+    }
+
+    static JsonParser openObjectParser(ObjectMapper mapper, InputStream bodyStream) {
+        if (bodyStream == null) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
+        }
+        try {
+            JsonParser parser = mapper.getFactory().createParser(bodyStream);
+            JsonToken first = parser.nextToken();
+            if (first == null) {
+                parser.close();
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must not be empty");
+            }
+            if (first != JsonToken.START_OBJECT) {
+                parser.close();
+                throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Request body must be a JSON object");
+            }
+            return parser;
+        } catch (HyperLlmException ex) {
+            throw ex;
         } catch (IOException ex) {
             throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
         }
@@ -508,11 +510,27 @@ public final class CodecSupport {
         gen.writeRawValue("{\"type\":\"object\",\"properties\":{}}");
     }
 
+    static void writeArgumentsAsJsonString(
+            JsonGenerator gen,
+            ObjectMapper mapper,
+            CanonicalContentPart.ToolCallPart tc
+    ) throws IOException {
+        if (tc.rawArgumentsUtf8() != null && !tc.rawArgumentsUtf8().isEmpty()) {
+            tc.rawArgumentsUtf8().writeJsonValue(gen);
+            return;
+        }
+        gen.writeString(serializeArguments(mapper, tc));
+    }
+
     static void writeArgumentsAsObject(
             JsonGenerator gen,
             ObjectMapper mapper,
             CanonicalContentPart.ToolCallPart tc
     ) throws IOException {
+        if (tc.validatedArguments() != null) {
+            tc.validatedArguments().writeRawObject(gen, mapper);
+            return;
+        }
         if (tc.argumentsJson() instanceof ObjectNode obj) {
             mapper.writeTree(gen, obj);
             return;

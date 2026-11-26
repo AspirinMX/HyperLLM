@@ -4,13 +4,15 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalChatRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
 import app.pagefault.hyperllm.protocol.ir.CanonicalMessage;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
+import app.pagefault.hyperllm.protocol.ir.CanonicalRole;
 import app.pagefault.hyperllm.protocol.ir.CanonicalSystemPart;
 import app.pagefault.hyperllm.protocol.ir.CanonicalToolDefinition;
 import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 
-import java.util.Locale;
+import java.util.List;
 
 /**
  * Local multimodal token estimator based on text length and lightweight image header probing.
@@ -174,44 +176,91 @@ public final class TokenEstimator {
     /**
      * Estimates total prompt tokens across system instructions, multimodal turns (text, images,
      * tool calls/results, thinking blocks), and tool schema definitions.
+     *
+     * <p>O(1) when {@link CanonicalRequest#metrics()} was already fused during request decoding;
+     * otherwise computes without materializing {@code JsonUtf8Text} slices or {@code ValidatedJsonObject}s.
      */
     public int estimatePromptTokens(CanonicalRequest request) {
         if (request == null) {
             return 0;
         }
-        int total = REPLY_PRIMING_TOKENS;
+        if (request.metrics().computed()) {
+            return request.metrics().estimatedPromptTokens();
+        }
+        return computeRequestMetrics(request.systemInstructions(), request.turns(), request.tools())
+                .estimatedPromptTokens();
+    }
 
-        for (CanonicalSystemPart sys : request.systemInstructions()) {
-            total += TOKENS_PER_MESSAGE_OVERHEAD;
-            if (!sys.text().isEmpty()) {
-                total += estimateTextTokens(sys.text());
+    /**
+     * Computes both prompt token estimates and outbound serialized byte capacity in a single pass
+     * using precomputed leaf metrics (never materializing validated UTF-8 slices or JSON objects).
+     */
+    public static RequestMetrics computeRequestMetrics(
+            List<CanonicalSystemPart> systemInstructions,
+            List<CanonicalTurn> turns,
+            List<CanonicalToolDefinition> tools
+    ) {
+        int totalTokens = REPLY_PRIMING_TOKENS;
+        long wireBytes = 512L;
+
+        if (systemInstructions != null) {
+            for (CanonicalSystemPart sys : systemInstructions) {
+                totalTokens += TOKENS_PER_MESSAGE_OVERHEAD;
+                if (!sys.isEmpty()) {
+                    totalTokens += sys.estimatedTokens();
+                }
+                wireBytes += sys.estimatedWireBytes() + 48L;
             }
         }
 
-        for (CanonicalTurn turn : request.turns()) {
-            total += TOKENS_PER_MESSAGE_OVERHEAD;
-            if (turn.role() != null) {
-                total += estimateTextTokens(turn.role().name().toLowerCase(Locale.ROOT));
-            }
-            for (CanonicalContentPart part : turn.parts()) {
-                total += estimatePartTokens(part);
-            }
-        }
-
-        for (CanonicalToolDefinition tool : request.tools()) {
-            total += 8; // structural tool overhead
-            if (tool.name() != null && !tool.name().isEmpty()) {
-                total += estimateTextTokens(tool.name());
-            }
-            if (tool.description() != null && !tool.description().isEmpty()) {
-                total += estimateTextTokens(tool.description());
-            }
-            if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
-                total += estimateTextTokens(tool.parametersSchema().toString());
+        if (turns != null) {
+            for (CanonicalTurn turn : turns) {
+                totalTokens += TOKENS_PER_MESSAGE_OVERHEAD;
+                totalTokens += roleTokens(turn.role());
+                wireBytes += 48L;
+                for (CanonicalContentPart part : turn.parts()) {
+                    totalTokens += estimatePartTokens(part);
+                    wireBytes += estimatePartWireBytes(part);
+                }
             }
         }
 
-        return total;
+        if (tools != null) {
+            for (CanonicalToolDefinition tool : tools) {
+                totalTokens += 8; // structural tool overhead
+                wireBytes += 256L;
+                if (tool.name() != null && !tool.name().isEmpty()) {
+                    totalTokens += estimateTextTokens(tool.name());
+                    wireBytes += tool.name().length();
+                }
+                if (tool.description() != null && !tool.description().isEmpty()) {
+                    totalTokens += estimateTextTokens(tool.description());
+                    wireBytes += tool.description().length();
+                }
+                if (tool.validatedSchema() != null) {
+                    totalTokens += tool.validatedSchema().estimatedTokens();
+                    wireBytes += tool.validatedSchema().estimatedWireBytes();
+                } else if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
+                    String s = tool.parametersSchema().toString();
+                    totalTokens += estimateTextTokens(s);
+                    wireBytes += s.length();
+                }
+            }
+        }
+
+        long estimatedBytes = (wireBytes * 5L) / 4L + 1024L;
+        int clampedBytes = (int) Math.min(16L * 1024L * 1024L, Math.max(1024L, estimatedBytes));
+        return RequestMetrics.of(totalTokens, clampedBytes);
+    }
+
+    private static int roleTokens(CanonicalRole role) {
+        if (role == null) {
+            return 0;
+        }
+        return switch (role) {
+            case ASSISTANT, DEVELOPER -> 3;
+            case USER, SYSTEM, TOOL -> 2;
+        };
     }
 
     /** Backwards-compatible estimator for legacy {@link CanonicalChatRequest}. */
@@ -241,24 +290,27 @@ public final class TokenEstimator {
 
     private static int estimatePartTokens(CanonicalContentPart part) {
         return switch (part) {
-            case CanonicalContentPart.TextPart t ->
-                    t.text().isEmpty() ? 0 : estimateTextTokens(t.text());
+            case CanonicalContentPart.TextPart t -> t.isEmpty() ? 0 : t.estimatedTokens();
             case CanonicalContentPart.ImagePart img -> estimateImageTokens(img);
-            case CanonicalContentPart.ThinkingPart th ->
-                    th.text().isEmpty() ? 0 : estimateTextTokens(th.text());
+            case CanonicalContentPart.ThinkingPart th -> th.isEmpty() ? 0 : th.estimatedTokens();
             case CanonicalContentPart.RedactedThinkingPart ignored -> 64;
-            case CanonicalContentPart.RefusalPart ref ->
-                    ref.refusal().isEmpty() ? 0 : estimateTextTokens(ref.refusal());
+            case CanonicalContentPart.RefusalPart ref -> ref.isEmpty() ? 0 : ref.estimatedTokens();
             case CanonicalContentPart.ToolCallPart tc -> {
                 int sum = 6;
                 if (tc.name() != null && !tc.name().isEmpty()) {
                     sum += estimateTextTokens(tc.name());
                 }
-                String args = tc.rawArgumentsJson() != null
-                        ? tc.rawArgumentsJson()
-                        : (tc.argumentsJson() != null ? tc.argumentsJson().toString() : "");
-                if (!args.isEmpty()) {
-                    sum += estimateTextTokens(args);
+                if (tc.rawArgumentsUtf8() != null) {
+                    sum += tc.rawArgumentsUtf8().estimatedTokens();
+                } else if (tc.validatedArguments() != null) {
+                    sum += tc.validatedArguments().estimatedTokens();
+                } else {
+                    String args = tc.rawArgumentsJson() != null
+                            ? tc.rawArgumentsJson()
+                            : (tc.argumentsJson() != null ? tc.argumentsJson().toString() : "");
+                    if (!args.isEmpty()) {
+                        sum += estimateTextTokens(args);
+                    }
                 }
                 yield sum;
             }
@@ -268,6 +320,41 @@ public final class TokenEstimator {
                     sum += estimatePartTokens(child);
                 }
                 yield sum;
+            }
+        };
+    }
+
+    private static long estimatePartWireBytes(CanonicalContentPart part) {
+        return switch (part) {
+            case CanonicalContentPart.TextPart t -> t.estimatedWireBytes() + 32L;
+            case CanonicalContentPart.ThinkingPart th ->
+                    th.estimatedWireBytes() + (th.signature() != null ? th.signature().length() : 0L) + 64L;
+            case CanonicalContentPart.RedactedThinkingPart rt ->
+                    (rt.opaqueData() != null ? rt.opaqueData().length() : 0L) + 64L;
+            case CanonicalContentPart.RefusalPart r -> r.estimatedWireBytes() + 32L;
+            case CanonicalContentPart.ImagePart img -> {
+                if (img.source() instanceof ImageSource.Base64Image b64 && b64.base64Data() != null) {
+                    yield b64.base64Data().length() + 128L;
+                }
+                yield 256L;
+            }
+            case CanonicalContentPart.ToolCallPart tc -> {
+                long len = 128L;
+                if (tc.rawArgumentsUtf8() != null) {
+                    len += tc.rawArgumentsUtf8().estimatedWireBytes();
+                } else if (tc.validatedArguments() != null) {
+                    len += tc.validatedArguments().estimatedWireBytes();
+                } else if (tc.rawArgumentsJson() != null) {
+                    len += tc.rawArgumentsJson().length();
+                }
+                yield len;
+            }
+            case CanonicalContentPart.ToolResultPart tr -> {
+                long len = 96L;
+                for (CanonicalContentPart child : tr.content()) {
+                    len += estimatePartWireBytes(child);
+                }
+                yield len;
             }
         };
     }

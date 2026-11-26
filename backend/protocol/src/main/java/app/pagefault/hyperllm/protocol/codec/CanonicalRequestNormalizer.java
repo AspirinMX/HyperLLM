@@ -12,12 +12,11 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import app.pagefault.hyperllm.protocol.ir.ValidatedJsonObject;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -158,7 +157,7 @@ public final class CanonicalRequestNormalizer {
                     }
                 }
                 if (!modifiedParts.isEmpty()) {
-                    normalizedTurns.add(new CanonicalTurn(turn.role(), modifiedParts));
+                    normalizedTurns.add(CanonicalTurn.ofOwned(turn.role(), modifiedParts));
                 }
             } else if (origParts.isEmpty()) {
                 if (normalizedTurns == null) {
@@ -190,7 +189,7 @@ public final class CanonicalRequestNormalizer {
             return stripVendorRaw(request);
         }
 
-        return new CanonicalRequest(
+        return CanonicalRequest.ofOwned(
                 request.inboundProtocol(),
                 request.model(),
                 request.stream(),
@@ -203,7 +202,8 @@ public final class CanonicalRequestNormalizer {
                 request.thinking(),
                 request.cache(),
                 request.options().withoutVendorRaw(),
-                request.vendorOnlyFeatures()
+                request.vendorOnlyFeatures(),
+                RequestMetrics.UNCOMPUTED
         );
     }
 
@@ -216,7 +216,7 @@ public final class CanonicalRequestNormalizer {
         if (!request.options().hasVendorRaw()) {
             return request;
         }
-        return new CanonicalRequest(
+        return CanonicalRequest.ofOwned(
                 request.inboundProtocol(),
                 request.model(),
                 request.stream(),
@@ -229,7 +229,8 @@ public final class CanonicalRequestNormalizer {
                 request.thinking(),
                 request.cache(),
                 request.options().withoutVendorRaw(),
-                request.vendorOnlyFeatures()
+                request.vendorOnlyFeatures(),
+                request.metrics()
         );
     }
 
@@ -249,7 +250,7 @@ public final class CanonicalRequestNormalizer {
             ToolTrackingState toolState
     ) {
         if (part instanceof CanonicalContentPart.TextPart t) {
-            if (!caps.allowsEmptyTextBlocks() && t.text().isEmpty()) {
+            if (!caps.allowsEmptyTextBlocks() && t.isEmpty()) {
                 return null;
             }
             return t;
@@ -260,14 +261,14 @@ public final class CanonicalRequestNormalizer {
         }
         if (part instanceof CanonicalContentPart.ThinkingPart th) {
             if (!CodecSupport.isSameOrigin(th.originProtocol(), outboundProtocol)) {
-                if (th.text().isEmpty()) {
+                if (th.isEmpty()) {
                     return null;
                 }
                 if (th.signature() == null && th.encryptedContent() == null) {
                     return th;
                 }
-                return new CanonicalContentPart.ThinkingPart(
-                        th.text(), null, null, th.originProtocol(), th.wireField());
+                return CanonicalContentPart.ThinkingPart.ofUtf8(
+                        th.utf8Text(), null, null, th.originProtocol(), th.wireField());
             }
             return th;
         }
@@ -291,10 +292,7 @@ public final class CanonicalRequestNormalizer {
             if (sanitizedId.equals(tc.callId()) && java.util.Objects.equals(sig, tc.thoughtSignature())) {
                 return tc;
             }
-            return new CanonicalContentPart.ToolCallPart(
-                    sanitizedId, tc.itemId(), tc.name(), tc.argumentsJson(),
-                    tc.rawArgumentsJson(), sig, tc.originProtocol()
-            );
+            return tc.withSanitizedCallIdAndSignature(sanitizedId, sig);
         }
         if (part instanceof CanonicalContentPart.ToolResultPart tr) {
             List<CanonicalContentPart> origContent = tr.content();
@@ -305,7 +303,7 @@ public final class CanonicalRequestNormalizer {
                 if (child instanceof CanonicalContentPart.ImagePart childImg) {
                     validateImageSource(childImg.source(), outboundProtocol);
                 } else if (child instanceof CanonicalContentPart.TextPart t) {
-                    keep = caps.allowsEmptyTextBlocks() || !t.text().isEmpty();
+                    keep = caps.allowsEmptyTextBlocks() || !t.isEmpty();
                 }
                 if (!keep) {
                     if (cleanedContent == null) {
@@ -533,19 +531,16 @@ public final class CanonicalRequestNormalizer {
         List<CanonicalToolDefinition> out = null;
         for (int i = 0; i < tools.size(); i++) {
             CanonicalToolDefinition tool = tools.get(i);
-            JsonNode schema = tool.parametersSchema();
-            if (schema == null || !schema.isObject()) {
+            if (!tool.hasValidObjectSchema()) {
                 if (out == null) {
                     out = new ArrayList<>(tools.size());
                     for (int k = 0; k < i; k++) {
                         out.add(tools.get(k));
                     }
                 }
-                ObjectNode emptySchema = JsonNodeFactory.instance.objectNode();
-                emptySchema.put("type", "object");
-                emptySchema.set("properties", JsonNodeFactory.instance.objectNode());
-                out.add(new CanonicalToolDefinition(
-                        tool.name(), tool.description(), emptySchema, tool.strict(), tool.cacheControl()));
+                out.add(CanonicalToolDefinition.ofValidated(
+                        tool.name(), tool.description(), ValidatedJsonObject.EMPTY_OBJECT_SCHEMA,
+                        tool.strict(), tool.cacheControl()));
             } else if (out != null) {
                 out.add(tool);
             }

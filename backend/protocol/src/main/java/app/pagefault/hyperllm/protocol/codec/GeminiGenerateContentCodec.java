@@ -2,6 +2,7 @@ package app.pagefault.hyperllm.protocol.codec;
 
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -21,11 +22,15 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
+import app.pagefault.hyperllm.protocol.ir.JsonUtf8Text;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
+import app.pagefault.hyperllm.protocol.ir.ValidatedJsonObject;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -35,6 +40,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -63,8 +69,13 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
-            return decodeStreamingRoot(parser, context);
+        return decodeRequest(rawBody, 0, rawBody != null ? rawBody.length : 0, context);
+    }
+
+    @Override
+    public CanonicalRequest decodeRequest(byte[] rawBody, int offset, int length, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody, offset, length)) {
+            return decodeStreamingRoot(parser, context, rawBody, offset, offset + length);
         } catch (HyperLlmException ex) {
             throw ex;
         } catch (IOException ex) {
@@ -73,15 +84,24 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
     }
 
     @Override
-    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
-                CodecSupport.estimateEncodedCapacity(req));
+    public CanonicalRequest decodeRequest(InputStream bodyStream, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, bodyStream)) {
+            return decodeStreamingRoot(parser, context, null, 0, 0);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
+    }
+
+    @Override
+    public void encodeRequest(CanonicalRequest req, UpstreamEncodingContext context, ByteSink out) {
         try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
             gen.writeStartObject();
 
             boolean hasSystemText = false;
             for (CanonicalSystemPart sp : req.systemInstructions()) {
-                if (!sp.text().isEmpty()) {
+                if (!sp.isEmpty()) {
                     hasSystemText = true;
                     break;
                 }
@@ -90,9 +110,10 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 gen.writeObjectFieldStart("systemInstruction");
                 gen.writeArrayFieldStart("parts");
                 for (CanonicalSystemPart sp : req.systemInstructions()) {
-                    if (!sp.text().isEmpty()) {
+                    if (!sp.isEmpty()) {
                         gen.writeStartObject();
-                        gen.writeStringField("text", sp.text());
+                        gen.writeFieldName("text");
+                        sp.writeJsonValue(gen);
                         gen.writeEndObject();
                     }
                 }
@@ -115,19 +136,24 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize Gemini request JSON", ex);
         }
-        return out.toExactByteArray();
     }
 
-    // ---- Streaming request decoding (zero inbound DOM tree for large contents[]) ----
+    // ---- Streaming request decoding (zero inbound DOM tree for systemInstruction, contents[], tools[]) ----
 
-    private CanonicalRequest decodeStreamingRoot(JsonParser parser, InboundRequestContext context) throws IOException {
+    private CanonicalRequest decodeStreamingRoot(
+            JsonParser parser,
+            InboundRequestContext context,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         String bodyModel = null;
         boolean hasContentsArray = false;
         List<UnsupportedFeatureFlag> unsupported = new ArrayList<>();
         List<CanonicalSystemPart> systemParts = new ArrayList<>();
         List<CanonicalSystemPart> leadingContentSystemParts = new ArrayList<>();
         List<CanonicalTurn> turns = new ArrayList<>();
-        JsonNode toolsNode = null;
+        List<CanonicalToolDefinition> tools = new ArrayList<>();
         JsonNode toolConfigNode = null;
         JsonNode genCfgNode = null;
         String cachedContent = null;
@@ -140,16 +166,22 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             }
             switch (field) {
                 case "model" -> bodyModel = CodecSupport.readNullableString(parser);
-                case "systemInstruction" -> systemParts.addAll(decodeSystemInstruction(mapper.readTree(parser)));
+                case "systemInstruction" -> readStreamingSystemInstruction(parser, rawBacking, baseOffset, endOffset, systemParts);
                 case "contents" -> {
                     if (valTok == JsonToken.START_ARRAY) {
                         hasContentsArray = true;
-                        readStreamingContents(parser, leadingContentSystemParts, turns, unsupported);
+                        readStreamingContents(parser, rawBacking, baseOffset, endOffset, leadingContentSystemParts, turns, unsupported);
                     } else {
                         parser.skipChildren();
                     }
                 }
-                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "tools" -> {
+                    if (valTok == JsonToken.START_ARRAY) {
+                        readStreamingTools(parser, rawBacking, baseOffset, endOffset, tools, unsupported);
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
                 case "toolConfig" -> toolConfigNode = mapper.readTree(parser);
                 case "generationConfig" -> genCfgNode = mapper.readTree(parser);
                 case "cachedContent" -> cachedContent = CodecSupport.readNullableString(parser);
@@ -174,7 +206,6 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             systemParts.addAll(leadingContentSystemParts);
         }
 
-        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
         CanonicalToolChoice toolChoice = decodeToolConfig(toolConfigNode);
         CanonicalGenerationConfig generation = decodeGenerationConfig(genCfgNode);
         CanonicalResponseFormat responseFormat = decodeResponseFormat(genCfgNode);
@@ -182,14 +213,127 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         CanonicalCacheConfig cache = new CanonicalCacheConfig(null, null, null, cachedContent);
         CanonicalProtocolOptions options = new CanonicalProtocolOptions(true, altSse, null, null, null, null, null);
 
-        return new CanonicalRequest(
+        RequestMetrics metrics = TokenEstimator.computeRequestMetrics(systemParts, turns, tools);
+        return CanonicalRequest.ofOwned(
                 ProtocolKind.GEMINI_GENERATE_CONTENT, model, stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
+                generation, responseFormat, thinking, cache, options, unsupported, metrics
         );
+    }
+
+    private void readStreamingSystemInstruction(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalSystemPart> systemParts
+    ) throws IOException {
+        if (parser.currentToken() != JsonToken.START_OBJECT) {
+            parser.skipChildren();
+            return;
+        }
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            String f = parser.currentName();
+            JsonToken t = parser.nextToken();
+            if ("parts".equals(f) && t == JsonToken.START_ARRAY) {
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    if (parser.currentToken() != JsonToken.START_OBJECT) {
+                        parser.skipChildren();
+                        continue;
+                    }
+                    JsonUtf8Text text = null;
+                    while (parser.nextToken() != JsonToken.END_OBJECT) {
+                        String pf = parser.currentName();
+                        JsonToken pt = parser.nextToken();
+                        if ("text".equals(pf) && pt == JsonToken.VALUE_STRING) {
+                            text = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    if (text != null) {
+                        systemParts.add(CanonicalSystemPart.ofUtf8(text, false, null));
+                    }
+                }
+            } else {
+                parser.skipChildren();
+            }
+        }
+    }
+
+    private void readStreamingTools(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalToolDefinition> out,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String field = parser.currentName();
+                JsonToken t = parser.nextToken();
+                if ("functionDeclarations".equals(field) && t == JsonToken.START_ARRAY) {
+                    while (parser.nextToken() != JsonToken.END_ARRAY) {
+                        if (parser.currentToken() != JsonToken.START_OBJECT) {
+                            parser.skipChildren();
+                            continue;
+                        }
+                        String name = "";
+                        String description = null;
+                        ValidatedJsonObject paramsJsonSchema = null;
+                        ValidatedJsonObject paramsLegacy = null;
+                        while (parser.nextToken() != JsonToken.END_OBJECT) {
+                            String df = parser.currentName();
+                            JsonToken dt = parser.nextToken();
+                            switch (df) {
+                                case "name" -> {
+                                    if (dt == JsonToken.VALUE_STRING) {
+                                        name = parser.getText();
+                                    } else {
+                                        parser.skipChildren();
+                                    }
+                                }
+                                case "description" -> description = CodecSupport.readNullableString(parser);
+                                case "parametersJsonSchema" -> {
+                                    if (dt == JsonToken.START_OBJECT) {
+                                        paramsJsonSchema = ValidatedJsonObject.readFromParser(
+                                                parser, mapper, rawBacking, baseOffset, endOffset);
+                                    } else {
+                                        parser.skipChildren();
+                                    }
+                                }
+                                case "parameters" -> {
+                                    if (dt == JsonToken.START_OBJECT) {
+                                        paramsLegacy = ValidatedJsonObject.readFromParser(
+                                                parser, mapper, rawBacking, baseOffset, endOffset);
+                                    } else {
+                                        parser.skipChildren();
+                                    }
+                                }
+                                default -> parser.skipChildren();
+                            }
+                        }
+                        ValidatedJsonObject effectiveSchema = paramsJsonSchema != null ? paramsJsonSchema : paramsLegacy;
+                        out.add(CanonicalToolDefinition.ofValidated(name, description, effectiveSchema, null, null));
+                    }
+                } else {
+                    parser.skipChildren();
+                    unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + field,
+                            "Gemini built-in tool '" + field + "' cannot be translated across vendors"));
+                }
+            }
+        }
     }
 
     private void readStreamingContents(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<CanonicalSystemPart> leadingSystemParts,
             List<CanonicalTurn> turns,
             List<UnsupportedFeatureFlag> unsupported
@@ -208,7 +352,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 if ("role".equals(f) && t == JsonToken.VALUE_STRING) {
                     roleStr = parser.getText().toLowerCase(Locale.ROOT);
                 } else if ("parts".equals(f) && t == JsonToken.START_ARRAY) {
-                    parts = readStreamingParts(parser, unsupported);
+                    parts = readStreamingParts(parser, rawBacking, baseOffset, endOffset, unsupported);
                 } else {
                     parser.skipChildren();
                 }
@@ -217,12 +361,12 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 boolean devPriority = "developer".equals(roleStr);
                 if (!sawNonSystem) {
                     for (CanonicalContentPart p : parts) {
-                        if (p instanceof CanonicalContentPart.TextPart t && !t.text().isEmpty()) {
-                            leadingSystemParts.add(new CanonicalSystemPart(t.text(), devPriority, null));
+                        if (p instanceof CanonicalContentPart.TextPart t && !t.isEmpty()) {
+                            leadingSystemParts.add(CanonicalSystemPart.ofUtf8(t.utf8Text(), devPriority, null));
                         }
                     }
                 } else {
-                    turns.add(new CanonicalTurn(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
+                    turns.add(CanonicalTurn.ofOwned(devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM, parts));
                 }
                 continue;
             }
@@ -232,12 +376,15 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 case "function", "tool" -> CanonicalRole.TOOL;
                 default -> CanonicalRole.USER;
             };
-            turns.add(new CanonicalTurn(role, parts));
+            turns.add(CanonicalTurn.ofOwned(role, parts));
         }
     }
 
     private List<CanonicalContentPart> readStreamingParts(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<UnsupportedFeatureFlag> unsupported
     ) throws IOException {
         List<CanonicalContentPart> out = new ArrayList<>(4);
@@ -248,7 +395,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             }
             boolean isThought = false;
             String thoughtSig = null;
-            String text = null;
+            JsonUtf8Text text = null;
             boolean hasInlineData = false;
             String inlineMime = "image/png";
             String inlineData = "";
@@ -258,7 +405,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             boolean hasFunctionCall = false;
             String fcId = null;
             String fcName = "";
-            JsonNode fcArgs = null;
+            ValidatedJsonObject fcArgs = null;
             boolean hasFunctionResponse = false;
             String frId = null;
             String frName = "";
@@ -277,7 +424,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                         }
                     }
                     case "thoughtSignature" -> thoughtSig = CodecSupport.readNullableString(parser);
-                    case "text" -> text = CodecSupport.readNullableString(parser);
+                    case "text" -> text = JsonUtf8Text.readNullableFromParser(parser, rawBacking, baseOffset, endOffset);
                     case "inlineData" -> {
                         if (t == JsonToken.START_OBJECT) {
                             hasInlineData = true;
@@ -324,8 +471,9 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                                     fcId = CodecSupport.readNullableString(parser);
                                 } else if ("name".equals(ff) && ft == JsonToken.VALUE_STRING) {
                                     fcName = parser.getText();
-                                } else if ("args".equals(ff)) {
-                                    fcArgs = mapper.readTree(parser);
+                                } else if ("args".equals(ff) && ft == JsonToken.START_OBJECT) {
+                                    fcArgs = ValidatedJsonObject.readFromParser(
+                                            parser, mapper, rawBacking, baseOffset, endOffset);
                                 } else {
                                     parser.skipChildren();
                                 }
@@ -347,7 +495,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                                 } else if ("response".equals(ff)) {
                                     frResp = mapper.readTree(parser);
                                 } else if ("parts".equals(ff) && ft == JsonToken.START_ARRAY) {
-                                    frNestedParts = readStreamingParts(parser, unsupported);
+                                    frNestedParts = readStreamingParts(parser, rawBacking, baseOffset, endOffset, unsupported);
                                 } else {
                                     parser.skipChildren();
                                 }
@@ -361,10 +509,10 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             }
 
             if (isThought) {
-                out.add(new CanonicalContentPart.ThinkingPart(
-                        text != null ? text : "", thoughtSig, null, ProtocolKind.GEMINI_GENERATE_CONTENT));
+                out.add(CanonicalContentPart.ThinkingPart.ofUtf8(
+                        text != null ? text : JsonUtf8Text.EMPTY, thoughtSig, null, ProtocolKind.GEMINI_GENERATE_CONTENT));
             } else if (text != null) {
-                out.add(new CanonicalContentPart.TextPart(text));
+                out.add(CanonicalContentPart.TextPart.ofUtf8(text));
             } else if (hasInlineData) {
                 if (!inlineMime.toLowerCase(Locale.ROOT).startsWith("image/")) {
                     unsupported.add(new UnsupportedFeatureFlag("inline_media:" + inlineMime,
@@ -386,10 +534,10 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                     unsupported.add(new UnsupportedFeatureFlag("file_uri", "Unsupported Gemini fileUri: " + fileUri));
                 }
             } else if (hasFunctionCall) {
-                ObjectNode argsObj = (fcArgs instanceof ObjectNode o) ? o : mapper.createObjectNode();
-                // Defer rawArgumentsJson stringification until needed
-                out.add(new CanonicalContentPart.ToolCallPart(
-                        fcId, null, fcName, argsObj, null, thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
+                out.add(CanonicalContentPart.ToolCallPart.ofValidatedObjectArgs(
+                        fcId, null, fcName,
+                        fcArgs != null ? fcArgs : ValidatedJsonObject.EMPTY_OBJECT,
+                        thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
             } else if (hasFunctionResponse) {
                 List<CanonicalContentPart> resParts = new ArrayList<>();
                 if (frResp != null && !frResp.isNull()) {
@@ -802,12 +950,12 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         for (CanonicalContentPart part : turn.parts()) {
             switch (part) {
                 case CanonicalContentPart.TextPart t -> {
-                    if (!t.text().isEmpty()) {
+                    if (!t.isEmpty()) {
                         return true;
                     }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
-                    if (!r.refusal().isEmpty()) {
+                    if (!r.isEmpty()) {
                         return true;
                     }
                 }
@@ -842,16 +990,18 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         for (CanonicalContentPart part : turn.parts()) {
             switch (part) {
                 case CanonicalContentPart.TextPart t -> {
-                    if (!t.text().isEmpty()) {
+                    if (!t.isEmpty()) {
                         gen.writeStartObject();
-                        gen.writeStringField("text", t.text());
+                        gen.writeFieldName("text");
+                        t.writeJsonValue(gen);
                         gen.writeEndObject();
                     }
                 }
                 case CanonicalContentPart.RefusalPart r -> {
-                    if (!r.refusal().isEmpty()) {
+                    if (!r.isEmpty()) {
                         gen.writeStartObject();
-                        gen.writeStringField("text", r.refusal());
+                        gen.writeFieldName("text");
+                        r.writeJsonValue(gen);
                         gen.writeEndObject();
                     }
                 }
@@ -861,7 +1011,8 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                             && CodecSupport.isSameOrigin(th.originProtocol(), ProtocolKind.GEMINI_GENERATE_CONTENT)) {
                         gen.writeStartObject();
                         gen.writeBooleanField("thought", true);
-                        gen.writeStringField("text", th.text());
+                        gen.writeFieldName("text");
+                        th.writeJsonValue(gen);
                         if (th.signature() != null && !th.signature().isBlank()) {
                             gen.writeStringField("thoughtSignature", th.signature());
                         }
@@ -990,9 +1141,9 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             if (tool.description() != null) {
                 gen.writeStringField("description", tool.description());
             }
-            if (tool.parametersSchema() != null && !tool.parametersSchema().isNull()) {
+            if (tool.hasAnySchema()) {
                 gen.writeFieldName("parametersJsonSchema");
-                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
+                tool.writeParametersSchemaOrRaw(gen, mapper);
             }
             gen.writeEndObject();
         }

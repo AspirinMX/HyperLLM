@@ -7,6 +7,7 @@ import app.pagefault.hyperllm.protocol.codec.OpenAiChatCodec;
 import app.pagefault.hyperllm.protocol.codec.OpenAiResponsesCodec;
 import app.pagefault.hyperllm.protocol.codec.ProtocolCodec;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalResponse;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
@@ -19,6 +20,7 @@ import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.EnumMap;
 import java.util.Map;
@@ -89,6 +91,42 @@ public final class ProtocolTranslator {
     ) {
         return codecFor(inboundProtocol).decodeRequest(
                 rawBody, context != null ? context : InboundRequestContext.empty());
+    }
+
+    public CanonicalRequest parseRequest(
+            ProtocolKind inboundProtocol,
+            byte[] rawBody,
+            int offset,
+            int length,
+            InboundRequestContext context
+    ) {
+        return codecFor(inboundProtocol).decodeRequest(
+                rawBody, offset, length, context != null ? context : InboundRequestContext.empty());
+    }
+
+    public CanonicalRequest parseRequest(
+            ProtocolKind inboundProtocol,
+            InputStream bodyStream,
+            InboundRequestContext context
+    ) {
+        return codecFor(inboundProtocol).decodeRequest(
+                bodyStream, context != null ? context : InboundRequestContext.empty());
+    }
+
+    /**
+     * Canonical IR &rarr; outbound upstream body written directly into a caller-supplied
+     * {@link ByteSink} (e.g. a pooled Netty direct {@code ByteBuf} sink).
+     */
+    public void encodeUpstreamRequest(
+            CanonicalRequest decoded,
+            ProtocolKind outboundProtocol,
+            UpstreamEncodingContext context,
+            ByteSink out
+    ) {
+        ProtocolCodec outboundCodec = codecFor(outboundProtocol);
+        CanonicalRequest normalized = CanonicalRequestNormalizer.normalizeForTranslation(
+                decoded, outboundProtocol, context);
+        outboundCodec.encodeRequest(normalized, context, out);
     }
 
     /**

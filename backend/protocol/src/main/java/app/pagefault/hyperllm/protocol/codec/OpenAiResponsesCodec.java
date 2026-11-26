@@ -2,6 +2,7 @@ package app.pagefault.hyperllm.protocol.codec;
 
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -21,13 +22,17 @@ import app.pagefault.hyperllm.protocol.ir.CanonicalTurn;
 import app.pagefault.hyperllm.protocol.ir.ImageDetail;
 import app.pagefault.hyperllm.protocol.ir.ImageSource;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
+import app.pagefault.hyperllm.protocol.ir.JsonUtf8Text;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.RequestMetrics;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
 import app.pagefault.hyperllm.protocol.ir.UnsupportedFeatureFlag;
 import app.pagefault.hyperllm.protocol.ir.UpstreamEncodingContext;
+import app.pagefault.hyperllm.protocol.ir.ValidatedJsonObject;
+import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -38,6 +43,8 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -64,8 +71,13 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     @Override
     public CanonicalRequest decodeRequest(byte[] rawBody, InboundRequestContext context) {
-        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody)) {
-            return decodeStreamingRoot(parser);
+        return decodeRequest(rawBody, 0, rawBody != null ? rawBody.length : 0, context);
+    }
+
+    @Override
+    public CanonicalRequest decodeRequest(byte[] rawBody, int offset, int length, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, rawBody, offset, length)) {
+            return decodeStreamingRoot(parser, rawBody, offset, offset + length);
         } catch (HyperLlmException ex) {
             throw ex;
         } catch (IOException ex) {
@@ -74,9 +86,18 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
     }
 
     @Override
-    public byte[] encodeRequest(CanonicalRequest req, UpstreamEncodingContext context) {
-        CodecSupport.ResizableByteBuffer out = new CodecSupport.ResizableByteBuffer(
-                CodecSupport.estimateEncodedCapacity(req));
+    public CanonicalRequest decodeRequest(InputStream bodyStream, InboundRequestContext context) {
+        try (JsonParser parser = CodecSupport.openObjectParser(mapper, bodyStream)) {
+            return decodeStreamingRoot(parser, null, 0, 0);
+        } catch (HyperLlmException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST, "Malformed JSON request body", ex);
+        }
+    }
+
+    @Override
+    public void encodeRequest(CanonicalRequest req, UpstreamEncodingContext context, ByteSink out) {
         try (JsonGenerator gen = CodecSupport.newUtf8Generator(mapper, out)) {
             gen.writeStartObject();
             gen.writeStringField("model", context.upstreamModelName() != null && !context.upstreamModelName().isBlank()
@@ -84,25 +105,29 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             gen.writeBooleanField("stream", req.stream());
 
             if (!req.systemInstructions().isEmpty()) {
-                String singleSys = null;
+                JsonUtf8Text singleSys = null;
                 StringBuilder sysSb = null;
                 for (CanonicalSystemPart sp : req.systemInstructions()) {
-                    if (!sp.text().isEmpty()) {
+                    if (!sp.isEmpty()) {
                         if (singleSys == null && sysSb == null) {
-                            singleSys = sp.text();
+                            singleSys = sp.utf8Text();
                         } else {
                             if (sysSb == null) {
-                                sysSb = new StringBuilder(singleSys.length() + sp.text().length() + 2);
-                                sysSb.append(singleSys);
+                                String first = singleSys.asString();
+                                String next = sp.text();
+                                sysSb = new StringBuilder(first.length() + next.length() + 2);
+                                sysSb.append(first);
                                 singleSys = null;
                             }
                             sysSb.append("\n\n").append(sp.text());
                         }
                     }
                 }
-                String instructions = sysSb != null ? sysSb.toString() : singleSys;
-                if (instructions != null && !instructions.isEmpty()) {
-                    gen.writeStringField("instructions", instructions);
+                if (sysSb != null && !sysSb.isEmpty()) {
+                    gen.writeStringField("instructions", sysSb.toString());
+                } else if (singleSys != null && !singleSys.isEmpty()) {
+                    gen.writeFieldName("instructions");
+                    singleSys.writeJsonValue(gen);
                 }
             }
 
@@ -158,12 +183,16 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to serialize OpenAI Responses request JSON", ex);
         }
-        return out.toExactByteArray();
     }
 
-    // ---- Streaming request decoding (zero inbound DOM tree for large input[]) ----
+    // ---- Streaming request decoding (zero inbound DOM tree for input[] and tools[]) ----
 
-    private CanonicalRequest decodeStreamingRoot(JsonParser parser) throws IOException {
+    private CanonicalRequest decodeStreamingRoot(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
         String model = null;
         boolean stream = false;
         boolean inputPresent = false;
@@ -174,8 +203,9 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         List<CanonicalSystemPart> systemParts = new ArrayList<>();
         List<CanonicalSystemPart> leadingInputSystemParts = new ArrayList<>();
         List<CanonicalTurn> turns = new ArrayList<>();
+        List<CanonicalToolDefinition> tools = new ArrayList<>();
+        List<String> vendorRawTools = new ArrayList<>();
 
-        JsonNode toolsNode = null;
         JsonNode toolChoiceNode = null;
         Boolean parallelToolCalls = null;
         JsonNode textNode = null;
@@ -230,9 +260,9 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     }
                 }
                 case "instructions" -> {
-                    String instr = CodecSupport.readNullableString(parser);
-                    if (instr != null && !instr.isBlank()) {
-                        systemParts.add(new CanonicalSystemPart(instr, true, null));
+                    JsonUtf8Text instr = JsonUtf8Text.readNullableFromParser(parser, rawBacking, baseOffset, endOffset);
+                    if (instr != null && !instr.isEmpty() && !instr.asString().isBlank()) {
+                        systemParts.add(CanonicalSystemPart.ofUtf8(instr, true, null));
                     }
                 }
                 case "input" -> {
@@ -240,17 +270,30 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     if (valTok == JsonToken.VALUE_NULL) {
                         inputIsNull = true;
                     } else if (valTok == JsonToken.VALUE_STRING) {
-                        turns.add(new CanonicalTurn(CanonicalRole.USER,
-                                List.of(new CanonicalContentPart.TextPart(parser.getText()))));
+                        turns.add(CanonicalTurn.ofOwned(CanonicalRole.USER,
+                                List.of(CanonicalContentPart.TextPart.ofUtf8(
+                                        JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset)))));
                     } else if (valTok == JsonToken.START_ARRAY) {
-                        readStreamingInputItems(parser, leadingInputSystemParts, turns, unsupported);
+                        readStreamingInputItems(parser, rawBacking, baseOffset, endOffset, leadingInputSystemParts, turns, unsupported);
                     } else {
                         parser.skipChildren();
                         throw new HyperLlmException(ErrorCode.PROTOCOL_INVALID_REQUEST,
                                 "Field 'input' must be a string or an array");
                     }
                 }
-                case "tools" -> toolsNode = mapper.readTree(parser);
+                case "tools" -> {
+                    if (valTok == JsonToken.START_ARRAY) {
+                        if (rawBacking != null) {
+                            readStreamingTools(parser, rawBacking, baseOffset, endOffset, tools, vendorRawTools, unsupported);
+                        } else {
+                            JsonNode toolsNode = mapper.readTree(parser);
+                            tools.addAll(decodeTools(toolsNode, unsupported));
+                            vendorRawTools.addAll(retainBuiltinTools(toolsNode));
+                        }
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
                 case "tool_choice" -> toolChoiceNode = mapper.readTree(parser);
                 case "parallel_tool_calls" -> parallelToolCalls = CodecSupport.readNullableBoolean(parser);
                 case "text" -> textNode = mapper.readTree(parser);
@@ -277,8 +320,6 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             systemParts.addAll(leadingInputSystemParts);
         }
 
-        List<CanonicalToolDefinition> tools = decodeTools(toolsNode, unsupported);
-        List<String> vendorRawTools = retainBuiltinTools(toolsNode);
         CanonicalToolChoice toolChoice = decodeToolChoice(toolChoiceNode, parallelToolCalls);
         CanonicalResponseFormat responseFormat = textNode != null ? decodeTextFormat(textNode.get("format")) : null;
         CanonicalGenerationConfig generation = new CanonicalGenerationConfig(
@@ -288,14 +329,84 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         CanonicalProtocolOptions options = new CanonicalProtocolOptions(
                 true, true, null, null, user, serviceTier, store, vendorRawFields, vendorRawTools);
 
-        return new CanonicalRequest(
+        RequestMetrics metrics = TokenEstimator.computeRequestMetrics(systemParts, turns, tools);
+        return CanonicalRequest.ofOwned(
                 ProtocolKind.OPENAI_RESPONSES, model.trim(), stream, systemParts, turns, tools, toolChoice,
-                generation, responseFormat, thinking, cache, options, unsupported
+                generation, responseFormat, thinking, cache, options, unsupported, metrics
         );
+    }
+
+    private void readStreamingTools(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
+            List<CanonicalToolDefinition> out,
+            List<String> vendorRawTools,
+            List<UnsupportedFeatureFlag> unsupported
+    ) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            long objStartRel = parser.currentTokenLocation().getByteOffset();
+            String type = "";
+            String name = "";
+            String description = null;
+            ValidatedJsonObject parameters = null;
+            Boolean strict = null;
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String f = parser.currentName();
+                JsonToken t = parser.nextToken();
+                switch (f) {
+                    case "type" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            type = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "name" -> {
+                        if (t == JsonToken.VALUE_STRING) {
+                            name = parser.getText();
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "description" -> description = CodecSupport.readNullableString(parser);
+                    case "parameters" -> {
+                        if (t == JsonToken.START_OBJECT) {
+                            parameters = ValidatedJsonObject.readFromParser(
+                                    parser, mapper, rawBacking, baseOffset, endOffset);
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    case "strict" -> strict = CodecSupport.readNullableBoolean(parser);
+                    default -> parser.skipChildren();
+                }
+            }
+            if (!"function".equals(type)) {
+                unsupported.add(UnsupportedFeatureFlag.degradable("builtin_tool:" + type,
+                        "OpenAI Responses built-in tool '" + type + "' cannot be translated across vendors"));
+                long objEndRel = parser.currentTokenLocation().getByteOffset();
+                long absStart = baseOffset + objStartRel;
+                long absEnd = baseOffset + objEndRel;
+                if (objStartRel >= 0L && absStart >= baseOffset && absEnd >= absStart && absEnd < endOffset) {
+                    vendorRawTools.add(new String(rawBacking, (int) absStart, (int) (absEnd - absStart + 1), StandardCharsets.UTF_8));
+                }
+                continue;
+            }
+            out.add(CanonicalToolDefinition.ofValidated(name, description, parameters, strict, null));
+        }
     }
 
     private void readStreamingInputItems(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<CanonicalSystemPart> leadingSystemParts,
             List<CanonicalTurn> turns,
             List<UnsupportedFeatureFlag> unsupported
@@ -314,13 +425,13 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             String toolCallId = null;
             String itemId = null;
             String name = "";
-            String rawArgs = "{}";
+            JsonUtf8Text rawArgs = JsonUtf8Text.ofString("{}");
             String encryptedContent = null;
-            String plainContent = null;
+            JsonUtf8Text plainContent = null;
             List<CanonicalContentPart> arrayContent = null;
-            String plainOutput = null;
+            JsonUtf8Text plainOutput = null;
             List<CanonicalContentPart> arrayOutput = null;
-            String summaryText = null;
+            JsonUtf8Text summaryText = null;
 
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 String f = parser.currentName();
@@ -352,7 +463,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     }
                     case "arguments" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            rawArgs = parser.getText();
+                            rawArgs = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -360,25 +471,25 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     case "encrypted_content" -> encryptedContent = CodecSupport.readNullableString(parser);
                     case "content" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            plainContent = parser.getText();
+                            plainContent = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else if (t == JsonToken.START_ARRAY) {
-                            arrayContent = readStreamingMessageContentArray(parser, unsupported);
+                            arrayContent = readStreamingMessageContentArray(parser, rawBacking, baseOffset, endOffset, unsupported);
                         } else if (t != JsonToken.VALUE_NULL) {
-                            plainContent = mapper.readTree(parser).toString();
+                            plainContent = JsonUtf8Text.ofString(mapper.readTree(parser).toString());
                         }
                     }
                     case "output" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            plainOutput = parser.getText();
+                            plainOutput = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else if (t == JsonToken.START_ARRAY) {
-                            arrayOutput = readStreamingMessageContentArray(parser, unsupported);
+                            arrayOutput = readStreamingMessageContentArray(parser, rawBacking, baseOffset, endOffset, unsupported);
                         } else if (t != JsonToken.VALUE_NULL) {
-                            plainOutput = mapper.readTree(parser).toString();
+                            plainOutput = JsonUtf8Text.ofString(mapper.readTree(parser).toString());
                         }
                     }
                     case "summary" -> {
                         if (t == JsonToken.START_ARRAY) {
-                            summaryText = readStreamingSummaryTexts(parser);
+                            summaryText = readStreamingSummaryTexts(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -392,20 +503,20 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     case "system", "developer" -> {
                         boolean devPriority = "developer".equals(role);
                         flushPendingAssistant(pendingAssistant, turns);
-                        String text = extractPlainFromStreaming(plainContent, arrayContent);
+                        JsonUtf8Text text = extractPlainUtf8FromStreaming(plainContent, arrayContent);
                         if (!sawNonSystem) {
-                            leadingSystemParts.add(new CanonicalSystemPart(text, devPriority, null));
+                            leadingSystemParts.add(CanonicalSystemPart.ofUtf8(text, devPriority, null));
                         } else {
-                            turns.add(new CanonicalTurn(
+                            turns.add(CanonicalTurn.ofOwned(
                                     devPriority ? CanonicalRole.DEVELOPER : CanonicalRole.SYSTEM,
-                                    List.of(new CanonicalContentPart.TextPart(text))
+                                    List.of(CanonicalContentPart.TextPart.ofUtf8(text))
                             ));
                         }
                     }
                     case "user" -> {
                         sawNonSystem = true;
                         flushPendingAssistant(pendingAssistant, turns);
-                        turns.add(new CanonicalTurn(CanonicalRole.USER, resolveParts(plainContent, arrayContent)));
+                        turns.add(CanonicalTurn.ofOwned(CanonicalRole.USER, resolveParts(plainContent, arrayContent)));
                     }
                     case "assistant" -> {
                         sawNonSystem = true;
@@ -415,7 +526,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                         sawNonSystem = true;
                         flushPendingAssistant(pendingAssistant, turns);
                         String effectiveCallId = callId != null ? callId : toolCallId;
-                        turns.add(new CanonicalTurn(
+                        turns.add(CanonicalTurn.ofOwned(
                                 CanonicalRole.TOOL,
                                 List.of(new CanonicalContentPart.ToolResultPart(
                                         effectiveCallId, name.isEmpty() ? null : name,
@@ -427,12 +538,10 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 }
             } else if ("function_call".equals(type)) {
                 sawNonSystem = true;
-                // Defer JSON object parsing of rawArgs (zero eager readTree!)
-                pendingAssistant.add(new CanonicalContentPart.ToolCallPart(
+                pendingAssistant.add(CanonicalContentPart.ToolCallPart.ofRawUtf8Args(
                         callId != null ? callId : itemId,
                         itemId,
                         name,
-                        null,
                         rawArgs,
                         null,
                         ProtocolKind.OPENAI_RESPONSES
@@ -440,18 +549,18 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             } else if ("function_call_output".equals(type)) {
                 sawNonSystem = true;
                 flushPendingAssistant(pendingAssistant, turns);
-                turns.add(new CanonicalTurn(
+                turns.add(CanonicalTurn.ofOwned(
                         CanonicalRole.TOOL,
                         List.of(new CanonicalContentPart.ToolResultPart(
                                 callId, null, resolveParts(plainOutput, arrayOutput), false, null))
                 ));
             } else if ("reasoning".equals(type)) {
                 sawNonSystem = true;
-                String reasoningText = (summaryText != null && !summaryText.isEmpty())
+                JsonUtf8Text reasoningText = (summaryText != null && !summaryText.isEmpty())
                         ? summaryText
-                        : extractPlainFromStreaming(plainContent, arrayContent);
+                        : extractPlainUtf8FromStreaming(plainContent, arrayContent);
                 if (reasoningText != null && !reasoningText.isEmpty()) {
-                    pendingAssistant.add(new CanonicalContentPart.ThinkingPart(
+                    pendingAssistant.add(CanonicalContentPart.ThinkingPart.ofUtf8(
                             reasoningText, null, encryptedContent, ProtocolKind.OPENAI_RESPONSES));
                 } else if (encryptedContent != null && !encryptedContent.isBlank()) {
                     pendingAssistant.add(new CanonicalContentPart.RedactedThinkingPart(
@@ -467,6 +576,9 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
 
     private List<CanonicalContentPart> readStreamingMessageContentArray(
             JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset,
             List<UnsupportedFeatureFlag> unsupported
     ) throws IOException {
         List<CanonicalContentPart> parts = new ArrayList<>(4);
@@ -476,8 +588,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 continue;
             }
             String type = "";
-            String text = "";
-            String refusal = "";
+            JsonUtf8Text text = JsonUtf8Text.EMPTY;
+            JsonUtf8Text refusal = JsonUtf8Text.EMPTY;
             String fileId = null;
             String imgUrl = null;
             ImageDetail detail = ImageDetail.AUTO;
@@ -494,14 +606,14 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     }
                     case "text" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            text = parser.getText();
+                            text = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
                     }
                     case "refusal" -> {
                         if (t == JsonToken.VALUE_STRING) {
-                            refusal = parser.getText();
+                            refusal = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
                         } else {
                             parser.skipChildren();
                         }
@@ -536,8 +648,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             }
             switch (type) {
                 case "input_text", "output_text", "text", "summary_text" ->
-                        parts.add(new CanonicalContentPart.TextPart(text));
-                case "refusal" -> parts.add(new CanonicalContentPart.RefusalPart(refusal));
+                        parts.add(CanonicalContentPart.TextPart.ofUtf8(text));
+                case "refusal" -> parts.add(CanonicalContentPart.RefusalPart.ofUtf8(refusal));
                 case "input_image" -> {
                     if (fileId != null && !fileId.isBlank()) {
                         parts.add(new CanonicalContentPart.ImagePart(
@@ -557,8 +669,14 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         return parts;
     }
 
-    private String readStreamingSummaryTexts(JsonParser parser) throws IOException {
-        StringBuilder sb = new StringBuilder();
+    private JsonUtf8Text readStreamingSummaryTexts(
+            JsonParser parser,
+            byte[] rawBacking,
+            int baseOffset,
+            int endOffset
+    ) throws IOException {
+        JsonUtf8Text single = null;
+        StringBuilder sb = null;
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             if (parser.currentToken() != JsonToken.START_OBJECT) {
                 parser.skipChildren();
@@ -568,45 +686,58 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 String f = parser.currentName();
                 JsonToken t = parser.nextToken();
                 if ("text".equals(f) && t == JsonToken.VALUE_STRING) {
-                    if (!sb.isEmpty()) {
-                        sb.append('\n');
+                    JsonUtf8Text piece = JsonUtf8Text.readFromParser(parser, rawBacking, baseOffset, endOffset);
+                    if (single == null && sb == null) {
+                        single = piece;
+                    } else {
+                        if (sb == null) {
+                            String first = single.asString();
+                            sb = new StringBuilder(first.length() + piece.estimatedWireBytes() + 1);
+                            sb.append(first);
+                            single = null;
+                        }
+                        if (!sb.isEmpty()) {
+                            sb.append('\n');
+                        }
+                        sb.append(piece.asString());
                     }
-                    sb.append(parser.getText());
                 } else {
                     parser.skipChildren();
                 }
             }
         }
-        return sb.toString();
+        return sb != null ? JsonUtf8Text.ofString(sb.toString()) : (single != null ? single : JsonUtf8Text.EMPTY);
     }
 
-    private static List<CanonicalContentPart> resolveParts(String plain, List<CanonicalContentPart> arr) {
+    private static List<CanonicalContentPart> resolveParts(JsonUtf8Text plain, List<CanonicalContentPart> arr) {
         if (arr != null) {
             return arr;
         }
         if (plain != null) {
-            return List.of(new CanonicalContentPart.TextPart(plain));
+            return List.of(CanonicalContentPart.TextPart.ofUtf8(plain));
         }
         return List.of();
     }
 
-    private static String extractPlainFromStreaming(String plain, List<CanonicalContentPart> arr) {
+    private static JsonUtf8Text extractPlainUtf8FromStreaming(JsonUtf8Text plain, List<CanonicalContentPart> arr) {
         if (plain != null) {
             return plain;
         }
         if (arr == null || arr.isEmpty()) {
-            return "";
+            return JsonUtf8Text.EMPTY;
         }
-        String single = null;
+        JsonUtf8Text single = null;
         StringBuilder sb = null;
         for (CanonicalContentPart p : arr) {
             if (p instanceof CanonicalContentPart.TextPart t) {
                 if (single == null && sb == null) {
-                    single = t.text();
+                    single = t.utf8Text();
                 } else {
                     if (sb == null) {
-                        sb = new StringBuilder(single.length() + t.text().length() + 1);
-                        sb.append(single);
+                        String first = single.asString();
+                        String next = t.text();
+                        sb = new StringBuilder(first.length() + next.length() + 1);
+                        sb.append(first);
                         single = null;
                     }
                     if (!sb.isEmpty()) {
@@ -616,7 +747,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 }
             }
         }
-        return sb != null ? sb.toString() : (single != null ? single : "");
+        return sb != null ? JsonUtf8Text.ofString(sb.toString()) : (single != null ? single : JsonUtf8Text.EMPTY);
     }
 
     @Override
@@ -1098,7 +1229,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     if (p instanceof CanonicalContentPart.TextPart t) {
                         gen.writeStartObject();
                         gen.writeStringField("type", "input_text");
-                        gen.writeStringField("text", t.text());
+                        gen.writeFieldName("text");
+                        t.writeJsonValue(gen);
                         gen.writeEndObject();
                     }
                 }
@@ -1135,10 +1267,11 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                                 gen.writeStartObject();
                                 gen.writeStringField("type", "reasoning");
                                 gen.writeArrayFieldStart("summary");
-                                if (!th.text().isEmpty()) {
+                                if (!th.isEmpty()) {
                                     gen.writeStartObject();
                                     gen.writeStringField("type", "summary_text");
-                                    gen.writeStringField("text", th.text());
+                                    gen.writeFieldName("text");
+                                    th.writeJsonValue(gen);
                                     gen.writeEndObject();
                                 }
                                 gen.writeEndArray();
@@ -1196,7 +1329,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             if (p instanceof CanonicalContentPart.TextPart t) {
                 gen.writeStartObject();
                 gen.writeStringField("type", "input_text");
-                gen.writeStringField("text", t.text());
+                gen.writeFieldName("text");
+                t.writeJsonValue(gen);
                 gen.writeEndObject();
             } else if (p instanceof CanonicalContentPart.ImagePart img) {
                 writeInputImagePart(gen, img);
@@ -1215,12 +1349,14 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             if (p instanceof CanonicalContentPart.TextPart t) {
                 gen.writeStartObject();
                 gen.writeStringField("type", "output_text");
-                gen.writeStringField("text", t.text());
+                gen.writeFieldName("text");
+                t.writeJsonValue(gen);
                 gen.writeEndObject();
             } else if (p instanceof CanonicalContentPart.RefusalPart ref) {
                 gen.writeStartObject();
                 gen.writeStringField("type", "refusal");
-                gen.writeStringField("refusal", ref.refusal());
+                gen.writeFieldName("refusal");
+                ref.writeJsonValue(gen);
                 gen.writeEndObject();
             }
         }
@@ -1247,7 +1383,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         gen.writeStringField("status", "completed");
         gen.writeStringField("call_id", callId);
         gen.writeStringField("name", tc.name());
-        gen.writeStringField("arguments", CodecSupport.serializeArguments(mapper, tc));
+        gen.writeFieldName("arguments");
+        CodecSupport.writeArgumentsAsJsonString(gen, mapper, tc);
         gen.writeEndObject();
     }
 
@@ -1276,31 +1413,41 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         gen.writeStringField("type", "function_call_output");
         gen.writeStringField("call_id", tr.callId() != null ? tr.callId() : "");
         if (!hasImage) {
-            String outputText;
-            if (children.isEmpty()) {
-                outputText = "";
-            } else if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t) {
-                outputText = (tr.isError() && !t.text().isEmpty()) ? "Error: " + t.text() : t.text();
+            if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t && !tr.isError()) {
+                gen.writeFieldName("output");
+                t.writeJsonValue(gen);
             } else {
-                StringBuilder text = new StringBuilder();
-                for (CanonicalContentPart c : children) {
-                    if (c instanceof CanonicalContentPart.TextPart t) {
-                        if (!text.isEmpty()) {
-                            text.append('\n');
+                String outputText;
+                if (children.isEmpty()) {
+                    outputText = "";
+                } else if (children.size() == 1 && children.getFirst() instanceof CanonicalContentPart.TextPart t) {
+                    outputText = !t.isEmpty() ? "Error: " + t.text() : "";
+                } else {
+                    StringBuilder text = new StringBuilder();
+                    for (CanonicalContentPart c : children) {
+                        if (c instanceof CanonicalContentPart.TextPart t) {
+                            if (!text.isEmpty()) {
+                                text.append('\n');
+                            }
+                            text.append(t.text());
                         }
-                        text.append(t.text());
                     }
+                    outputText = (tr.isError() && !text.isEmpty()) ? "Error: " + text : text.toString();
                 }
-                outputText = (tr.isError() && !text.isEmpty()) ? "Error: " + text : text.toString();
+                gen.writeStringField("output", outputText);
             }
-            gen.writeStringField("output", outputText);
         } else {
             gen.writeArrayFieldStart("output");
             for (CanonicalContentPart c : children) {
                 if (c instanceof CanonicalContentPart.TextPart t) {
                     gen.writeStartObject();
                     gen.writeStringField("type", "input_text");
-                    gen.writeStringField("text", tr.isError() ? "Error: " + t.text() : t.text());
+                    if (tr.isError()) {
+                        gen.writeStringField("text", "Error: " + t.text());
+                    } else {
+                        gen.writeFieldName("text");
+                        t.writeJsonValue(gen);
+                    }
                     gen.writeEndObject();
                 } else if (c instanceof CanonicalContentPart.ImagePart img) {
                     writeInputImagePart(gen, img);
@@ -1337,11 +1484,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 gen.writeStringField("description", tool.description());
             }
             gen.writeFieldName("parameters");
-            if (tool.parametersSchema() != null && tool.parametersSchema().isObject()) {
-                CodecSupport.writeJsonNode(gen, mapper, tool.parametersSchema());
-            } else {
-                CodecSupport.writeEmptyObjectSchema(gen);
-            }
+            tool.writeParametersSchema(gen, mapper);
             if (tool.strict() != null) {
                 gen.writeBooleanField("strict", tool.strict());
             }
