@@ -8,6 +8,9 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -116,16 +119,42 @@ public sealed interface JsonUtf8Text permits
     /**
      * Validates strict UTF-8 + canonical RFC 8259 escapes from {@code start} up to the closing
      * {@code '"'} within {@code [start, end)} and counts exact decoded code points and UTF-8 bytes
-     * in one pass. Returns {@code null} to trigger standard Jackson {@code parser.getText()} fallback
-     * whenever any unicode escape, invalid escape, unescaped control byte, or malformed UTF-8 is encountered.
+     * in one pass. Uses an 8-byte SWAR (SIMD Within A Register) fast path for runs of unescaped
+     * printable ASCII ({@code 0x20..0x7F \ {'"', '\\'}}) before dropping to the scalar validator
+     * for quotes, escapes, control bytes, and multi-byte UTF-8 sequences. Returns {@code null} to
+     * trigger standard Jackson {@code parser.getText()} fallback whenever any unicode escape,
+     * invalid escape, unescaped control byte, or malformed UTF-8 is encountered.
      */
     static ValidatedJsonSlice scanValidatedSlice(byte[] buf, int start, int end) {
         int i = start;
+        int swarLimit = end - 8;
         long codePoints = 0L;
         long decodedUtf8Bytes = 0L;
         boolean hasEscapes = false;
 
         while (i < end) {
+            // SWAR 8-byte fast path: when (word & 0x80..80) == 0 every lane is in 0x00..0x7F, so
+            // (word + 0x60..60) cannot carry across lanes and has bit 7 set iff lane >= 0x20.
+            // Combined with Mycroft zero-byte tests for '"' (0x22) and '\\' (0x5C), special == 0L
+            // iff all 8 bytes are safe unescaped printable ASCII JSON string characters.
+            while (i <= swarLimit) {
+                long word = (long) Swar.LONG_LE.get(buf, i);
+                long q = word ^ 0x2222222222222222L;
+                long bs = word ^ 0x5C5C5C5C5C5C5C5CL;
+                long special = (word & 0x8080808080808080L)
+                        | (~(word + 0x6060606060606060L) & 0x8080808080808080L)
+                        | ((q - 0x0101010101010101L) & ~q & 0x8080808080808080L)
+                        | ((bs - 0x0101010101010101L) & ~bs & 0x8080808080808080L);
+                if (special != 0L) {
+                    break;
+                }
+                codePoints += 8L;
+                decodedUtf8Bytes += 8L;
+                i += 8;
+            }
+            if (i >= end) {
+                break;
+            }
             byte b = buf[i];
             if (b == '"') {
                 int sliceLen = i - start;
@@ -217,6 +246,15 @@ public sealed interface JsonUtf8Text permits
         }
         // Unterminated string: let Jackson report the syntax error.
         return null;
+    }
+
+    /** Holder class so the VarHandle stays private to {@link JsonUtf8Text} (sealed interface permits only implementations). */
+    final class Swar {
+        static final VarHandle LONG_LE =
+                MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+
+        private Swar() {
+        }
     }
 
     final class ValidatedJsonSlice implements JsonUtf8Text {

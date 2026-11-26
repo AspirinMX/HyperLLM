@@ -260,6 +260,68 @@ class ZeroCopyIrAndSecurityTest {
         assertThat(actualJson).isEqualTo(mapper.writeValueAsString(tricky));
     }
 
+    @Test
+    void swarScannerMatchesScalarRulesAcrossEveryLaneAndBoundaryByte() {
+        // 1. Every control byte 0x00..0x1F at every SWAR lane position 0..7 must be rejected (returns null).
+        for (int lane = 0; lane < 8; lane++) {
+            for (int ctrl = 0; ctrl < 0x20; ctrl++) {
+                byte[] buf = "aaaaaaaaaaaaaaaa\"".getBytes(StandardCharsets.US_ASCII);
+                buf[lane] = (byte) ctrl;
+                assertThat(JsonUtf8Text.scanValidatedSlice(buf, 0, buf.length))
+                        .as("control byte 0x%02x at lane %d must be rejected", ctrl, lane)
+                        .isNull();
+            }
+            // Bare invalid continuation byte 0x80 at every lane 0..7 must be rejected.
+            byte[] badUtf8 = "aaaaaaaaaaaaaaaa\"".getBytes(StandardCharsets.US_ASCII);
+            badUtf8[lane] = (byte) 0x80;
+            assertThat(JsonUtf8Text.scanValidatedSlice(badUtf8, 0, badUtf8.length))
+                    .as("invalid UTF-8 0x80 at lane %d must be rejected", lane)
+                    .isNull();
+
+            // Closing quote at every lane 0..7 must terminate at the exact index.
+            byte[] quoteAtLane = "aaaaaaaaaaaaaaaa\"".getBytes(StandardCharsets.US_ASCII);
+            quoteAtLane[lane] = '"';
+            JsonUtf8Text.ValidatedJsonSlice sliced = JsonUtf8Text.scanValidatedSlice(quoteAtLane, 0, quoteAtLane.length);
+            assertThat(sliced).isNotNull();
+            assertThat(sliced.length()).isEqualTo(lane);
+
+            // Backslash escape at every lane 0..7 must be unescaped accurately, while unicode escapes must fall back (null).
+            byte[] escAtLane = "aaaaaaaaaaaaaaaa\"".getBytes(StandardCharsets.US_ASCII);
+            escAtLane[lane] = '\\';
+            escAtLane[lane + 1] = 'n';
+            JsonUtf8Text.ValidatedJsonSlice escaped = JsonUtf8Text.scanValidatedSlice(escAtLane, 0, escAtLane.length);
+            assertThat(escaped).isNotNull();
+            assertThat(escaped.asString().charAt(lane)).isEqualTo('\n');
+
+            byte[] unicodeEsc = "aaaaaaaaaaaaaaaa\"".getBytes(StandardCharsets.US_ASCII);
+            unicodeEsc[lane] = '\\';
+            unicodeEsc[lane + 1] = 'u';
+            assertThat(JsonUtf8Text.scanValidatedSlice(unicodeEsc, 0, unicodeEsc.length)).isNull();
+        }
+
+        // 2. Boundary printable ASCII (0x20 space and 0x7F DEL) and long interleaved UTF-8 runs.
+        byte[] boundaryAscii = new byte[25];
+        java.util.Arrays.fill(boundaryAscii, 0, 12, (byte) 0x20);
+        java.util.Arrays.fill(boundaryAscii, 12, 24, (byte) 0x7F);
+        boundaryAscii[24] = '"';
+        JsonUtf8Text.ValidatedJsonSlice boundSlice = JsonUtf8Text.scanValidatedSlice(boundaryAscii, 0, boundaryAscii.length);
+        assertThat(boundSlice).isNotNull();
+        assertThat(boundSlice.length()).isEqualTo(24);
+
+        // 3. Long mixed ASCII + escapes + 2/3/4-byte UTF-8 matches TokenEstimator exactly.
+        String longText = ("0123456789abcdef_code_run_with_more_than_8_bytes " +
+                "café 中文 🚀 \"quoted\" \\n ").repeat(200);
+        ByteSink.HeapByteSink writerSink = new ByteSink.HeapByteSink(longText.length() + 64);
+        JsonUtf8Writer.writeJsonString(longText, writerSink);
+        byte[] wire = writerSink.toExactByteArray();
+        JsonUtf8Text.ValidatedJsonSlice longSlice = JsonUtf8Text.scanValidatedSlice(wire, 1, wire.length);
+        assertThat(longSlice).isNotNull();
+        assertThat(longSlice.asString()).isEqualTo(longText);
+        TokenEstimator.TextTokenCounter expectedCounter = new TokenEstimator.TextTokenCounter();
+        expectedCounter.add(longText);
+        assertThat(longSlice.estimatedTokens()).isEqualTo(expectedCounter.estimateTokens());
+    }
+
     private static JsonNode normalizeGeneratedIds(JsonNode node) {
         if (node instanceof com.fasterxml.jackson.databind.node.ObjectNode obj) {
             JsonNode id = obj.get("id");
