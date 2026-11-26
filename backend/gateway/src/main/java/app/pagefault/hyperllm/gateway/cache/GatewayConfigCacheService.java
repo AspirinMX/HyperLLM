@@ -4,6 +4,7 @@ import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.cache.SandboxTokenPayload;
 import app.pagefault.hyperllm.common.crypto.HmacSha256;
 import app.pagefault.hyperllm.domain.model.billing.OrgModelPricingOverride;
+import app.pagefault.hyperllm.domain.model.routing.GatewayChannelCandidate;
 import app.pagefault.hyperllm.domain.model.routing.GatewayModelRoute;
 import app.pagefault.hyperllm.domain.model.routing.VirtualModel;
 import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
@@ -12,6 +13,10 @@ import app.pagefault.hyperllm.domain.repository.GatewayRouteRepository;
 import app.pagefault.hyperllm.domain.repository.OrgModelPricingOverrideRepository;
 import app.pagefault.hyperllm.domain.repository.VirtualModelRepository;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
+import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
+import app.pagefault.hyperllm.protocol.ir.ProviderCapabilities;
+import app.pagefault.hyperllm.protocol.ir.TranslationPolicy;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -25,7 +30,12 @@ import reactor.core.scheduler.Scheduler;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -36,10 +46,111 @@ import java.util.UUID;
 @Service
 public class GatewayConfigCacheService {
 
+    /** Allocation-light composite key replacing {@code orgId + ":" + virtualModelId} string concatenation. */
+    private record OrgModelKey(UUID orgId, UUID virtualModelId) {
+    }
+
+    /**
+     * Pre-parsed immutable routing metadata computed once when a {@link GatewayModelRoute} enters L1,
+     * eliminating per-request Jackson DOM parsing of {@code metadata_json}, {@code extra_headers_json},
+     * and {@link ProviderCapabilities}.
+     */
+    public record ParsedRouteMetadata(
+            TranslationPolicy translationPolicy,
+            String thinkingStyle,
+            Map<UUID, Map<String, String>> channelExtraHeaders,
+            Map<UUID, EnumMap<ProtocolKind, ProviderCapabilities>> channelCapabilities
+    ) {
+        public Map<String, String> extraHeadersFor(UUID channelId) {
+            if (channelId == null) {
+                return Map.of();
+            }
+            Map<String, String> headers = channelExtraHeaders.get(channelId);
+            return headers != null ? headers : Map.of();
+        }
+
+        public ProviderCapabilities capabilitiesFor(UUID channelId, ProtocolKind outboundProtocol) {
+            if (channelId == null || outboundProtocol == null) {
+                return null;
+            }
+            EnumMap<ProtocolKind, ProviderCapabilities> byProto = channelCapabilities.get(channelId);
+            return byProto != null ? byProto.get(outboundProtocol) : null;
+        }
+
+        public static ParsedRouteMetadata parse(GatewayModelRoute route, ObjectMapper mapper) {
+            VirtualModel vm = route.model();
+            TranslationPolicy policy = TranslationPolicy.parseOrDefault(
+                    vm != null ? vm.translationPolicy() : null, TranslationPolicy.BEST_EFFORT);
+            JsonNode metaTree = parseObject(vm != null ? vm.metadataJson() : null, mapper);
+            String thinkingStyle = (metaTree != null && metaTree.hasNonNull("thinkingStyle"))
+                    ? metaTree.get("thinkingStyle").asText()
+                    : null;
+            boolean supportsThinking = vm != null && vm.supportsThinking();
+
+            List<GatewayChannelCandidate> candidates = route.candidates();
+            Map<UUID, Map<String, String>> extraHeadersByChannel = new HashMap<>(
+                    Math.max(4, candidates != null ? candidates.size() * 2 : 4));
+            Map<UUID, EnumMap<ProtocolKind, ProviderCapabilities>> capsByChannel = new HashMap<>(
+                    Math.max(4, candidates != null ? candidates.size() * 2 : 4));
+
+            if (candidates != null) {
+                for (GatewayChannelCandidate candidate : candidates) {
+                    if (candidate == null || candidate.channelId() == null) {
+                        continue;
+                    }
+                    UUID channelId = candidate.channelId();
+                    Map<String, String> headers = parseExtraHeaders(candidate.extraHeadersJson(), mapper);
+                    if (!headers.isEmpty()) {
+                        extraHeadersByChannel.put(channelId, headers);
+                    }
+                    EnumMap<ProtocolKind, ProviderCapabilities> byProto = new EnumMap<>(ProtocolKind.class);
+                    for (ProtocolKind proto : ProtocolKind.values()) {
+                        byProto.put(proto, ProviderCapabilities.resolveWithParsedMetadata(
+                                proto, candidate.providerCode(), supportsThinking, thinkingStyle, metaTree));
+                    }
+                    capsByChannel.put(channelId, byProto);
+                }
+            }
+            return new ParsedRouteMetadata(
+                    policy,
+                    thinkingStyle,
+                    Collections.unmodifiableMap(extraHeadersByChannel),
+                    Collections.unmodifiableMap(capsByChannel)
+            );
+        }
+
+        private static JsonNode parseObject(String json, ObjectMapper mapper) {
+            if (json == null || json.isBlank() || "{}".equals(json.trim())) {
+                return null;
+            }
+            try {
+                JsonNode tree = mapper.readTree(json);
+                return (tree != null && tree.isObject()) ? tree : null;
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        private static Map<String, String> parseExtraHeaders(String extraHeadersJson, ObjectMapper mapper) {
+            JsonNode extra = parseObject(extraHeadersJson, mapper);
+            if (extra == null || extra.isEmpty()) {
+                return Map.of();
+            }
+            Map<String, String> out = new LinkedHashMap<>();
+            extra.fields().forEachRemaining(e -> {
+                if (e.getValue().isTextual()) {
+                    out.put(e.getKey(), e.getValue().asText());
+                }
+            });
+            return out.isEmpty() ? Map.of() : Collections.unmodifiableMap(out);
+        }
+    }
+
     private final Cache<String, Optional<GatewayKeyContext>> keyL1;
     private final Cache<String, Optional<GatewayModelRoute>> routeL1;
+    private final Cache<String, ParsedRouteMetadata> parsedRouteMetaL1;
     private final Cache<String, List<VirtualModel>> publicCatalogL1;
-    private final Cache<String, Optional<OrgModelPricingOverride>> overrideL1;
+    private final Cache<OrgModelKey, Optional<OrgModelPricingOverride>> overrideL1;
 
     /** Cache envelope so a "no override" answer can be cached explicitly instead of re-querying. */
     public record OverrideCacheEntry(OrgModelPricingOverride override) {
@@ -83,6 +194,10 @@ public class GatewayConfigCacheService {
                 .maximumSize(properties.getCache().getMaxEntries())
                 .expireAfterWrite(Duration.ofSeconds(properties.getCache().getL1RouteTtlSeconds()))
                 .build();
+        this.parsedRouteMetaL1 = Caffeine.newBuilder()
+                .maximumSize(properties.getCache().getMaxEntries())
+                .expireAfterWrite(Duration.ofSeconds(properties.getCache().getL1RouteTtlSeconds()))
+                .build();
         this.publicCatalogL1 = Caffeine.newBuilder()
                 .maximumSize(16)
                 .expireAfterWrite(Duration.ofSeconds(properties.getCache().getL1RouteTtlSeconds()))
@@ -119,9 +234,27 @@ public class GatewayConfigCacheService {
         String redisKey = GatewayRedisKeys.modelRoute(modelCode);
         return redisTemplate.opsForValue().get(redisKey)
                 .flatMap(json -> deserialize(json, GatewayModelRoute.class))
-                .doOnNext(route -> routeL1.put(modelCode, Optional.of(route)))
+                .doOnNext(route -> {
+                    routeL1.put(modelCode, Optional.of(route));
+                    parsedRouteMetaL1.put(modelCode, ParsedRouteMetadata.parse(route, objectMapper));
+                })
                 .switchIfEmpty(Mono.defer(() -> routeSingleFlight.execute(modelCode, () -> loadRouteFromDomain(modelCode))
                         .flatMap(Mono::justOrEmpty)));
+    }
+
+    /**
+     * Returns L1-cached pre-parsed routing metadata (translation policy, thinking style,
+     * per-channel extra headers, and per-channel {@link ProviderCapabilities}).
+     */
+    public ParsedRouteMetadata resolveParsedMetadata(GatewayModelRoute route) {
+        if (route == null || route.model() == null) {
+            return null;
+        }
+        String modelCode = route.model().modelCode();
+        if (modelCode == null) {
+            return ParsedRouteMetadata.parse(route, objectMapper);
+        }
+        return parsedRouteMetaL1.get(modelCode, k -> ParsedRouteMetadata.parse(route, objectMapper));
     }
 
     public Mono<List<VirtualModel>> listPublicModels() {
@@ -139,7 +272,7 @@ public class GatewayConfigCacheService {
      * virtual model id, not the model code, because the CDC event only carries the id.
      */
     public Mono<OrgModelPricingOverride> resolvePricingOverride(UUID orgId, UUID virtualModelId) {
-        String cacheKey = orgId + ":" + virtualModelId;
+        OrgModelKey cacheKey = new OrgModelKey(orgId, virtualModelId);
         Optional<OrgModelPricingOverride> l1 = overrideL1.getIfPresent(cacheKey);
         if (l1 != null) {
             return Mono.justOrEmpty(l1);
@@ -153,7 +286,7 @@ public class GatewayConfigCacheService {
     }
 
     private Mono<OrgModelPricingOverride> loadOverrideFromDomain(
-            String cacheKey, String redisKey, UUID orgId, UUID virtualModelId) {
+            OrgModelKey cacheKey, String redisKey, UUID orgId, UUID virtualModelId) {
         return Mono.fromCallable(() -> overrideRepository.findEffective(
                         orgId, virtualModelId, OffsetDateTime.now(ZoneOffset.UTC)))
                 .subscribeOn(domainFallbackScheduler)
@@ -188,14 +321,17 @@ public class GatewayConfigCacheService {
     public void evictRouteL1(String modelCode) {
         if (modelCode == null || modelCode.isBlank()) {
             routeL1.invalidateAll();
+            parsedRouteMetaL1.invalidateAll();
         } else {
             routeL1.invalidate(modelCode);
+            parsedRouteMetaL1.invalidate(modelCode);
         }
         publicCatalogL1.invalidateAll();
     }
 
     public void evictAllRoutesL1() {
         routeL1.invalidateAll();
+        parsedRouteMetaL1.invalidateAll();
         publicCatalogL1.invalidateAll();
     }
 
@@ -236,8 +372,10 @@ public class GatewayConfigCacheService {
                 .flatMap(opt -> {
                     routeL1.put(modelCode, opt);
                     if (opt.isEmpty()) {
+                        parsedRouteMetaL1.invalidate(modelCode);
                         return Mono.just(opt);
                     }
+                    parsedRouteMetaL1.put(modelCode, ParsedRouteMetadata.parse(opt.get(), objectMapper));
                     return serialize(opt.get())
                             .flatMap(json -> redisTemplate.opsForValue()
                                     .set(GatewayRedisKeys.modelRoute(modelCode), json,

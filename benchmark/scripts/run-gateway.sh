@@ -12,6 +12,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 GATEWAY_CPUS="${GATEWAY_CPUS:-0-1}"
 GATEWAY_CPU_COUNT="${GATEWAY_CPU_COUNT:-2}"
 GATEWAY_HEAP="${GATEWAY_HEAP:-3g}"
+# GC selector: "g1" (default) or "zgc" (Generational ZGC on JDK 21 for sub-millisecond pause tails).
+GATEWAY_GC="${GATEWAY_GC:-g1}"
 # Unified GC log: the suite slices this file per scenario, and it is the only place where GC phases,
 # mixed-cycle frequency and humongous allocations are visible (jstat only reports aggregates).
 GATEWAY_GC_LOG="${GATEWAY_GC_LOG:-/tmp/hyperllm-gc.log}"
@@ -42,7 +44,20 @@ export GATEWAY_MAX_IN_MEMORY_SIZE="${GATEWAY_MAX_IN_MEMORY_SIZE:-16MB}"
 
 ulimit -n 65535 || true
 
-echo "Launching hyperllm-gateway on CPUs=${GATEWAY_CPUS} (ActiveProcessorCount=${GATEWAY_CPU_COUNT}, Heap=${GATEWAY_HEAP})"
+case "${GATEWAY_GC}" in
+  zgc)
+    GC_OPTS=(-XX:+UseZGC -XX:+ZGenerational)
+    ;;
+  g1)
+    GC_OPTS=(-XX:+UseG1GC)
+    ;;
+  *)
+    echo "ERROR: Unsupported GATEWAY_GC='${GATEWAY_GC}' (expected 'g1' or 'zgc')." >&2
+    exit 1
+    ;;
+esac
+
+echo "Launching hyperllm-gateway on CPUs=${GATEWAY_CPUS} (ActiveProcessorCount=${GATEWAY_CPU_COUNT}, Heap=${GATEWAY_HEAP}, GC=${GATEWAY_GC})"
 echo "GC log: ${GATEWAY_GC_LOG}"
 echo "JAR: ${GATEWAY_JAR}"
 
@@ -50,7 +65,7 @@ exec taskset -c "${GATEWAY_CPUS}" java \
   "-XX:ActiveProcessorCount=${GATEWAY_CPU_COUNT}" \
   "-Xms${GATEWAY_HEAP}" \
   "-Xmx${GATEWAY_HEAP}" \
-  -XX:+UseG1GC \
+  "${GC_OPTS[@]}" \
   -XX:+AlwaysPreTouch \
   -XX:+UnlockDiagnosticVMOptions \
   -XX:+DebugNonSafepoints \

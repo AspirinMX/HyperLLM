@@ -2,7 +2,6 @@ package app.pagefault.hyperllm.gateway.config;
 
 import app.pagefault.hyperllm.common.cache.LuaScripts;
 import app.pagefault.hyperllm.common.crypto.AesGcmCipher;
-import app.pagefault.hyperllm.protocol.adapter.ProtocolRegistry;
 import app.pagefault.hyperllm.protocol.format.ProtocolErrorFormatter;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
@@ -52,11 +51,6 @@ public class GatewayConfiguration {
     @Bean
     public TokenEstimator tokenEstimator() {
         return new TokenEstimator();
-    }
-
-    @Bean
-    public ProtocolRegistry protocolRegistry(ObjectMapper objectMapper, TokenEstimator tokenEstimator) {
-        return new ProtocolRegistry(objectMapper, tokenEstimator);
     }
 
     @Bean

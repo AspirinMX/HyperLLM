@@ -63,6 +63,7 @@ import java.util.UUID;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.containing;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -71,6 +72,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -154,7 +158,7 @@ class GatewayProxyLifecycleTest {
                 List.of("ANTHROPIC_MESSAGES"), "ANTHROPIC_MESSAGES", "ANTHROPIC_MESSAGES", AuthScheme.X_API_KEY,
                 baseUrl, "claude-fallback", (short) 2, 100, 10_000,
                 cipher.encryptUtf8("{\"apiKey\":\"sk-up-2\"}", ch2Id.toString()), (short) 1,
-                "{}", null, null, null
+                "{\"X-Channel-Tag\":\"fallback-anthropic\"}", null, null, null
         );
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         VirtualModel vm = new VirtualModel(
@@ -246,8 +250,13 @@ class GatewayProxyLifecycleTest {
         wireMock.verify(1, postRequestedFor(urlEqualTo("/v1/chat/completions"))
                 .withRequestBody(containing("\"model\":\"gpt-primary\"")));
         wireMock.verify(1, postRequestedFor(urlEqualTo("/v1/messages"))
+                .withHeader("X-Channel-Tag", equalTo("fallback-anthropic"))
                 .withRequestBody(containing("\"model\":\"claude-fallback\""))
                 .withRequestBody(containing("Say hello after failover")));
+
+        // Settlement reused Lease.heldLegs without a redundant Redis HGET, and admission gate ran once.
+        verify(mirrorService, never()).heldLegs(anyString());
+        verify(outboxGate, times(1)).check();
     }
 
     @Test

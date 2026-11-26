@@ -72,12 +72,28 @@ public class PreHoldService {
         }
     }
 
-    public record Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens,
-                        String budgetKey) {
+    public record Lease(
+            UUID orgId,
+            List<String> concurrencyKeys,
+            String holdId,
+            long estimatedTokens,
+            String budgetKey,
+            List<AllocationLeg> heldLegs
+    ) {
+
+        public Lease {
+            heldLegs = heldLegs == null ? List.of() : List.copyOf(heldLegs);
+        }
 
         /** Lease of a project without a budget, and the shape used by the older tests. */
         public Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens) {
-            this(orgId, concurrencyKeys, holdId, estimatedTokens, null);
+            this(orgId, concurrencyKeys, holdId, estimatedTokens, null, List.of());
+        }
+
+        /** Lease without pre-cached held legs; settlement falls back to reading legs from Redis. */
+        public Lease(UUID orgId, List<String> concurrencyKeys, String holdId, long estimatedTokens,
+                     String budgetKey) {
+            this(orgId, concurrencyKeys, holdId, estimatedTokens, budgetKey, List.of());
         }
     }
 

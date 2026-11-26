@@ -38,10 +38,25 @@ public record ProviderCapabilities(
             String thinkingStyle,
             String metadataJson
     ) {
+        return resolveWithParsedMetadata(
+                outboundProtocol, providerCode, supportsThinking, thinkingStyle, parseMetadata(metadataJson));
+    }
+
+    /**
+     * Resolves capabilities using a pre-parsed {@code metadata_json} {@link JsonNode} so callers
+     * caching route metadata can avoid re-parsing the same JSON once per channel/protocol pair.
+     */
+    public static ProviderCapabilities resolveWithParsedMetadata(
+            ProtocolKind outboundProtocol,
+            String providerCode,
+            boolean supportsThinking,
+            String thinkingStyle,
+            JsonNode preParsedMetadata
+    ) {
         ProtocolKind protocol = outboundProtocol == null ? ProtocolKind.OPENAI_CHAT : outboundProtocol;
         String provider = providerCode == null ? "" : providerCode.trim().toUpperCase(Locale.ROOT);
         String style = thinkingStyle == null ? "" : thinkingStyle.trim().toUpperCase(Locale.ROOT);
-        JsonNode meta = parseMetadata(metadataJson);
+        JsonNode meta = (preParsedMetadata != null && preParsedMetadata.isObject()) ? preParsedMetadata : null;
 
         boolean effectiveThinking = supportsThinking || !style.isEmpty()
                 || boolOverride(meta, "supportsThinking", false);

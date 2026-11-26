@@ -43,7 +43,7 @@ public class GatewayProperties {
         private int connectTimeoutMs = 5_000;
         private int responseTimeoutSeconds = 120;
         private int maxRetryAttempts = 2;
-        private int maxConnectionsPerProvider = 200;
+        private int maxConnectionsPerProvider = 2000;
         /**
          * Raw body size threshold (bytes) above which request parsing and upstream encoding are
          * offloaded off Netty EventLoop threads onto the dedicated CPU translation pool.

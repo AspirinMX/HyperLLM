@@ -8,6 +8,7 @@ import app.pagefault.hyperllm.common.cache.GatewayRedisKeys;
 import app.pagefault.hyperllm.common.id.UuidV7;
 import app.pagefault.hyperllm.common.money.CostMath;
 import app.pagefault.hyperllm.domain.billing.AllocationDetailCodec;
+import app.pagefault.hyperllm.domain.billing.AllocationLeg;
 import app.pagefault.hyperllm.domain.billing.AllocationPlan;
 import app.pagefault.hyperllm.domain.billing.BillableUsage;
 import app.pagefault.hyperllm.domain.billing.EntitlementAllocator;
@@ -28,6 +29,7 @@ import app.pagefault.hyperllm.domain.model.tenant.GatewayKeyContext;
 import app.pagefault.hyperllm.gateway.billing.BillingAdmissionException;
 import app.pagefault.hyperllm.gateway.billing.HeldLegCharger;
 import app.pagefault.hyperllm.gateway.billing.ChannelCapacityService;
+import app.pagefault.hyperllm.gateway.billing.LeaseHeartbeatRegistry;
 import app.pagefault.hyperllm.gateway.billing.ProjectBudgetService;
 import app.pagefault.hyperllm.gateway.billing.PreHoldService;
 import app.pagefault.hyperllm.gateway.billing.GatewayTelemetryService;
@@ -49,7 +51,9 @@ import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
 import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import app.pagefault.hyperllm.protocol.translate.UpstreamEndpointResolver;
-import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -86,6 +90,7 @@ import reactor.core.scheduler.Scheduler;
 import reactor.util.concurrent.Queues;
 import reactor.util.retry.Retry;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -153,6 +158,7 @@ public class GatewayProxyService {
 
     private static final Runnable NOOP_RUNNABLE = () -> {};
     private static final int DEFAULT_MAX_IN_MEMORY_BYTES = 16 * 1024 * 1024;
+    private static final JsonFactory CREDENTIAL_JSON_FACTORY = new JsonFactory();
 
     /** All healthy candidates were tried and none had channel capacity left. */
     private static final class RetryableCapacityException extends RuntimeException {
@@ -170,6 +176,7 @@ public class GatewayProxyService {
     private final GatewayConfigCacheService cacheService;
     private final OutboxAdmissionGate outboxAdmissionGate;
     private final PreHoldService preHoldService;
+    private final LeaseHeartbeatRegistry leaseHeartbeatRegistry;
     private final ProjectBudgetService projectBudgetService;
     private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
@@ -202,6 +209,7 @@ public class GatewayProxyService {
             GatewayConfigCacheService cacheService,
             OutboxAdmissionGate outboxAdmissionGate,
             PreHoldService preHoldService,
+            LeaseHeartbeatRegistry leaseHeartbeatRegistry,
             ProjectBudgetService projectBudgetService,
             ChannelCapacityService channelCapacity,
             GatewayTelemetryService telemetryService,
@@ -219,6 +227,7 @@ public class GatewayProxyService {
         this.cacheService = cacheService;
         this.outboxAdmissionGate = outboxAdmissionGate;
         this.preHoldService = preHoldService;
+        this.leaseHeartbeatRegistry = leaseHeartbeatRegistry;
         this.projectBudgetService = projectBudgetService;
         this.channelCapacity = channelCapacity;
         this.telemetryService = telemetryService;
@@ -233,6 +242,29 @@ public class GatewayProxyService {
         this.protocolTranslationScheduler = protocolTranslationScheduler;
         long bytes = maxInMemorySize != null ? maxInMemorySize.toBytes() : DEFAULT_MAX_IN_MEMORY_BYTES;
         this.maxInMemoryBytes = (int) Math.min(Integer.MAX_VALUE, Math.max(1024L, bytes));
+    }
+
+    public GatewayProxyService(
+            GatewayConfigCacheService cacheService,
+            OutboxAdmissionGate outboxAdmissionGate,
+            PreHoldService preHoldService,
+            ProjectBudgetService projectBudgetService,
+            ChannelCapacityService channelCapacity,
+            GatewayTelemetryService telemetryService,
+            GatewayProperties properties,
+            ProtocolTranslator protocolTranslator,
+            AesGcmCipher aesGcmCipher,
+            ChannelSelector channelSelector,
+            UpstreamWebClientPool webClientPool,
+            app.pagefault.hyperllm.gateway.cache.EntitlementMirrorService mirrorService,
+            ObjectMapper objectMapper,
+            TokenEstimator tokenEstimator,
+            Scheduler protocolTranslationScheduler,
+            DataSize maxInMemorySize
+    ) {
+        this(cacheService, outboxAdmissionGate, preHoldService, null, projectBudgetService, channelCapacity,
+                telemetryService, properties, protocolTranslator, aesGcmCipher, channelSelector, webClientPool,
+                mirrorService, objectMapper, tokenEstimator, protocolTranslationScheduler, maxInMemorySize);
     }
 
     public GatewayProxyService(
@@ -496,9 +528,9 @@ public class GatewayProxyService {
     ) {
         Set<UUID> excludedChannels = ConcurrentHashMap.newKeySet();
         AtomicInteger attemptCounter = new AtomicInteger(0);
-        TranslationPolicy policy = TranslationPolicy.parseOrDefault(
-                route.model().translationPolicy(), TranslationPolicy.BEST_EFFORT);
-        String thinkingStyle = extractThinkingStyle(route.model().metadataJson());
+        GatewayConfigCacheService.ParsedRouteMetadata parsedMeta = resolveParsedMetadata(route);
+        TranslationPolicy policy = parsedMeta.translationPolicy();
+        String thinkingStyle = parsedMeta.thinkingStyle();
         StreamRequestMetadata streamMeta = decoded.streamMeta();
         boolean isStream = decoded.stream();
         RequestIrHolder irHolder = decoded.irHolder();
@@ -528,8 +560,10 @@ public class GatewayProxyService {
                     thinkingStyle,
                     candidate.providerCode(),
                     route.model().supportsThinking(),
-                    route.model().metadataJson()
+                    route.model().metadataJson(),
+                    parsedMeta.capabilitiesFor(candidate.channelId(), outboundProtocol)
             );
+            Map<String, String> extraHeaders = parsedMeta.extraHeadersFor(candidate.channelId());
             String upstreamApiKey = decryptChannelApiKey(candidate);
             String targetUrl = UpstreamEndpointResolver.buildInferenceUrl(
                     candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
@@ -569,7 +603,7 @@ public class GatewayProxyService {
                                 return Mono.error(ex);
                             }
                             return executeSingleAttempt(
-                                    exchange, client, targetUrl, candidate, upstreamApiKey,
+                                    exchange, client, targetUrl, candidate, extraHeaders, upstreamApiKey,
                                     streamMeta, isStream, anthropicVersion, anthropicBeta,
                                     encoded.buffer(), encoded.contentLength(),
                                     protocolKind, outboundProtocol,
@@ -593,7 +627,7 @@ public class GatewayProxyService {
                                 .doOnError(ex -> releaseCapacity.run())
                                 .doOnCancel(releaseCapacity)
                                 .flatMap(encoded -> executeSingleAttempt(
-                                        exchange, client, targetUrl, candidate, upstreamApiKey,
+                                        exchange, client, targetUrl, candidate, extraHeaders, upstreamApiKey,
                                         streamMeta, isStream, anthropicVersion, anthropicBeta,
                                         encoded.buffer(), encoded.contentLength(),
                                         protocolKind, outboundProtocol,
@@ -606,6 +640,11 @@ public class GatewayProxyService {
                 .filter(ex -> ex instanceof RetryableUpstreamException
                         || ex instanceof RetryableCapacityException))
                 .doFinally(sig -> irHolder.release());
+    }
+
+    private GatewayConfigCacheService.ParsedRouteMetadata resolveParsedMetadata(GatewayModelRoute route) {
+        GatewayConfigCacheService.ParsedRouteMetadata cached = cacheService.resolveParsedMetadata(route);
+        return cached != null ? cached : GatewayConfigCacheService.ParsedRouteMetadata.parse(route, objectMapper);
     }
 
     static boolean hasAnotherEligibleCandidate(
@@ -627,6 +666,7 @@ public class GatewayProxyService {
             WebClient client,
             String targetUrl,
             GatewayChannelCandidate candidate,
+            Map<String, String> extraHeaders,
             String upstreamApiKey,
             StreamRequestMetadata streamMeta,
             boolean isStream,
@@ -656,8 +696,8 @@ public class GatewayProxyService {
                 .uri(targetUrl)
                 .contentType(MediaType.APPLICATION_JSON)
                 .contentLength(contentLength)
-                .headers(headers -> applyUpstreamHeaders(headers, candidate, outboundProtocol, upstreamApiKey,
-                        anthropicVersion, anthropicBeta))
+                .headers(headers -> applyUpstreamHeaders(headers, candidate, extraHeaders, outboundProtocol,
+                        upstreamApiKey, anthropicVersion, anthropicBeta))
                 .body(BodyInserters.fromDataBuffers(Mono.fromSupplier(() -> {
                     DataBuffer buf = bodyRef.getAndSet(null);
                     return buf != null ? buf : NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.EMPTY_BUFFER);
@@ -1089,7 +1129,10 @@ public class GatewayProxyService {
                                 pricing.reasoningPriceMicros1m(), pricing.outputPriceMicros1m())),
                 candidate.effectiveCostDiscountBps());
 
-        return mirrorService.heldLegs(lease.holdId())
+        Mono<List<AllocationLeg>> heldLegsMono = lease.heldLegs().isEmpty()
+                ? mirrorService.heldLegs(lease.holdId())
+                : Mono.just(lease.heldLegs());
+        return heldLegsMono
                 .map(legs -> HeldLegCharger.charge(legs, exactCostMicros).legs())
                 .flatMap(charges -> preHoldService.settle(lease, charges,
                         AllocationDetailCodec.encodeContextV1(resolved, billable), eventCreatedAt,
@@ -1144,6 +1187,9 @@ public class GatewayProxyService {
         var billing = properties.getBilling();
         long ttlSeconds = billing.getLeaseTtlSeconds();
         long periodSeconds = Math.max(1, Math.min(billing.getHeartbeatMinIntervalSeconds(), ttlSeconds / 3));
+        if (leaseHeartbeatRegistry != null) {
+            return leaseHeartbeatRegistry.register(lease, periodSeconds, ttlSeconds);
+        }
         return Flux.interval(Duration.ofSeconds(periodSeconds))
                 .concatMap(tick -> preHoldService.renew(lease, ttlSeconds).onErrorResume(ex -> {
                     log.warn("Cannot renew hold {}", lease.holdId(), ex);
@@ -1226,7 +1272,6 @@ public class GatewayProxyService {
             long floorCost,
             ResolvedPricing pricing
     ) {
-        outboxAdmissionGate.check();
         AllocationPlan plan = EntitlementAllocator.allocate(holdTarget, billableTokens, snapshot);
         if (plan.legs().isEmpty()) {
             return Mono.error(new HyperLlmException(ErrorCode.BILLING_INSUFFICIENT_BALANCE));
@@ -1247,7 +1292,8 @@ public class GatewayProxyService {
                                 : Mono.just(result)))
                 .flatMap(result -> switch (result.status()) {
                     case "OK" -> Mono.just(new PreHoldService.Lease(
-                            caller.orgId(), concurrencyKeys, holdId, billableTokens, result.budget().key()));
+                            caller.orgId(), concurrencyKeys, holdId, billableTokens,
+                            result.budget().key(), plan.legs()));
                     case "ORG_SUSPENDED" -> Mono.error(new HyperLlmException(ErrorCode.TENANT_ORG_SUSPENDED));
                     case "RATE_LIMIT" -> Mono.error(new HyperLlmException(ErrorCode.RATE_LIMITED));
                     case "BUDGET_EXCEEDED" -> Mono.error(new BillingAdmissionException(
@@ -1377,10 +1423,38 @@ public class GatewayProxyService {
     private String decryptChannelApiKey(GatewayChannelCandidate candidate) {
         try {
             String json = aesGcmCipher.decryptUtf8(candidate.encryptedCredentials(), candidate.channelId().toString());
-            JsonNode root = objectMapper.readTree(json);
-            return root.path("apiKey").asText("");
+            return extractApiKeyFromJson(json);
         } catch (Exception ex) {
             throw new IllegalStateException("Failed to decrypt upstream channel credentials", ex);
+        }
+    }
+
+    static String extractApiKeyFromJson(String json) throws IOException {
+        if (json == null || json.isBlank()) {
+            return "";
+        }
+        try (JsonParser p = CREDENTIAL_JSON_FACTORY.createParser(json)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) {
+                return "";
+            }
+            while (p.nextToken() != JsonToken.END_OBJECT && p.currentToken() != null) {
+                String field = p.currentName();
+                JsonToken val = p.nextToken();
+                if ("apiKey".equals(field)) {
+                    if (val == JsonToken.VALUE_STRING) {
+                        return p.getText();
+                    }
+                    if (val == JsonToken.VALUE_NULL) {
+                        return "";
+                    }
+                    if (val != null && val.isScalarValue()) {
+                        return p.getValueAsString("");
+                    }
+                    return "";
+                }
+                p.skipChildren();
+            }
+            return "";
         }
     }
 
@@ -1392,6 +1466,7 @@ public class GatewayProxyService {
     private void applyUpstreamHeaders(
             HttpHeaders headers,
             GatewayChannelCandidate candidate,
+            Map<String, String> extraHeaders,
             ProtocolKind outboundProtocol,
             String apiKey,
             String anthropicVersion,
@@ -1405,34 +1480,9 @@ public class GatewayProxyService {
                 anthropicBeta
         );
         authHeaders.forEach(headers::set);
-        if (candidate.extraHeadersJson() != null && !candidate.extraHeadersJson().isBlank()
-                && !"{}".equals(candidate.extraHeadersJson().trim())) {
-            try {
-                JsonNode extra = objectMapper.readTree(candidate.extraHeadersJson());
-                if (extra != null && extra.isObject()) {
-                    extra.fields().forEachRemaining(e -> {
-                        if (e.getValue().isTextual()) {
-                            headers.set(e.getKey(), e.getValue().asText());
-                        }
-                    });
-                }
-            } catch (Exception ignored) {
-            }
+        if (extraHeaders != null && !extraHeaders.isEmpty()) {
+            extraHeaders.forEach(headers::set);
         }
-    }
-
-    private String extractThinkingStyle(String metadataJson) {
-        if (metadataJson == null || metadataJson.isBlank() || "{}".equals(metadataJson.trim())) {
-            return null;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(metadataJson);
-            if (root != null && root.isObject() && root.hasNonNull("thinkingStyle")) {
-                return root.get("thinkingStyle").asText();
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
     }
 
     private static Throwable unwrapRetryError(Throwable ex) {

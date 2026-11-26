@@ -21,12 +21,15 @@ import java.util.function.LongSupplier;
 @Component
 public class OutboxQueue {
 
+    private static final long NOT_ABOVE_THRESHOLD = Long.MIN_VALUE;
+    private static final long SUSTAINED_PRESSURE_NANOS = TimeUnit.SECONDS.toNanos(30);
+
     private final BlockingQueue<PendingMoneyEvent> queue;
     private final int capacity;
     private final AtomicLong dropped = new AtomicLong();
     private final double pauseRatio;
     private final LongSupplier nanoTime;
-    private Long aboveThresholdSince;
+    private final AtomicLong aboveThresholdSinceNanos = new AtomicLong(NOT_ABOVE_THRESHOLD);
 
     @Autowired
     public OutboxQueue(GatewayProperties properties) {
@@ -71,17 +74,28 @@ public class OutboxQueue {
         return capacity == 0 ? 0d : (double) queue.size() / capacity;
     }
 
-    synchronized boolean admissionPaused() {
+    boolean admissionPaused() {
         int depth = queue.size();
-        if ((double) depth / capacity <= pauseRatio && depth < capacity) {
-            aboveThresholdSince = null;
+        if (capacity > 0 && (double) depth / capacity <= pauseRatio && depth < capacity) {
+            if (aboveThresholdSinceNanos.get() != NOT_ABOVE_THRESHOLD) {
+                aboveThresholdSinceNanos.set(NOT_ABOVE_THRESHOLD);
+            }
             return false;
         }
         long now = nanoTime.getAsLong();
-        if (aboveThresholdSince == null) {
-            aboveThresholdSince = now;
+        if (now == NOT_ABOVE_THRESHOLD) {
+            now = NOT_ABOVE_THRESHOLD + 1L;
         }
-        return depth == capacity || now - aboveThresholdSince >= TimeUnit.SECONDS.toNanos(30);
+        long since = aboveThresholdSinceNanos.get();
+        if (since == NOT_ABOVE_THRESHOLD) {
+            if (aboveThresholdSinceNanos.compareAndSet(NOT_ABOVE_THRESHOLD, now)) {
+                since = now;
+            } else {
+                long updated = aboveThresholdSinceNanos.get();
+                since = (updated == NOT_ABOVE_THRESHOLD) ? now : updated;
+            }
+        }
+        return depth == capacity || now - since >= SUSTAINED_PRESSURE_NANOS;
     }
 
     public long droppedCount() {
