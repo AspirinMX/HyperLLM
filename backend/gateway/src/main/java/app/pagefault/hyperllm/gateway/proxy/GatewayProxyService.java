@@ -181,12 +181,14 @@ public class GatewayProxyService {
     private final ChannelCapacityService channelCapacity;
     private final GatewayTelemetryService telemetryService;
     private static final long COALESCE_WINDOW_MS = Long.getLong("gateway.stream.coalesce-window-ms", 0L);
-    private static final SseFrameCoalescer FRAME_COALESCER = new SseFrameCoalescer(
-            Math.max(0L, COALESCE_WINDOW_MS) * 1_000_000L,
-            Math.max(1L, Long.getLong("gateway.stream.coalesce-tick-ms", 5L)),
-            64 * 1024,
-            256);
     private static final boolean FRAME_COALESCER_ENABLED = COALESCE_WINDOW_MS > 0L;
+    private static final SseFrameCoalescer FRAME_COALESCER = FRAME_COALESCER_ENABLED
+            ? new SseFrameCoalescer(
+                    COALESCE_WINDOW_MS * 1_000_000L,
+                    Math.max(1L, Long.getLong("gateway.stream.coalesce-tick-ms", 5L)),
+                    64 * 1024,
+                    256)
+            : null;
 
     private final GatewayProperties properties;
     private final ProtocolTranslator protocolTranslator;

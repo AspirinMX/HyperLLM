@@ -71,10 +71,20 @@ public class GatewayConfiguration {
     public ClientResources lettuceClientResources(
             @Qualifier("gatewayLoopResources") LoopResources gatewayLoopResources
     ) {
-        EventLoopGroup sharedGroup = gatewayLoopResources.onClient(true);
+        EventLoopGroup rawGroup = unwrapEventLoopGroup(gatewayLoopResources.onServer(true));
         return DefaultClientResources.builder()
-                .eventLoopGroupProvider(new SharedEventLoopGroupProvider(sharedGroup))
+                .eventLoopGroupProvider(new SharedEventLoopGroupProvider(rawGroup))
                 .build();
+    }
+
+    public static EventLoopGroup unwrapEventLoopGroup(EventLoopGroup group) {
+        EventLoopGroup current = group;
+        while (current instanceof java.util.function.Supplier<?> supplier
+                && supplier.get() instanceof EventLoopGroup inner
+                && inner != current) {
+            current = inner;
+        }
+        return current;
     }
 
     @Bean

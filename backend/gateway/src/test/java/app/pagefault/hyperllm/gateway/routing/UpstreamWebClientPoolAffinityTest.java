@@ -1,8 +1,10 @@
 package app.pagefault.hyperllm.gateway.routing;
 
+import app.pagefault.hyperllm.gateway.config.GatewayConfiguration;
 import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.util.concurrent.EventExecutor;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -52,6 +54,11 @@ class UpstreamWebClientPoolAffinityTest {
             WebClient rr1 = pool.clientFor("OPENAI", -1);
             WebClient rr2 = pool.clientFor("OPENAI", -1);
             assertThat(rr1).isNotSameAs(rr2);
+
+            // Unwrapping onClient(true) (ColocatedEventLoopGroup) must expose the raw EventLoopGroup for Lettuce.
+            EventLoopGroup raw = GatewayConfiguration.unwrapEventLoopGroup(shared.onClient(true));
+            assertThat(raw).isSameAs(shared.onServer(true));
+            assertThat(shared.onChannelClass(SocketChannel.class, group)).isNotNull();
         } finally {
             pool.shutdown();
             // Borrowed shared LoopResources must remain active after pool shutdown.

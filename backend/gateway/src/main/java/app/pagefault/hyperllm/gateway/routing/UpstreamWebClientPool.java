@@ -88,7 +88,7 @@ public class UpstreamWebClientPool {
         this.eventLoops = loops.toArray(new EventLoop[0]);
         this.pinnedLoops = new LoopResources[this.eventLoops.length];
         for (int i = 0; i < this.eventLoops.length; i++) {
-            this.pinnedLoops[i] = new PinnedLoopResources(sharedLoopResources, this.eventLoops[i]);
+            this.pinnedLoops[i] = new PinnedLoopResources(sharedLoopResources, clientGroup, this.eventLoops[i]);
         }
     }
 
@@ -181,10 +181,12 @@ public class UpstreamWebClientPool {
     private static final class PinnedLoopResources implements LoopResources {
 
         private final LoopResources parent;
+        private final EventLoopGroup parentClientGroup;
         private final EventLoop pinnedLoop;
 
-        private PinnedLoopResources(LoopResources parent, EventLoop pinnedLoop) {
+        private PinnedLoopResources(LoopResources parent, EventLoopGroup parentClientGroup, EventLoop pinnedLoop) {
             this.parent = parent;
+            this.parentClientGroup = parentClientGroup;
             this.pinnedLoop = pinnedLoop;
         }
 
@@ -205,13 +207,15 @@ public class UpstreamWebClientPool {
 
         @Override
         public <CHANNEL extends Channel> CHANNEL onChannel(Class<CHANNEL> channelType, EventLoopGroup group) {
-            return parent.onChannel(channelType, group);
+            // Pass parentClientGroup (EpollEventLoopGroup / NioEventLoopGroup) rather than the single
+            // EventLoop child so DefaultLoopResources selects EpollSocketChannel instead of falling back to NIO.
+            return parent.onChannel(channelType, parentClientGroup);
         }
 
         @Override
         public <CHANNEL extends Channel> Class<? extends CHANNEL> onChannelClass(
                 Class<CHANNEL> channelType, EventLoopGroup group) {
-            return parent.onChannelClass(channelType, group);
+            return parent.onChannelClass(channelType, parentClientGroup);
         }
 
         @Override
