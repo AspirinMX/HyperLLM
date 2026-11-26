@@ -36,10 +36,9 @@ import app.pagefault.hyperllm.gateway.config.GatewayProperties;
 import app.pagefault.hyperllm.gateway.outbox.OutboxAdmissionGate;
 import app.pagefault.hyperllm.gateway.routing.ChannelSelector;
 import app.pagefault.hyperllm.gateway.routing.UpstreamWebClientPool;
-import app.pagefault.hyperllm.protocol.ir.ByteSlice;
+import app.pagefault.hyperllm.protocol.codec.CodecSupport;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.InboundRequestContext;
-import app.pagefault.hyperllm.protocol.ir.PreparedUpstreamPayload;
 import app.pagefault.hyperllm.protocol.ir.ProtocolKind;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
@@ -53,6 +52,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -136,11 +136,18 @@ public class GatewayProxyService {
             Integer maxOutputTokens,
             StreamRequestMetadata streamMeta,
             int estimatedPromptTokens,
+            int estimatedEncodedBytes,
             int rawBodyBytes
     ) {
     }
 
-    private static final byte[] EMPTY_BYTES = new byte[0];
+    /** Direct {@link DataBuffer} holder enabling deterministic discard cleanup on async offload cancellation. */
+    private record EncodedUpstreamBuffer(DataBuffer buffer, int contentLength) {
+        void release() {
+            DataBufferUtils.release(buffer);
+        }
+    }
+
     private static final Runnable NOOP_RUNNABLE = () -> {};
     private static final int DEFAULT_MAX_IN_MEMORY_BYTES = 16 * 1024 * 1024;
 
@@ -181,8 +188,9 @@ public class GatewayProxyService {
     private final TokenEstimator tokenEstimator;
     private final Scheduler protocolTranslationScheduler;
     private final int maxInMemoryBytes;
+    private static final ByteBufAllocator DIRECT_BUFFER_ALLOCATOR = PooledByteBufAllocator.DEFAULT;
     private static final NettyDataBufferFactory NETTY_DATA_BUFFER_FACTORY =
-            new NettyDataBufferFactory(ByteBufAllocator.DEFAULT);
+            new NettyDataBufferFactory(DIRECT_BUFFER_ALLOCATOR);
 
     private final AtomicLong nextLazyReclaimNanos = new AtomicLong(0L);
 
@@ -368,21 +376,26 @@ public class GatewayProxyService {
             ProtocolKind protocolKind,
             InboundRequestContext inboundContext
     ) {
+        int offloadThreshold = properties.getUpstream().getTranslationOffloadThresholdBytes();
         return DataBufferUtils.join(exchange.getRequest().getBody(), maxInMemoryBytes)
                 .onErrorMap(DataBufferLimitException.class, ex -> new ResponseStatusException(
                         HttpStatus.PAYLOAD_TOO_LARGE, "Request body exceeds maximum allowed size", ex))
-                .map(dataBuffer -> {
+                .flatMap(dataBuffer -> {
+                    RequestByteArena arena;
                     try {
-                        int size = dataBuffer.readableByteCount();
-                        byte[] raw = new byte[size];
-                        dataBuffer.read(raw);
-                        return parseAndSummarize(protocolKind, raw, inboundContext);
+                        arena = RequestByteArena.readFrom(dataBuffer);
                     } finally {
                         DataBufferUtils.release(dataBuffer);
                     }
+                    boolean offload = offloadThreshold >= 0 && arena.size() >= offloadThreshold;
+                    if (!offload) {
+                        return Mono.just(parseAndSummarize(protocolKind, arena, inboundContext));
+                    }
+                    return Mono.fromCallable(() -> parseAndSummarize(protocolKind, arena, inboundContext))
+                            .subscribeOn(protocolTranslationScheduler);
                 })
                 .switchIfEmpty(Mono.fromSupplier(() ->
-                        parseAndSummarize(protocolKind, EMPTY_BYTES, inboundContext)));
+                        parseAndSummarize(protocolKind, RequestByteArena.EMPTY, inboundContext)));
     }
 
     private DecodedRequestSummary parseAndSummarize(
@@ -390,12 +403,20 @@ public class GatewayProxyService {
             byte[] rawBody,
             InboundRequestContext inboundContext
     ) {
+        return parseAndSummarize(protocolKind, RequestByteArena.wrapContiguous(rawBody), inboundContext);
+    }
+
+    private DecodedRequestSummary parseAndSummarize(
+            ProtocolKind protocolKind,
+            RequestByteArena arena,
+            InboundRequestContext inboundContext
+    ) {
         // Single authoritative parse of the downstream body: every later decision
         // (routing, admission, billing, outbound bytes) derives from this IR graph.
-        CanonicalRequest request = protocolTranslator.parseRequest(protocolKind, rawBody, inboundContext);
+        CanonicalRequest request = arena.parse(protocolTranslator, protocolKind, inboundContext);
         int estimatedPromptTokens = tokenEstimator.estimatePromptTokens(request);
+        int estimatedEncodedBytes = CodecSupport.estimateEncodedCapacity(request);
         StreamRequestMetadata streamMeta = StreamRequestMetadata.fromCanonical(request, estimatedPromptTokens);
-        int rawLength = rawBody != null ? rawBody.length : 0;
         return new DecodedRequestSummary(
                 new RequestIrHolder(request),
                 request.model(),
@@ -403,7 +424,8 @@ public class GatewayProxyService {
                 request.maxOutputTokens(),
                 streamMeta,
                 estimatedPromptTokens,
-                rawLength
+                estimatedEncodedBytes,
+                arena.size()
         );
     }
 
@@ -529,7 +551,7 @@ public class GatewayProxyService {
                         Runnable releaseIrOnCommit = hasFallback ? irHolder::release : NOOP_RUNNABLE;
 
                         if (!offloadTranslation) {
-                            PreparedUpstreamPayload payload;
+                            EncodedUpstreamBuffer encoded;
                             try {
                                 CanonicalRequest req = hasFallback ? irHolder.get() : irHolder.take();
                                 if (req == null) {
@@ -537,8 +559,8 @@ public class GatewayProxyService {
                                     return Mono.error(new IllegalStateException(
                                             "Request IR already released before upstream encode"));
                                 }
-                                payload = protocolTranslator.prepareUpstreamPayload(
-                                        req, outboundProtocol, encodingContext);
+                                encoded = encodeToDirectBuffer(
+                                        req, outboundProtocol, encodingContext, decoded.estimatedEncodedBytes());
                             } catch (Throwable ex) {
                                 releaseCapacity.run();
                                 return Mono.error(ex);
@@ -546,7 +568,7 @@ public class GatewayProxyService {
                             return executeSingleAttempt(
                                     exchange, client, targetUrl, candidate, upstreamApiKey,
                                     streamMeta, isStream, anthropicVersion, anthropicBeta,
-                                    toZeroCopyDataBuffer(payload), payload.contentLength(),
+                                    encoded.buffer(), encoded.contentLength(),
                                     protocolKind, outboundProtocol,
                                     caller, route, lease, excludedChannels,
                                     requestStartNanos, requestId, traceId, clientIp, retryCount,
@@ -560,16 +582,17 @@ public class GatewayProxyService {
                                         throw new IllegalStateException(
                                                 "Request IR already released before upstream encode");
                                     }
-                                    return protocolTranslator.prepareUpstreamPayload(
-                                            req, outboundProtocol, encodingContext);
+                                    return encodeToDirectBuffer(
+                                            req, outboundProtocol, encodingContext, decoded.estimatedEncodedBytes());
                                 })
                                 .subscribeOn(protocolTranslationScheduler)
+                                .doOnDiscard(EncodedUpstreamBuffer.class, EncodedUpstreamBuffer::release)
                                 .doOnError(ex -> releaseCapacity.run())
                                 .doOnCancel(releaseCapacity)
-                                .flatMap(payload -> executeSingleAttempt(
+                                .flatMap(encoded -> executeSingleAttempt(
                                         exchange, client, targetUrl, candidate, upstreamApiKey,
                                         streamMeta, isStream, anthropicVersion, anthropicBeta,
-                                        toZeroCopyDataBuffer(payload), payload.contentLength(),
+                                        encoded.buffer(), encoded.contentLength(),
                                         protocolKind, outboundProtocol,
                                         caller, route, lease, excludedChannels,
                                         requestStartNanos, requestId, traceId, clientIp, retryCount,
@@ -635,7 +658,7 @@ public class GatewayProxyService {
                 .body(BodyInserters.fromDataBuffers(Mono.fromSupplier(() -> {
                     DataBuffer buf = bodyRef.getAndSet(null);
                     return buf != null ? buf : NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.EMPTY_BUFFER);
-                })))
+                }).doOnDiscard(DataBuffer.class, DataBufferUtils::release)))
                 .exchangeToFlux(clientResponse -> {
                     int status = clientResponse.statusCode().value();
                     if (status == 429 || status >= 500) {
@@ -705,21 +728,22 @@ public class GatewayProxyService {
                 });
     }
 
-    private static DataBuffer toZeroCopyDataBuffer(PreparedUpstreamPayload payload) {
-        List<ByteSlice> slices = payload.slices();
-        if (slices.isEmpty()) {
-            return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.EMPTY_BUFFER);
+    private EncodedUpstreamBuffer encodeToDirectBuffer(
+            CanonicalRequest req,
+            ProtocolKind outboundProtocol,
+            UpstreamEncodingContext encodingContext,
+            int estimatedCapacity
+    ) {
+        NettyByteBufSink sink = new NettyByteBufSink(DIRECT_BUFFER_ALLOCATOR, estimatedCapacity);
+        try {
+            protocolTranslator.encodeUpstreamRequest(req, outboundProtocol, encodingContext, sink);
+            ByteBuf buf = sink.finishAndTransfer();
+            int len = buf.readableBytes();
+            return new EncodedUpstreamBuffer(NETTY_DATA_BUFFER_FACTORY.wrap(buf), len);
+        } catch (Throwable ex) {
+            sink.release();
+            throw ex;
         }
-        if (slices.size() == 1) {
-            ByteSlice s = slices.get(0);
-            return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.wrappedBuffer(s.backing(), s.offset(), s.length()));
-        }
-        ByteBuf[] parts = new ByteBuf[slices.size()];
-        for (int i = 0; i < slices.size(); i++) {
-            ByteSlice s = slices.get(i);
-            parts[i] = Unpooled.wrappedBuffer(s.backing(), s.offset(), s.length());
-        }
-        return NETTY_DATA_BUFFER_FACTORY.wrap(Unpooled.wrappedBuffer(parts));
     }
 
     private Flux<Void> bridgeStreamingResponse(

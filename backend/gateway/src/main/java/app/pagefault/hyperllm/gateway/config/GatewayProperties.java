@@ -45,10 +45,17 @@ public class GatewayProperties {
         private int maxRetryAttempts = 2;
         private int maxConnectionsPerProvider = 200;
         /**
-         * Raw body size threshold (bytes) above which cross-protocol translation is offloaded off
-         * Netty EventLoop threads onto the dedicated CPU translation pool. Set {@code < 0} to disable.
+         * Raw body size threshold (bytes) above which request parsing and upstream encoding are
+         * offloaded off Netty EventLoop threads onto the dedicated CPU translation pool.
+         * Set {@code < 0} to disable.
          */
         private int translationOffloadThresholdBytes = 65_536;
+        /**
+         * Worker thread count for the CPU protocol translation pool. {@code 0} auto-sizes to
+         * {@code Math.max(1, availableProcessors / 2)} to avoid oversubscribing cores alongside
+         * Netty EventLoop threads.
+         */
+        private int translationWorkers = 0;
     }
 
     /**

@@ -79,8 +79,11 @@ public class GatewayConfiguration {
     }
 
     @Bean(name = "protocolTranslationScheduler", destroyMethod = "dispose")
-    public Scheduler protocolTranslationScheduler() {
-        int workers = Math.max(2, Runtime.getRuntime().availableProcessors());
+    public Scheduler protocolTranslationScheduler(GatewayProperties properties) {
+        int configured = properties.getUpstream().getTranslationWorkers();
+        int workers = configured > 0
+                ? configured
+                : Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
         return Schedulers.newParallel("protocol-translate", workers, true);
     }
 
