@@ -368,6 +368,7 @@ public class GatewayProxyService {
             InboundRequestContext inboundContext
     ) {
         long requestStartNanos = System.nanoTime();
+        int affinitySlot = webClientPool.resolveAffinitySlot(Thread.currentThread());
         String requestId = UuidV7.next().toString();
         String traceId = requestId.replace("-", "");
         String rawToken = extractToken(exchange.getRequest(), protocolKind);
@@ -379,7 +380,7 @@ public class GatewayProxyService {
                 .flatMap(caller -> readAndParseRequest(exchange, protocolKind, inboundContext)
                         .flatMap(decoded -> routeAndDispatch(
                                 exchange, caller, decoded, protocolKind, inboundContext,
-                                requestStartNanos, requestId, traceId, clientIp))));
+                                requestStartNanos, requestId, traceId, clientIp, affinitySlot))));
     }
 
     public Mono<ResponseEntity<Flux<DataBuffer>>> proxy(
@@ -389,6 +390,7 @@ public class GatewayProxyService {
             byte[] rawBody
     ) {
         long requestStartNanos = System.nanoTime();
+        int affinitySlot = webClientPool.resolveAffinitySlot(Thread.currentThread());
         String requestId = UuidV7.next().toString();
         String traceId = requestId.replace("-", "");
         String rawToken = extractToken(exchange.getRequest(), protocolKind);
@@ -401,7 +403,7 @@ public class GatewayProxyService {
                     DecodedRequestSummary decoded = parseAndSummarize(protocolKind, raw, inboundContext);
                     return routeAndDispatch(
                             exchange, caller, decoded, protocolKind, inboundContext,
-                            requestStartNanos, requestId, traceId, clientIp);
+                            requestStartNanos, requestId, traceId, clientIp, affinitySlot);
                 })
                 .doFinally(sig -> bodySlot.lazySet(null)));
     }
@@ -484,7 +486,8 @@ public class GatewayProxyService {
             long requestStartNanos,
             String requestId,
             String traceId,
-            String clientIp
+            String clientIp,
+            int affinitySlot
     ) {
         if (!isModelAllowed(caller, decoded.model())) {
             decoded.irHolder().release();
@@ -516,7 +519,7 @@ public class GatewayProxyService {
                     return preparePreHold(caller, route, decoded.maxOutputTokens(), decoded.estimatedPromptTokens(), requestId)
                             .flatMap(lease -> dispatchWithRetry(
                                     exchange, decoded, protocolKind, inboundContext,
-                                    caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp
+                                    caller, route, candidates, lease, requestStartNanos, requestId, traceId, clientIp, affinitySlot
                             ).onErrorResume(ex -> releaseHold(lease).then(Mono.error(unwrapRetryError(ex)))));
                 })
                 .doOnError(ex -> decoded.irHolder().release())
@@ -535,7 +538,8 @@ public class GatewayProxyService {
             long requestStartNanos,
             String requestId,
             String traceId,
-            String clientIp
+            String clientIp,
+            int affinitySlot
     ) {
         Set<UUID> excludedChannels = ConcurrentHashMap.newKeySet();
         AtomicInteger attemptCounter = new AtomicInteger(0);
@@ -578,7 +582,7 @@ public class GatewayProxyService {
             String upstreamApiKey = decryptChannelApiKey(candidate);
             String targetUrl = UpstreamEndpointResolver.buildInferenceUrl(
                     candidate.resolvedBaseUrl(), outboundProtocol, candidate.upstreamModelName(), isStream);
-            WebClient client = webClientPool.clientFor(candidate.providerCode());
+            WebClient client = webClientPool.clientFor(candidate.providerCode(), affinitySlot);
 
             // Check channel capacity BEFORE encoding the upstream body so saturated channels
             // never pay for a 400 KB serialization and closures never capture the encoded buffer.
