@@ -1,13 +1,11 @@
 package app.pagefault.hyperllm.gateway.proxy;
 
-import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.translate.StreamBridge;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.core.io.buffer.NettyDataBuffer;
 import org.springframework.core.io.buffer.NettyDataBufferFactory;
@@ -28,18 +26,8 @@ import java.util.function.Supplier;
  * 5-operator Reactor chain ({@code Flux.handle} + {@code concatWith} + {@code doOnDiscard} +
  * {@code switchOnFirst} + {@code doOnNext}).
  *
- * <p>Why this exists:
- * <ul>
- *   <li>With Spring Boot + Micrometer OTel auto-context-propagation enabled, {@code Flux.handle}
- *       is wrapped in {@code ContextPropagation.lambda$contextRestoreForHandle$2}, restoring
- *       ThreadLocals on every SSE frame (~3.2% CPU at 111k frames/s).</li>
- *   <li>{@code Flux.switchOnFirst}, {@code concatWith}, and {@code doOnNext} add per-frame
- *       subscriber indirection on all 400+ frames of every stream.</li>
- *   <li>This subscriber preserves the exact crash-safety invariant (invoking {@code onFirstFrameGate}
- *       once before emitting frame 1) using demand-1 gating on frame 1, then opens a lock-free
- *       {@code volatile boolean gateOpen} fast path for frames 2..N with deterministic
- *       {@link DataBuffer} release on errors and cancellation.</li>
- * </ul>
+ * <p>All protocols encode straight into pooled Netty direct {@link ByteBuf}s via
+ * {@link NettyByteBufSink}, whether downstream SSE frame coalescing is disabled or enabled.
  */
 final class DirectStreamBridgeOperator extends Flux<Void> {
 
@@ -47,8 +35,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
     private final StreamBridge bridge;
     private final ByteBufAllocator directAllocator;
     private final NettyDataBufferFactory nettyDataBufferFactory;
-    private final DataBufferFactory fallbackBufferFactory;
-    private final boolean coalesceEnabled;
     private final Supplier<Mono<Void>> firstFrameGate;
     private final Runnable onFirstFrameEmitted;
     private final Consumer<DataBuffer> frameConsumer;
@@ -60,8 +46,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
             StreamBridge bridge,
             ByteBufAllocator directAllocator,
             NettyDataBufferFactory nettyDataBufferFactory,
-            DataBufferFactory fallbackBufferFactory,
-            boolean coalesceEnabled,
             Supplier<Mono<Void>> firstFrameGate,
             Runnable onFirstFrameEmitted,
             Consumer<DataBuffer> frameConsumer,
@@ -72,8 +56,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
         this.bridge = bridge;
         this.directAllocator = directAllocator;
         this.nettyDataBufferFactory = nettyDataBufferFactory;
-        this.fallbackBufferFactory = fallbackBufferFactory;
-        this.coalesceEnabled = coalesceEnabled;
         this.firstFrameGate = firstFrameGate;
         this.onFirstFrameEmitted = onFirstFrameEmitted;
         this.frameConsumer = frameConsumer;
@@ -95,7 +77,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
 
         private Subscription upstream;
         private byte[] readScratch;
-        private ByteSink.HeapByteSink coalesceScratch;
 
         /** Flips to true once frame 1's firstFrameGate finishes; frames 2..N run lock-free. */
         private volatile boolean gateOpen;
@@ -111,7 +92,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
 
         BridgeSubscriber(CoreSubscriber<? super Void> actual) {
             this.actual = actual;
-            this.coalesceScratch = coalesceEnabled ? new ByteSink.HeapByteSink(512) : null;
         }
 
         @Override
@@ -376,14 +356,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
                     src = scratch;
                     off = 0;
                 }
-                if (coalesceEnabled) {
-                    coalesceScratch.reset();
-                    bridge.feed(src, off, readable, coalesceScratch);
-                    if (coalesceScratch.writtenBytes() > 0) {
-                        return fallbackBufferFactory.wrap(coalesceScratch.toCopiedByteArray());
-                    }
-                    return null;
-                }
                 NettyByteBufSink outSink = new NettyByteBufSink(
                         directAllocator, Math.max(256, readable + 128));
                 try {
@@ -403,14 +375,6 @@ final class DirectStreamBridgeOperator extends Flux<Void> {
         }
 
         private DataBuffer translateComplete() {
-            if (coalesceEnabled) {
-                coalesceScratch.reset();
-                bridge.complete(coalesceScratch);
-                if (coalesceScratch.writtenBytes() > 0) {
-                    return fallbackBufferFactory.wrap(coalesceScratch.toCopiedByteArray());
-                }
-                return null;
-            }
             NettyByteBufSink outSink = new NettyByteBufSink(directAllocator, 512);
             try {
                 bridge.complete(outSink);

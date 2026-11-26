@@ -29,7 +29,6 @@ class DirectStreamBridgeOperatorTest {
 
     private static final PooledByteBufAllocator ALLOC = PooledByteBufAllocator.DEFAULT;
     private static final NettyDataBufferFactory NETTY_FACTORY = new NettyDataBufferFactory(ALLOC);
-    private static final DefaultDataBufferFactory HEAP_FACTORY = new DefaultDataBufferFactory();
 
     private static StreamBridge echoBridge(String suffix) {
         return new StreamBridge() {
@@ -101,8 +100,6 @@ class DirectStreamBridgeOperatorTest {
                 echoBridge("DONE"),
                 ALLOC,
                 NETTY_FACTORY,
-                HEAP_FACTORY,
-                false,
                 () -> {
                     gateCalls.incrementAndGet();
                     events.add("gate-start");
@@ -147,8 +144,6 @@ class DirectStreamBridgeOperatorTest {
                 echoBridge("END"),
                 ALLOC,
                 NETTY_FACTORY,
-                HEAP_FACTORY,
-                false,
                 gate::asMono,
                 () -> {},
                 db -> emitted.add(readAndRelease(db)),
@@ -180,8 +175,6 @@ class DirectStreamBridgeOperatorTest {
                 echoBridge(""),
                 ALLOC,
                 NETTY_FACTORY,
-                HEAP_FACTORY,
-                false,
                 gate::asMono,
                 () -> {},
                 db -> {
@@ -213,8 +206,6 @@ class DirectStreamBridgeOperatorTest {
                 echoBridge(""),
                 ALLOC,
                 NETTY_FACTORY,
-                HEAP_FACTORY,
-                false,
                 Mono::empty,
                 () -> {},
                 DataBufferUtils::release,
