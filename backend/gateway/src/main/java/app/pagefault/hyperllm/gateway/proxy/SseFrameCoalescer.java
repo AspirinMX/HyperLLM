@@ -60,20 +60,26 @@ public final class SseFrameCoalescer implements AutoCloseable {
 
     /** Offers a byte[] frame, emitting whatever is due right away; registers at most once while work is held. */
     public void offer(SseFrameBatcher batcher, Sink sink, byte[] frame) {
-        byte[] immediate = batcher.offer(frame, System.nanoTime());
-        if (immediate != null) {
-            sink.emit(immediate);
+        boolean shouldEnqueue;
+        synchronized (batcher) {
+            byte[] immediate = batcher.offer(frame, System.nanoTime());
+            if (immediate != null) {
+                sink.emit(immediate);
+            }
+            shouldEnqueue = batcher.hasPending() && batcher.tryMarkEnqueued();
         }
-        if (batcher.hasPending() && batcher.tryMarkEnqueued()) {
+        if (shouldEnqueue) {
             pending.add(new Entry(batcher, sink));
         }
     }
 
     /** Emits everything still buffered in byte[] mode for a finishing or cancelled stream. */
     public void drain(SseFrameBatcher batcher, Sink sink) {
-        byte[] rest = batcher.drain();
-        if (rest != null) {
-            sink.emit(rest);
+        synchronized (batcher) {
+            byte[] rest = batcher.drain();
+            if (rest != null) {
+                sink.emit(rest);
+            }
         }
     }
 
@@ -82,20 +88,26 @@ public final class SseFrameCoalescer implements AutoCloseable {
      * due and enqueuing the batcher at most once while buffered bytes remain.
      */
     public void offerBuf(SseFrameBatcher batcher, ByteBufAllocator allocator, BufSink sink, ByteBuf frame) {
-        ByteBuf immediate = batcher.offerBuf(allocator, frame, System.nanoTime());
-        if (immediate != null) {
-            emitBufSafely(sink, immediate);
+        boolean shouldEnqueue;
+        synchronized (batcher) {
+            ByteBuf immediate = batcher.offerBuf(allocator, frame, System.nanoTime());
+            if (immediate != null) {
+                emitBufSafely(sink, immediate);
+            }
+            shouldEnqueue = batcher.hasPendingBuf() && batcher.tryMarkBufEnqueued();
         }
-        if (batcher.hasPendingBuf() && batcher.tryMarkBufEnqueued()) {
+        if (shouldEnqueue) {
             pendingBufs.add(new BufEntry(batcher, sink));
         }
     }
 
     /** Emits all buffered direct {@link ByteBuf} frames for a cleanly completing stream. */
     public void drainBuf(SseFrameBatcher batcher, BufSink sink) {
-        ByteBuf rest = batcher.drainBuf();
-        if (rest != null) {
-            emitBufSafely(sink, rest);
+        synchronized (batcher) {
+            ByteBuf rest = batcher.drainBuf();
+            if (rest != null) {
+                emitBufSafely(sink, rest);
+            }
         }
     }
 
@@ -128,18 +140,22 @@ public final class SseFrameCoalescer implements AutoCloseable {
                 break;
             }
             SseFrameBatcher batcher = entry.batcher();
-            try {
-                byte[] batch = batcher.poll(now);
-                if (batch != null) {
-                    entry.sink().emit(batch);
+            boolean requeue;
+            synchronized (batcher) {
+                try {
+                    byte[] batch = batcher.poll(now);
+                    if (batch != null) {
+                        entry.sink().emit(batch);
+                    }
+                } catch (RuntimeException ex) {
+                    LOG.log(System.Logger.Level.WARNING, "Coalesced flush failed", ex);
+                } finally {
+                    batcher.clearEnqueued();
+                    requeue = batcher.hasPending() && batcher.tryMarkEnqueued();
                 }
-            } catch (RuntimeException ex) {
-                LOG.log(System.Logger.Level.WARNING, "Coalesced flush failed", ex);
-            } finally {
-                batcher.clearEnqueued();
-                if (batcher.hasPending() && batcher.tryMarkEnqueued()) {
-                    pending.add(entry);
-                }
+            }
+            if (requeue) {
+                pending.add(entry);
             }
         }
 
@@ -150,18 +166,22 @@ public final class SseFrameCoalescer implements AutoCloseable {
                 break;
             }
             SseFrameBatcher batcher = entry.batcher();
-            try {
-                ByteBuf batch = batcher.pollBuf(now);
-                if (batch != null) {
-                    emitBufSafely(entry.sink(), batch);
+            boolean requeue;
+            synchronized (batcher) {
+                try {
+                    ByteBuf batch = batcher.pollBuf(now);
+                    if (batch != null) {
+                        emitBufSafely(entry.sink(), batch);
+                    }
+                } catch (RuntimeException ex) {
+                    LOG.log(System.Logger.Level.WARNING, "Coalesced ByteBuf flush failed", ex);
+                } finally {
+                    batcher.clearBufEnqueued();
+                    requeue = batcher.hasPendingBuf() && batcher.tryMarkBufEnqueued();
                 }
-            } catch (RuntimeException ex) {
-                LOG.log(System.Logger.Level.WARNING, "Coalesced ByteBuf flush failed", ex);
-            } finally {
-                batcher.clearBufEnqueued();
-                if (batcher.hasPendingBuf() && batcher.tryMarkBufEnqueued()) {
-                    pendingBufs.add(entry);
-                }
+            }
+            if (requeue) {
+                pendingBufs.add(entry);
             }
         }
     }

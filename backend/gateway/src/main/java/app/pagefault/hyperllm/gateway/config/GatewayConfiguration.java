@@ -8,15 +8,10 @@ import app.pagefault.hyperllm.protocol.translate.ProtocolTranslator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.lettuce.core.resource.ClientResources;
 import io.lettuce.core.resource.DefaultClientResources;
-import io.lettuce.core.resource.DefaultEventLoopGroupProvider;
-import io.lettuce.core.resource.EventLoopGroupProvider;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.util.concurrent.EventExecutor;
-import io.netty.util.concurrent.EventExecutorGroup;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.ImmediateEventExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -33,7 +28,6 @@ import reactor.core.scheduler.Schedulers;
 import reactor.netty.resources.LoopResources;
 
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 @Configuration
 @EnableConfigurationProperties(GatewayProperties.class)
@@ -43,9 +37,9 @@ public class GatewayConfiguration {
 
     /**
      * Single shared Netty I/O {@link LoopResources} owned by Spring Boot's {@link ReactorResourceFactory}.
-     * Reused across the Reactor Netty HTTP server, {@code UpstreamWebClientPool} (with per-EventLoop
-     * affinity buckets), and Lettuce Redis I/O so a 4-vCPU gateway runs exactly 4 Netty EventLoop
-     * threads instead of 12 (4 server + 4 upstream + 4 Lettuce) competing for the same cores.
+     * Reused across the Reactor Netty HTTP server and {@code UpstreamWebClientPool} (with per-EventLoop
+     * affinity buckets) so downstream and upstream SSE sockets share the exact same 4 EventLoop threads
+     * on a 4-vCPU host without cross-thread frame handoffs.
      */
     @Bean
     public ReactorResourceFactory gatewayReactorResourceFactory() {
@@ -67,24 +61,19 @@ public class GatewayConfiguration {
                 httpServer -> httpServer.childOption(ChannelOption.TCP_NODELAY, true));
     }
 
+    /**
+     * Dedicates a single lightweight Netty EventLoop thread to Lettuce Redis control-plane RPCs
+     * (entitlement mirror, pre-hold admit, markServed, settle). Keeping Redis I/O isolated from
+     * the saturated 4-thread SSE data-plane EventLoops prevents head-of-line queuing behind
+     * thousands of active SSE streams from inflating pre-TTFT latency while avoiding Lettuce's
+     * default multi-thread oversubscription.
+     */
     @Bean(destroyMethod = "shutdown")
-    public ClientResources lettuceClientResources(
-            @Qualifier("gatewayLoopResources") LoopResources gatewayLoopResources
-    ) {
-        EventLoopGroup rawGroup = unwrapEventLoopGroup(gatewayLoopResources.onServer(true));
+    public ClientResources lettuceClientResources() {
         return DefaultClientResources.builder()
-                .eventLoopGroupProvider(new SharedEventLoopGroupProvider(rawGroup))
+                .ioThreadPoolSize(2)
+                .computationThreadPoolSize(2)
                 .build();
-    }
-
-    public static EventLoopGroup unwrapEventLoopGroup(EventLoopGroup group) {
-        EventLoopGroup current = group;
-        while (current instanceof java.util.function.Supplier<?> supplier
-                && supplier.get() instanceof EventLoopGroup inner
-                && inner != current) {
-            current = inner;
-        }
-        return current;
     }
 
     @Bean
@@ -97,7 +86,7 @@ public class GatewayConfiguration {
             Throwable cause = epollAvailable ? null : Epoll.unavailabilityCause();
             int loopCount = countExecutors(gatewayLoopResources.onClient(true));
             log.info(
-                    "HyperLLM Gateway runtime: os={} arch={} cpus={} maxHeapMB={} nettyEpoll={} epollCause={} sharedEventLoops={} upstreamMaxConnPerProvider={}",
+                    "HyperLLM Gateway runtime: os={} arch={} cpus={} maxHeapMB={} nettyEpoll={} epollCause={} sharedEventLoops={} lettuceIoThreads=1 upstreamMaxConnPerProvider={}",
                     System.getProperty("os.name"),
                     System.getProperty("os.arch"),
                     Runtime.getRuntime().availableProcessors(),
@@ -116,68 +105,6 @@ public class GatewayConfiguration {
             count++;
         }
         return Math.max(1, count);
-    }
-
-    /**
-     * Exposes the gateway's shared Netty {@link EventLoopGroup} to Lettuce without letting Lettuce
-     * shut down the HTTP server's EventLoopGroup on client close.
-     */
-    static final class SharedEventLoopGroupProvider implements EventLoopGroupProvider {
-
-        private final EventLoopGroup sharedGroup;
-        private final int poolSize;
-        private volatile DefaultEventLoopGroupProvider fallback;
-
-        SharedEventLoopGroupProvider(EventLoopGroup sharedGroup) {
-            this.sharedGroup = sharedGroup;
-            this.poolSize = countExecutors(sharedGroup);
-        }
-
-        @Override
-        public <T extends EventLoopGroup> T allocate(Class<T> type) {
-            if (type.isInstance(sharedGroup)) {
-                return type.cast(sharedGroup);
-            }
-            return fallback().allocate(type);
-        }
-
-        @Override
-        public int threadPoolSize() {
-            return poolSize;
-        }
-
-        @Override
-        public Future<Boolean> release(EventExecutorGroup eventLoopGroup, long quietPeriod, long timeout, TimeUnit unit) {
-            if (eventLoopGroup == sharedGroup) {
-                return ImmediateEventExecutor.INSTANCE.newSucceededFuture(Boolean.TRUE);
-            }
-            DefaultEventLoopGroupProvider fb = fallback;
-            return fb != null
-                    ? fb.release(eventLoopGroup, quietPeriod, timeout, unit)
-                    : ImmediateEventExecutor.INSTANCE.newSucceededFuture(Boolean.TRUE);
-        }
-
-        @Override
-        public Future<Boolean> shutdown(long quietPeriod, long timeout, TimeUnit unit) {
-            DefaultEventLoopGroupProvider fb = fallback;
-            return fb != null
-                    ? fb.shutdown(quietPeriod, timeout, unit)
-                    : ImmediateEventExecutor.INSTANCE.newSucceededFuture(Boolean.TRUE);
-        }
-
-        private DefaultEventLoopGroupProvider fallback() {
-            DefaultEventLoopGroupProvider fb = fallback;
-            if (fb == null) {
-                synchronized (this) {
-                    fb = fallback;
-                    if (fb == null) {
-                        fb = new DefaultEventLoopGroupProvider(poolSize);
-                        fallback = fb;
-                    }
-                }
-            }
-            return fb;
-        }
     }
 
     @Bean

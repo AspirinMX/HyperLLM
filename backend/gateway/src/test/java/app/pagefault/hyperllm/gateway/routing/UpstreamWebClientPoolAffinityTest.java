@@ -55,10 +55,15 @@ class UpstreamWebClientPoolAffinityTest {
             WebClient rr2 = pool.clientFor("OPENAI", -1);
             assertThat(rr1).isNotSameAs(rr2);
 
-            // Unwrapping onClient(true) (ColocatedEventLoopGroup) must expose the raw EventLoopGroup for Lettuce.
-            EventLoopGroup raw = GatewayConfiguration.unwrapEventLoopGroup(shared.onClient(true));
-            assertThat(raw).isSameAs(shared.onServer(true));
             assertThat(shared.onChannelClass(SocketChannel.class, group)).isNotNull();
+
+            // Lettuce control-plane I/O is isolated onto a minimal dedicated EventLoop pool (Lettuce MIN_IO_THREADS=2).
+            var lettuceRes = new GatewayConfiguration().lettuceClientResources();
+            try {
+                assertThat(lettuceRes.eventLoopGroupProvider().threadPoolSize()).isEqualTo(2);
+            } finally {
+                lettuceRes.shutdown(0, 0, TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
+            }
         } finally {
             pool.shutdown();
             // Borrowed shared LoopResources must remain active after pool shutdown.
