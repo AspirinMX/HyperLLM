@@ -832,10 +832,6 @@ public class GatewayProxyService {
         Sinks.Many<DataBuffer> frameSink = Sinks.many().unicast()
                 .onBackpressureBuffer(Queues.<DataBuffer>get(STREAM_FRAME_BUFFER_CAPACITY).get());
         SseFrameBatcher frameBatcher = FRAME_COALESCER_ENABLED ? FRAME_COALESCER.newBatcher() : null;
-        // Reusable per-stream scratch buffer for copying off-heap upstream chunks into the parser
-        // without allocating a fresh byte[] on all 400+ chunks.
-        byte[][] readScratchHolder = new byte[1][];
-        ByteSink.HeapByteSink coalesceScratch = FRAME_COALESCER_ENABLED ? new ByteSink.HeapByteSink(512) : null;
 
         Flux<DataBuffer> clientFrames = frameSink.asFlux()
                 .doOnDiscard(DataBuffer.class, DataBufferUtils::release)
@@ -864,93 +860,21 @@ public class GatewayProxyService {
                 .contentType(MediaType.parseMediaType(bridge.contentType()))
                 .body(clientFrames));
 
-        Flux<DataBuffer> translatedChunks = clientResponse.bodyToFlux(DataBuffer.class)
-                .<DataBuffer>handle((dataBuffer, sink) -> {
-                    try {
-                        int readable = dataBuffer.readableByteCount();
-                        if (readable <= 0) {
-                            return;
-                        }
-                        byte[] src;
-                        int off;
-                        if (dataBuffer instanceof NettyDataBuffer ndb && ndb.getNativeBuffer().hasArray()) {
-                            ByteBuf nativeBuf = ndb.getNativeBuffer();
-                            src = nativeBuf.array();
-                            off = nativeBuf.arrayOffset() + nativeBuf.readerIndex();
-                        } else {
-                            byte[] scratch = readScratchHolder[0];
-                            if (scratch == null || scratch.length < readable) {
-                                scratch = new byte[Math.max(1024, readable)];
-                                readScratchHolder[0] = scratch;
-                            }
-                            dataBuffer.read(scratch, 0, readable);
-                            src = scratch;
-                            off = 0;
-                        }
-                        if (FRAME_COALESCER_ENABLED) {
-                            coalesceScratch.reset();
-                            bridge.feed(src, off, readable, coalesceScratch);
-                            if (coalesceScratch.writtenBytes() > 0) {
-                                sink.next(bufferFactory.wrap(coalesceScratch.toCopiedByteArray()));
-                            }
-                        } else {
-                            NettyByteBufSink outSink = new NettyByteBufSink(
-                                    DIRECT_BUFFER_ALLOCATOR, Math.max(256, readable + 128));
-                            try {
-                                bridge.feed(src, off, readable, outSink);
-                                if (outSink.writtenBytes() > 0) {
-                                    sink.next(NETTY_DATA_BUFFER_FACTORY.wrap(outSink.finishAndTransfer()));
-                                } else {
-                                    outSink.release();
-                                }
-                            } catch (Throwable ex) {
-                                outSink.release();
-                                throw ex;
-                            }
-                        }
-                    } finally {
-                        DataBufferUtils.release(dataBuffer);
-                    }
-                })
-                .concatWith(Mono.defer(() -> {
-                    if (FRAME_COALESCER_ENABLED) {
-                        coalesceScratch.reset();
-                        bridge.complete(coalesceScratch);
-                        if (coalesceScratch.writtenBytes() > 0) {
-                            return Mono.just(bufferFactory.wrap(coalesceScratch.toCopiedByteArray()));
-                        }
-                        return Mono.empty();
-                    }
-                    NettyByteBufSink outSink = new NettyByteBufSink(DIRECT_BUFFER_ALLOCATOR, 512);
-                    try {
-                        bridge.complete(outSink);
-                        if (outSink.writtenBytes() > 0) {
-                            return Mono.just(NETTY_DATA_BUFFER_FACTORY.wrap(outSink.finishAndTransfer()));
-                        }
-                        outSink.release();
-                        return Mono.empty();
-                    } catch (Throwable ex) {
-                        outSink.release();
-                        return Mono.error(ex);
-                    }
-                }))
-                .doOnDiscard(DataBuffer.class, DataBufferUtils::release);
-
-        return Flux.using(() -> startHeartbeat(lease), heartbeat -> translatedChunks
-                .switchOnFirst((firstSignal, frames) -> {
-                    if (!firstSignal.hasValue()) {
-                        return frames;
-                    }
-                    // Mark first-byte served ONCE on frame 1; frames 2..N bypass concatMap/Mono.just entirely.
-                    return preHoldService.markServed(lease)
-                            .onErrorResume(ex -> {
-                                log.warn("Cannot mark first response frame for hold {}", lease.holdId(), ex);
-                                return Mono.empty();
-                            })
-                            .thenMany(frames);
-                })
-                .doOnNext(frame -> {
-                    firstByteNanos.compareAndSet(0L, System.nanoTime());
+        // Direct protocol-agnostic subscriber bypasses Flux.handle (ContextPropagation per-frame
+        // ThreadLocal restoration), FluxSwitchOnFirst, FluxConcatArray, and FluxPeekFuseable.
+        return Flux.using(() -> startHeartbeat(lease), heartbeat -> new DirectStreamBridgeOperator(
+                clientResponse.bodyToFlux(DataBuffer.class),
+                bridge,
+                DIRECT_BUFFER_ALLOCATOR,
+                NETTY_DATA_BUFFER_FACTORY,
+                bufferFactory,
+                FRAME_COALESCER_ENABLED,
+                () -> preHoldService.markServed(lease).onErrorResume(ex -> {
+                    log.warn("Cannot mark first response frame for hold {}", lease.holdId(), ex);
+                    return Mono.empty();
+                }),
+                () -> firstByteNanos.compareAndSet(0L, System.nanoTime()),
+                frame -> {
                     if (frameBatcher != null) {
                         byte[] bytes = new byte[frame.readableByteCount()];
                         try {
@@ -964,29 +888,28 @@ public class GatewayProxyService {
                     } else {
                         emitDownstreamBuffer(frameSink, frame, upstreamSubRef);
                     }
-                })
-                .then(Mono.defer(() -> settleReactive(
+                },
+                () -> settleReactive(
                         settled, true, bridge.finalizeUsage(true),
                         requestStartNanos, firstByteNanos.get(),
                         requestId, traceId, caller, route, candidate,
                         candidate.upstreamModelName(),
                         protocolKind, true, 200, null, retryCount, clientIp, lease
-                )))
-                .then(Mono.fromRunnable(() -> {
+                ).then(Mono.fromRunnable(() -> {
                     if (frameBatcher != null) {
                         FRAME_COALESCER.drain(frameBatcher,
                                 batch -> emitDownstreamBuffer(frameSink, bufferFactory.wrap(batch), upstreamSubRef));
                     }
                     frameSink.tryEmitComplete();
-                }))
-                .onErrorResume(ex -> settleReactive(
+                })),
+                ex -> settleReactive(
                         settled, false, bridge.finalizeUsage(false),
                         requestStartNanos, firstByteNanos.get(),
                         requestId, traceId, caller, route, candidate,
                         candidate.upstreamModelName(),
                         protocolKind, true, 200, "STREAM_INTERRUPTED", retryCount, clientIp, lease
-                ).then(Mono.fromRunnable(() -> frameSink.tryEmitError(ex))))
-                .thenMany(Flux.<Void>empty()), Disposable::dispose);
+                ).then(Mono.fromRunnable(() -> frameSink.tryEmitError(ex)))
+        ), Disposable::dispose);
     }
 
     private static void emitDownstreamBuffer(
