@@ -6,3 +6,8 @@ infra/**/*.sql text eol=lf
 infra/**/*.json text eol=lf
 backend/mvnw text eol=lf
 backend/mvnw.cmd text eol=crlf
+
+# Generated benchmark flamegraphs, SVG charts, and summary CSVs
+docs/benchmark/figures/**/*.html binary linguist-generated=true linguist-vendored=true
+docs/benchmark/figures/*.svg binary linguist-generated=true linguist-vendored=true
+docs/benchmark/data/*.csv linguist-generated=true

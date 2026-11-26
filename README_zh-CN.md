@@ -40,27 +40,32 @@
 
 > 因为网关未区分同协议/跨协议路径，所有经过网关的请求一律转为中间级表示，再请求上游（出于安全考虑），所以下述同协议测量结果与跨协议测量结果相差不大。
 
-> **压测场景**：100K-token 长上下文输入、2,000 输出 token、200 token/s（5 token/帧，单流 400 帧、持续约 10.5s）、20s 均匀 ramp + 60s 闭环稳态窗口；单机严格硬切核隔离，所有有效场景均满足 `%steal = 0.00`、`0 错误`。
+> **压测场景**：100K-token 长上下文输入、2,000 输出 token、200 token/s（5 token/帧，单流 400 帧、持续约 10.5s）、20s 均匀 ramp + 60s 闭环稳态窗口；单机严格硬切核隔离，所有有效场景均满足 `%steal = 0.00`、`0 错误`。下表所有 TTFT 均只统计网关净增耗时 **`ΔTTFT = 实测首帧时间 − 500 ms`**（已扣除上游模拟首字延迟）。
 
 ### 腾讯云 CVM 服务器（计算型 C6，x86_64）
 
 - **机型配置**：8 vCPU Intel Xeon Platinum 8372C @ 3.20 GHz（4 物理核 × 2 HT）/ 16 GiB 内存（网关硬隔离 4 vCPU / 2 物理核，`6 GiB` G1GC 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`）
 
-| 并发、协议路径与 GC | TTFT P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
+| 并发、协议路径与 GC | `ΔTTFT` P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
 | :--- | --: | --: | --: | --: | --: |
 | 3,000 · OpenAI → OpenAI（G1） | +87.6 / +381.4 ms | 8 / 565 ms | **0** | 288 MB | 86.0% |
-| 4,000 · OpenAI → OpenAI（G1）| +146.7 / +394.0 ms | 9 / 647 ms | **0** | 234 MB | 87.8% |
-| 5,000 · OpenAI → OpenAI（G1） | +216.6 / +603.7 ms | 10 / 833 ms | **0** | 244 MB | 89.9% |
+| 4,000 · OpenAI → OpenAI（G1） | +146.7 / +394.0 ms | 9 / 647 ms | **0** | 234 MB | 87.8% |
+| **5,000 · OpenAI → OpenAI（G1）** | **+216.6 / +603.7 ms** | **10 / 833 ms** | **0** | **244 MB** | **89.9%** |
 
 ### Hetzner Cost-Optimized `CAX 31`（ARM64）
 
 - **机型配置**：8 vCPU ARM Neoverse-N1 / 16 GiB 内存（网关硬隔离 4 vCPU，`5 GiB` 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`）
 
-| 并发、协议路径与 GC | TTFT P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
+| 并发、协议路径与 GC | `ΔTTFT` P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
 | :--- | --: | --: | --: | --: | --: |
-| 2,000 · OpenAI → OpenAI（G1） |+74.5 / +210.5 ms | 6 / 302 ms | **0** | 153 MB | 92.1% |
-| 3,000 · OpenAI → OpenAI（G1） | +199.7 / +443.3 ms | 8 / 578 ms | **0** | 158 MB | 92.7% |
-| 3,500 · OpenAI → OpenAI（G1） |+265.6 / +616.0 ms | 9 / 657 ms | **0** | 171 MB | 93.4% |
+| 2,000 · OpenAI → OpenAI（G1） | +60.2 / +149.8 ms | 6 / 291 ms | **0** | 139 MB | 89.2% |
+| 2,000 · Anthropic → OpenAI（G1） | +59.3 / +156.3 ms | 5 / 239 ms | **0** | 137 MB | 89.0% |
+| 3,000 · OpenAI → OpenAI（G1） | +176.8 / +378.6 ms | 8 / 508 ms | **0** | 131 MB | 93.6% |
+| 3,000 · Anthropic → OpenAI（G1） | +174.6 / +370.0 ms | 8 / 487 ms | **0** | 141 MB | 93.3% |
+| **3,500 · OpenAI → OpenAI（G1）** | **+262.5 / +512.8 ms** | **9 / 652 ms** | **0** | **134 MB** | **94.4%** |
+| **3,500 · Anthropic → OpenAI（G1）** | **+255.5 / +532.5 ms** | **10 / 659 ms** | **0** | **144 MB** | **94.6%** |
+
+> 完整基准报告见 **[`docs/benchmark/README.md`](./docs/benchmark/README.md)**，包含 ARM64 六代版本（`V0 → V4`，43 场景）完整演进、30 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计及 G1GC vs Generational ZGC 对比。
 
 ## 快速开始
 
@@ -148,7 +153,7 @@ curl http://localhost:8080/v1/messages \
 - **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook。
 - **[OpenAPI 3.1 接口契约文档](./docs/openapi/README.md)** — 可直接导入 Swagger UI / Postman / `openapi-typescript` 的标准规范：[Gateway 数据面](./docs/openapi/gateway-api.yaml) · [Console 开发者控制面](./docs/openapi/console-api.yaml) · [Admin 运营控制面](./docs/openapi/admin-api.yaml)。
 - **[压测与火焰图剖析套件](./benchmark/README.md)** — 如何在核隔离环境下复现网关压力测试并抓取 `async-profiler` 火焰图。
-- **[全链路性能重构与容量复测报告](./docs/benchmark/2026-11-26-full-pipeline-refactoring.md)** — Hetzner `CAX 31`（ARM64）与腾讯云 `C6.2XLARGE16`（x86_64）完整实测数据、3,000 并发存活集审计及 G1GC vs Generational ZGC 对比。
+- **[性能基准与六代演进报告](./docs/benchmark/README.md)** — ARM64（Hetzner `CAX 31`）六代版本全演进（`V0 → V4`，43 场景）、30 份原始交互式 `async-profiler` 火焰图（CPU / Alloc / Lock）、7 张 SVG 图表、3,000 并发堆存活集审计、G1GC vs Generational ZGC 对比及腾讯云 `C6.2XLARGE16`（x86_64）5,000 并发容量边界报告。
 
 ## 参与贡献与开源协议
 

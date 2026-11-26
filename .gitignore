@@ -25,5 +25,6 @@ node_modules/
 # Benchmark compiled binaries
 benchmark/bin/
 
-# Raw benchmark captures (jstat/mpstat/prom/HTML flamegraphs) stay out of the repo.
-docs/benchmark/data/
+# Raw benchmark captures (jstat/mpstat/prom) stay out of the repo; keep curated summary CSVs.
+docs/benchmark/data/*
+!docs/benchmark/data/*-summary.csv

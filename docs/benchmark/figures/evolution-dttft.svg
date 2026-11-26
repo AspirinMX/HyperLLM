@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif">
+  <rect width="980" height="440" fill="#ffffff" rx="8"/>
+  <rect x="0.5" y="0.5" width="979" height="439" fill="none" stroke="#e2e8f0" rx="8"/>
+  <text x="24" y="32" font-size="16" font-weight="700" fill="#0f172a">Gateway Added Latency (ΔTTFT = Measured TTFT − 500 ms Upstream Wait)</text>
+  <text x="24" y="52" font-size="12" fill="#64748b">ARM64 Hetzner CAX 31 (4C / 5g G1GC), Cross-Protocol (Anthropic → OpenAI Chat), 100K-token Input</text>
+  <line x1="24" y1="74" x2="42" y2="74" stroke="#dc2626" stroke-width="3"/>
+  <circle cx="33" cy="74" r="3.5" fill="#dc2626"/>
+  <text x="48" y="78" font-size="11.5" fill="#334155">V0 (073e2d1)</text>
+  <line x1="170" y1="74" x2="188" y2="74" stroke="#ea580c" stroke-width="3"/>
+  <circle cx="179" cy="74" r="3.5" fill="#ea580c"/>
+  <text x="194" y="78" font-size="11.5" fill="#334155">V1 (6d230e2)</text>
+  <line x1="316" y1="74" x2="334" y2="74" stroke="#d97706" stroke-width="3"/>
+  <circle cx="325" cy="74" r="3.5" fill="#d97706"/>
+  <text x="340" y="78" font-size="11.5" fill="#334155">V1.5 (83c9336)</text>
+  <line x1="462" y1="74" x2="480" y2="74" stroke="#7c3aed" stroke-width="3"/>
+  <circle cx="471" cy="74" r="3.5" fill="#7c3aed"/>
+  <text x="486" y="78" font-size="11.5" fill="#334155">V2 (207e61a)</text>
+  <line x1="608" y1="74" x2="626" y2="74" stroke="#2563eb" stroke-width="3"/>
+  <circle cx="617" cy="74" r="3.5" fill="#2563eb"/>
+  <text x="632" y="78" font-size="11.5" fill="#334155">V3 (59dea37)</text>
+  <line x1="754" y1="74" x2="772" y2="74" stroke="#059669" stroke-width="3"/>
+  <circle cx="763" cy="74" r="3.5" fill="#059669"/>
+  <text x="778" y="78" font-size="11.5" fill="#334155">V4 (9e6d413)</text>
+  <text x="260.0" y="102" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">ΔTTFT P50 (ms)</text>
+  <line x1="60" y1="385.0" x2="460" y2="385.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="389.0" text-anchor="end" font-size="10.5" fill="#64748b">+0</text>
+  <line x1="60" y1="330.4" x2="460" y2="330.4" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="334.4" text-anchor="end" font-size="10.5" fill="#64748b">+180</text>
+  <line x1="60" y1="275.8" x2="460" y2="275.8" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="279.8" text-anchor="end" font-size="10.5" fill="#64748b">+360</text>
+  <line x1="60" y1="221.2" x2="460" y2="221.2" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="225.2" text-anchor="end" font-size="10.5" fill="#64748b">+540</text>
+  <line x1="60" y1="166.6" x2="460" y2="166.6" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="170.6" text-anchor="end" font-size="10.5" fill="#64748b">+720</text>
+  <line x1="60" y1="112.0" x2="460" y2="112.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="52" y="116.0" text-anchor="end" font-size="10.5" fill="#64748b">+900</text>
+  <line x1="60.0" y1="112" x2="60.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="60.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">500</text>
+  <line x1="126.7" y1="112" x2="126.7" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="126.7" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">1000</text>
+  <line x1="193.3" y1="112" x2="193.3" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="193.3" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">1500</text>
+  <line x1="260.0" y1="112" x2="260.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="260.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">2000</text>
+  <line x1="326.7" y1="112" x2="326.7" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="326.7" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">2500</text>
+  <line x1="393.3" y1="112" x2="393.3" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="393.3" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">3000</text>
+  <line x1="460.0" y1="112" x2="460.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="460.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">3500</text>
+  <text x="260.0" y="423" text-anchor="middle" font-size="11" fill="#475569">Concurrent SSE Streams</text>
+  <line x1="60" y1="112" x2="60" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <line x1="60" y1="385" x2="460" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <path d="M60.0,380.4 L126.7,374.9 L260.0,135.3" fill="none" stroke="#dc2626" stroke-width="2"/>
+  <circle cx="60.0" cy="380.4" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="374.9" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="135.3" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <text x="260.0" y="127.3" text-anchor="middle" font-size="10.5" font-weight="700" fill="#dc2626">+823ms</text>
+  <path d="M60.0,381.4 L126.7,378.3 L260.0,265.9" fill="none" stroke="#ea580c" stroke-width="2"/>
+  <circle cx="60.0" cy="381.4" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="378.3" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="265.9" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <path d="M60.0,382.2 L126.7,379.8 L260.0,340.9" fill="none" stroke="#d97706" stroke-width="2"/>
+  <circle cx="60.0" cy="382.2" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="379.8" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="340.9" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <path d="M60.0,382.3 L126.7,381.1 L260.0,338.2" fill="none" stroke="#7c3aed" stroke-width="2"/>
+  <circle cx="60.0" cy="382.3" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="381.1" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="338.2" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <path d="M60.0,382.3 L126.7,381.3 L260.0,347.6 L326.7,317.0 L393.3,240.8" fill="none" stroke="#2563eb" stroke-width="2"/>
+  <circle cx="60.0" cy="382.3" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="381.3" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="347.6" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="326.7" cy="317.0" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="393.3" cy="240.8" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <text x="393.3" y="232.8" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2563eb">+475ms</text>
+  <path d="M60.0,383.1 L126.7,382.5 L260.0,367.0 L326.7,353.1 L393.3,332.0 L460.0,307.5" fill="none" stroke="#059669" stroke-width="3"/>
+  <circle cx="60.0" cy="383.1" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="382.5" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="367.0" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="326.7" cy="353.1" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="393.3" cy="332.0" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="460.0" cy="307.5" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <text x="448.0" y="322.5" text-anchor="middle" font-size="10.5" font-weight="700" fill="#059669">+256ms</text>
+  <text x="740.0" y="102" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">ΔTTFT P99 (ms)</text>
+  <line x1="540" y1="385.0" x2="940" y2="385.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="389.0" text-anchor="end" font-size="10.5" fill="#64748b">+0</text>
+  <line x1="540" y1="330.4" x2="940" y2="330.4" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="334.4" text-anchor="end" font-size="10.5" fill="#64748b">+360</text>
+  <line x1="540" y1="275.8" x2="940" y2="275.8" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="279.8" text-anchor="end" font-size="10.5" fill="#64748b">+720</text>
+  <line x1="540" y1="221.2" x2="940" y2="221.2" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="225.2" text-anchor="end" font-size="10.5" fill="#64748b">+1080</text>
+  <line x1="540" y1="166.6" x2="940" y2="166.6" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="170.6" text-anchor="end" font-size="10.5" fill="#64748b">+1440</text>
+  <line x1="540" y1="112.0" x2="940" y2="112.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="532" y="116.0" text-anchor="end" font-size="10.5" fill="#64748b">+1800</text>
+  <line x1="540.0" y1="112" x2="540.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="540.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">500</text>
+  <line x1="606.7" y1="112" x2="606.7" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="606.7" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">1000</text>
+  <line x1="673.3" y1="112" x2="673.3" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="673.3" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">1500</text>
+  <line x1="740.0" y1="112" x2="740.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="740.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">2000</text>
+  <line x1="806.7" y1="112" x2="806.7" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="806.7" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">2500</text>
+  <line x1="873.3" y1="112" x2="873.3" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="873.3" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">3000</text>
+  <line x1="940.0" y1="112" x2="940.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="940.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">3500</text>
+  <text x="740.0" y="423" text-anchor="middle" font-size="11" fill="#475569">Concurrent SSE Streams</text>
+  <line x1="540" y1="112" x2="540" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <line x1="540" y1="385" x2="940" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <path d="M540.0,376.7 L606.7,362.8 L740.0,131.9" fill="none" stroke="#dc2626" stroke-width="2"/>
+  <circle cx="540.0" cy="376.7" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="362.8" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="131.9" r="3.2" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <text x="740.0" y="123.9" text-anchor="middle" font-size="10.5" font-weight="700" fill="#dc2626">+1669ms</text>
+  <path d="M540.0,376.4 L606.7,366.3 L740.0,235.7" fill="none" stroke="#ea580c" stroke-width="2"/>
+  <circle cx="540.0" cy="376.4" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="366.3" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="235.7" r="3.2" fill="#ea580c" stroke="#fff" stroke-width="1"/>
+  <path d="M540.0,378.4 L606.7,368.2 L740.0,304.2" fill="none" stroke="#d97706" stroke-width="2"/>
+  <circle cx="540.0" cy="378.4" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="368.2" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="304.2" r="3.2" fill="#d97706" stroke="#fff" stroke-width="1"/>
+  <path d="M540.0,379.1 L606.7,371.9 L740.0,300.4" fill="none" stroke="#7c3aed" stroke-width="2"/>
+  <circle cx="540.0" cy="379.1" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="371.9" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="300.4" r="3.2" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <path d="M540.0,380.4 L606.7,373.0 L740.0,320.7 L806.7,272.7 L873.3,165.0" fill="none" stroke="#2563eb" stroke-width="2"/>
+  <circle cx="540.0" cy="380.4" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="373.0" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="320.7" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="806.7" cy="272.7" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="873.3" cy="165.0" r="3.2" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <text x="873.3" y="157.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2563eb">+1451ms</text>
+  <path d="M540.0,383.2 L606.7,381.9 L740.0,361.3 L806.7,346.2 L873.3,328.9 L940.0,304.2" fill="none" stroke="#059669" stroke-width="3"/>
+  <circle cx="540.0" cy="383.2" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="606.7" cy="381.9" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="740.0" cy="361.3" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="806.7" cy="346.2" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="873.3" cy="328.9" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="940.0" cy="304.2" r="4.2" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <text x="928.0" y="319.2" text-anchor="middle" font-size="10.5" font-weight="700" fill="#059669">+532ms</text>
+</svg>

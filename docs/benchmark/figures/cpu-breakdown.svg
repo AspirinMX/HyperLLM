@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif">
+  <rect width="980" height="440" fill="#ffffff" rx="8"/>
+  <rect x="0.5" y="0.5" width="979" height="439" fill="none" stroke="#e2e8f0" rx="8"/>
+  <text x="24" y="32" font-size="16" font-weight="700" fill="#0f172a">CPU Utilization &amp; Flamegraph Execution Breakdown (ARM64 CAX 31, 4C Gateway)</text>
+  <text x="24" y="52" font-size="12" fill="#64748b">Left: Gateway Busy CPU % across versions (Cross-Protocol)   |   Right: Where Gateway CPU Goes (asprof -e ctimer, 15s steady state)</text>
+  <text x="260.0" y="92" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Gateway 4-Core CPU Busy % (Cross-Protocol)</text>
+  <line x1="60" y1="382.0" x2="460" y2="382.0" stroke="#e2e8f0"/>
+  <text x="52" y="386.0" text-anchor="end" font-size="10.5" fill="#64748b">0%</text>
+  <line x1="60" y1="327.6" x2="460" y2="327.6" stroke="#e2e8f0"/>
+  <text x="52" y="331.6" text-anchor="end" font-size="10.5" fill="#64748b">20%</text>
+  <line x1="60" y1="273.2" x2="460" y2="273.2" stroke="#e2e8f0"/>
+  <text x="52" y="277.2" text-anchor="end" font-size="10.5" fill="#64748b">40%</text>
+  <line x1="60" y1="218.8" x2="460" y2="218.8" stroke="#e2e8f0"/>
+  <text x="52" y="222.8" text-anchor="end" font-size="10.5" fill="#64748b">60%</text>
+  <line x1="60" y1="164.4" x2="460" y2="164.4" stroke="#e2e8f0"/>
+  <text x="52" y="168.4" text-anchor="end" font-size="10.5" fill="#64748b">80%</text>
+  <line x1="60" y1="110.0" x2="460" y2="110.0" stroke="#e2e8f0"/>
+  <text x="52" y="114.0" text-anchor="end" font-size="10.5" fill="#64748b">100%</text>
+  <text x="60.0" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">500</text>
+  <text x="126.7" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">1000</text>
+  <text x="193.3" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">1500</text>
+  <text x="260.0" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">2000</text>
+  <text x="326.7" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">2500</text>
+  <text x="393.3" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">3000</text>
+  <text x="460.0" y="400" text-anchor="middle" font-size="10.5" fill="#64748b">3500</text>
+  <text x="260.0" y="420" text-anchor="middle" font-size="11" fill="#475569">Concurrent SSE Streams</text>
+  <path d="M60.0,231.9 L126.7,171.2 L260.0,131.5" fill="none" stroke="#dc2626" stroke-width="2"/>
+  <circle cx="60.0" cy="231.9" r="3.5" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="171.2" r="3.5" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="131.5" r="3.5" fill="#dc2626" stroke="#fff" stroke-width="1"/>
+  <text x="66.0" y="225.9" font-size="10.5" font-weight="700" fill="#dc2626">V0: 55.2%</text>
+  <path d="M60.0,252.0 L126.7,184.5 L260.0,132.0" fill="none" stroke="#7c3aed" stroke-width="2"/>
+  <circle cx="60.0" cy="252.0" r="3.5" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="184.5" r="3.5" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="132.0" r="3.5" fill="#7c3aed" stroke="#fff" stroke-width="1"/>
+  <path d="M60.0,255.5 L126.7,190.5 L260.0,132.8 L326.7,127.1 L393.3,128.5" fill="none" stroke="#2563eb" stroke-width="2"/>
+  <circle cx="60.0" cy="255.5" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="190.5" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="132.8" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="326.7" cy="127.1" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <circle cx="393.3" cy="128.5" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1"/>
+  <path d="M60.0,268.8 L126.7,204.9 L260.0,139.9 L326.7,132.6 L393.3,128.2 L460.0,124.7" fill="none" stroke="#059669" stroke-width="3"/>
+  <circle cx="60.0" cy="268.8" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="126.7" cy="204.9" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="260.0" cy="139.9" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="326.7" cy="132.6" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="393.3" cy="128.2" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <circle cx="460.0" cy="124.7" r="3.5" fill="#059669" stroke="#fff" stroke-width="1"/>
+  <text x="66.0" y="282.8" font-size="10.5" font-weight="700" fill="#059669">V4-G1: 41.6%</text>
+  <line x1="60" y1="110" x2="60" y2="382" stroke="#94a3b8" stroke-width="1.2"/>
+  <line x1="60" y1="382" x2="460" y2="382" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="745.0" y="92" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Flamegraph CPU Share (%) — Cross-Protocol</text>
+  <rect x="520" y="408" width="10" height="10" fill="#0ea5e9" rx="2"/>
+  <text x="534" y="417" font-size="10" fill="#334155">Kernel I/O</text>
+  <rect x="594" y="408" width="10" height="10" fill="#6366f1" rx="2"/>
+  <text x="608" y="417" font-size="10" fill="#334155">Netty/Reactor</text>
+  <rect x="668" y="408" width="10" height="10" fill="#f59e0b" rx="2"/>
+  <text x="682" y="417" font-size="10" fill="#334155">IR/Codec</text>
+  <rect x="742" y="408" width="10" height="10" fill="#10b981" rx="2"/>
+  <text x="756" y="417" font-size="10" fill="#334155">Proxy/Billing</text>
+  <rect x="816" y="408" width="10" height="10" fill="#ef4444" rx="2"/>
+  <text x="830" y="417" font-size="10" fill="#334155">GC</text>
+  <rect x="890" y="408" width="10" height="10" fill="#94a3b8" rx="2"/>
+  <text x="904" y="417" font-size="10" fill="#334155">Other</text>
+  <rect x="544.2" y="251.8" width="34" height="130.2" fill="#0ea5e9"/>
+  <text x="561.2" y="320.4" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">48%</text>
+  <rect x="544.2" y="193.6" width="34" height="58.3" fill="#6366f1"/>
+  <text x="561.2" y="226.2" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">21%</text>
+  <rect x="544.2" y="143.9" width="34" height="49.6" fill="#f59e0b"/>
+  <text x="561.2" y="172.2" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">18%</text>
+  <rect x="544.2" y="128.3" width="34" height="15.6" fill="#10b981"/>
+  <rect x="544.2" y="114.5" width="34" height="13.7" fill="#ef4444"/>
+  <rect x="544.2" y="110.0" width="34" height="4.5" fill="#94a3b8"/>
+  <text x="561.2" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V0</text>
+  <text x="561.2" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c1000</text>
+  <rect x="596.8" y="248.6" width="34" height="133.4" fill="#0ea5e9"/>
+  <text x="613.8" y="318.8" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">49%</text>
+  <rect x="596.8" y="185.0" width="34" height="63.6" fill="#6366f1"/>
+  <text x="613.8" y="220.3" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">23%</text>
+  <rect x="596.8" y="138.1" width="34" height="46.9" fill="#f59e0b"/>
+  <text x="613.8" y="165.0" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">17%</text>
+  <rect x="596.8" y="121.5" width="34" height="16.6" fill="#10b981"/>
+  <rect x="596.8" y="113.5" width="34" height="8.0" fill="#ef4444"/>
+  <rect x="596.8" y="110.0" width="34" height="3.5" fill="#94a3b8"/>
+  <text x="613.8" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V2</text>
+  <text x="613.8" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c1000</text>
+  <rect x="649.2" y="239.4" width="34" height="142.6" fill="#0ea5e9"/>
+  <text x="666.2" y="314.2" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">52%</text>
+  <rect x="649.2" y="174.8" width="34" height="64.5" fill="#6366f1"/>
+  <text x="666.2" y="210.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">24%</text>
+  <rect x="649.2" y="131.3" width="34" height="43.6" fill="#f59e0b"/>
+  <text x="666.2" y="156.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">16%</text>
+  <rect x="649.2" y="114.6" width="34" height="16.7" fill="#10b981"/>
+  <rect x="649.2" y="111.7" width="34" height="2.8" fill="#ef4444"/>
+  <rect x="649.2" y="110.0" width="34" height="1.7" fill="#94a3b8"/>
+  <text x="666.2" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V3</text>
+  <text x="666.2" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c1000</text>
+  <rect x="701.8" y="225.2" width="34" height="156.8" fill="#0ea5e9"/>
+  <text x="718.8" y="307.1" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">58%</text>
+  <rect x="701.8" y="153.7" width="34" height="71.5" fill="#6366f1"/>
+  <text x="718.8" y="193.0" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">26%</text>
+  <rect x="701.8" y="130.5" width="34" height="23.2" fill="#f59e0b"/>
+  <text x="718.8" y="145.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">9%</text>
+  <rect x="701.8" y="112.4" width="34" height="18.1" fill="#10b981"/>
+  <rect x="701.8" y="112.0" width="34" height="0.5" fill="#ef4444"/>
+  <rect x="701.8" y="110.0" width="34" height="2.0" fill="#94a3b8"/>
+  <text x="718.8" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V4</text>
+  <text x="718.8" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c1000</text>
+  <rect x="754.2" y="276.2" width="34" height="105.8" fill="#0ea5e9"/>
+  <text x="771.2" y="332.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">39%</text>
+  <rect x="754.2" y="212.3" width="34" height="63.9" fill="#6366f1"/>
+  <text x="771.2" y="247.8" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">24%</text>
+  <rect x="754.2" y="154.2" width="34" height="58.1" fill="#f59e0b"/>
+  <text x="771.2" y="186.8" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">21%</text>
+  <rect x="754.2" y="136.0" width="34" height="18.2" fill="#10b981"/>
+  <rect x="754.2" y="112.2" width="34" height="23.8" fill="#ef4444"/>
+  <text x="771.2" y="127.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">9%</text>
+  <rect x="754.2" y="110.0" width="34" height="2.2" fill="#94a3b8"/>
+  <text x="771.2" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V2</text>
+  <text x="771.2" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c2000</text>
+  <rect x="806.8" y="254.5" width="34" height="127.5" fill="#0ea5e9"/>
+  <text x="823.8" y="321.7" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">47%</text>
+  <rect x="806.8" y="190.0" width="34" height="64.5" fill="#6366f1"/>
+  <text x="823.8" y="225.8" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">24%</text>
+  <rect x="806.8" y="147.3" width="34" height="42.8" fill="#f59e0b"/>
+  <text x="823.8" y="172.1" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">16%</text>
+  <rect x="806.8" y="127.5" width="34" height="19.8" fill="#10b981"/>
+  <rect x="806.8" y="112.0" width="34" height="15.5" fill="#ef4444"/>
+  <rect x="806.8" y="110.0" width="34" height="2.0" fill="#94a3b8"/>
+  <text x="823.8" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V3</text>
+  <text x="823.8" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c2000</text>
+  <rect x="859.2" y="234.2" width="34" height="147.8" fill="#0ea5e9"/>
+  <text x="876.2" y="311.6" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">54%</text>
+  <rect x="859.2" y="157.7" width="34" height="76.5" fill="#6366f1"/>
+  <text x="876.2" y="199.4" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">28%</text>
+  <rect x="859.2" y="132.7" width="34" height="25.0" fill="#f59e0b"/>
+  <text x="876.2" y="148.7" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">9%</text>
+  <rect x="859.2" y="113.0" width="34" height="19.7" fill="#10b981"/>
+  <rect x="859.2" y="112.5" width="34" height="0.5" fill="#ef4444"/>
+  <rect x="859.2" y="110.0" width="34" height="2.5" fill="#94a3b8"/>
+  <text x="876.2" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V4</text>
+  <text x="876.2" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c2000</text>
+  <rect x="911.8" y="257.9" width="34" height="124.1" fill="#0ea5e9"/>
+  <text x="928.8" y="323.4" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">46%</text>
+  <rect x="911.8" y="172.5" width="34" height="85.4" fill="#6366f1"/>
+  <text x="928.8" y="218.7" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">31%</text>
+  <rect x="911.8" y="136.8" width="34" height="35.7" fill="#f59e0b"/>
+  <text x="928.8" y="158.1" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">13%</text>
+  <rect x="911.8" y="113.7" width="34" height="23.1" fill="#10b981"/>
+  <text x="928.8" y="128.7" text-anchor="middle" font-size="9" font-weight="600" fill="#fff">8%</text>
+  <rect x="911.8" y="112.3" width="34" height="1.4" fill="#ef4444"/>
+  <rect x="911.8" y="110.0" width="34" height="2.3" fill="#94a3b8"/>
+  <text x="928.8" y="398" text-anchor="middle" font-size="9.5" fill="#334155">V4</text>
+  <text x="928.8" y="410" text-anchor="middle" font-size="9.5" fill="#334155">c3000</text>
+  <line x1="535" y1="382" x2="955" y2="382" stroke="#94a3b8" stroke-width="1.2"/>
+</svg>

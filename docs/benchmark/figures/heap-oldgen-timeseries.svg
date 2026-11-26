@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif">
+  <rect width="980" height="440" fill="#ffffff" rx="8"/>
+  <rect x="0.5" y="0.5" width="979" height="439" fill="none" stroke="#e2e8f0" rx="8"/>
+  <text x="24" y="32" font-size="16" font-weight="700" fill="#0f172a">G1GC Old Gen Occupancy Over Time (Real 2s jstat Sampling, 5 GiB Heap)</text>
+  <text x="24" y="52" font-size="12" fill="#64748b">Left: Cross-Protocol 2,000 Streams (V0 → V4)   |   Right: 3,000 Streams (V3 Full GC OOM Wall vs V4 Flat ~135 MB)</text>
+  <line x1="24" y1="74" x2="42" y2="74" stroke="#dc2626" stroke-width="2.5"/>
+  <text x="47" y="78" font-size="11" fill="#334155">V0 (073e2d1)</text>
+  <line x1="154" y1="74" x2="172" y2="74" stroke="#ea580c" stroke-width="2.5"/>
+  <text x="177" y="78" font-size="11" fill="#334155">V1 (6d230e2)</text>
+  <line x1="284" y1="74" x2="302" y2="74" stroke="#7c3aed" stroke-width="2.5"/>
+  <text x="307" y="78" font-size="11" fill="#334155">V2 (207e61a)</text>
+  <line x1="414" y1="74" x2="432" y2="74" stroke="#2563eb" stroke-width="2.5"/>
+  <text x="437" y="78" font-size="11" fill="#334155">V3 (59dea37)</text>
+  <line x1="544" y1="74" x2="562" y2="74" stroke="#059669" stroke-width="2.5"/>
+  <text x="567" y="78" font-size="11" fill="#334155">V4 (9e6d413)</text>
+  <text x="265.0" y="100" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">2,000 Concurrent Streams (Cross-Protocol)</text>
+  <line x1="65" y1="116.2" x2="465" y2="116.2" stroke="#ef4444" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="463" y="112.2" text-anchor="end" font-size="9.5" fill="#dc2626">-Xmx 5120 MB</text>
+  <line x1="65" y1="385.0" x2="465" y2="385.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="389.0" text-anchor="end" font-size="10.5" fill="#64748b">0</text>
+  <line x1="65" y1="332.5" x2="465" y2="332.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="336.5" text-anchor="end" font-size="10.5" fill="#64748b">1000</text>
+  <line x1="65" y1="280.0" x2="465" y2="280.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="284.0" text-anchor="end" font-size="10.5" fill="#64748b">2000</text>
+  <line x1="65" y1="227.5" x2="465" y2="227.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="231.5" text-anchor="end" font-size="10.5" fill="#64748b">3000</text>
+  <line x1="65" y1="175.0" x2="465" y2="175.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="179.0" text-anchor="end" font-size="10.5" fill="#64748b">4000</text>
+  <line x1="65" y1="122.5" x2="465" y2="122.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="57" y="126.5" text-anchor="end" font-size="10.5" fill="#64748b">5000</text>
+  <line x1="65.0" y1="112" x2="65.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="65.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">0s</text>
+  <line x1="149.2" y1="112" x2="149.2" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="149.2" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">20s</text>
+  <line x1="233.4" y1="112" x2="233.4" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="233.4" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">40s</text>
+  <line x1="317.6" y1="112" x2="317.6" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="317.6" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">60s</text>
+  <line x1="401.8" y1="112" x2="401.8" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="401.8" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">80s</text>
+  <text x="265.0" y="423" text-anchor="middle" font-size="11" fill="#475569">Elapsed Scenario Time (0–20s Ramp, 20–80s Steady)</text>
+  <line x1="65" y1="112" x2="65" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <line x1="65" y1="385" x2="465" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <path d="M65.0,240.7 L73.4,240.7 L81.8,258.5 L94.5,258.5 L102.9,245.8 L111.3,282.7 L123.9,266.4 L132.4,243.7 L145.0,207.3 L153.4,204.4 L166.1,177.2 L174.5,180.1 L187.1,134.7 L199.7,159.6 L208.2,189.6 L220.8,178.8 L233.4,181.6 L241.8,177.9 L254.5,177.5 L262.9,177.9 L275.5,181.5 L288.2,154.2 L300.8,159.0 L309.2,185.0 L317.6,192.4 L330.3,183.5 L342.9,169.2 L351.3,164.6 L363.9,181.9 L376.6,185.1 L389.2,179.3 L397.6,190.4 L406.1,197.5 L418.7,197.5 L427.1,197.5 L435.5,223.8" fill="none" stroke="#dc2626" stroke-width="1.8"/>
+  <path d="M65.0,255.8 L73.4,262.0 L86.1,262.0 L94.5,230.8 L102.9,256.6 L115.5,244.1 L123.9,227.0 L132.4,229.3 L145.0,214.1 L157.6,189.9 L166.1,192.4 L178.7,177.5 L191.3,166.0 L199.7,183.6 L212.4,193.7 L225.0,175.0 L233.4,175.7 L246.1,182.0 L258.7,165.8 L267.1,190.0 L279.7,170.2 L292.4,164.4 L300.8,158.3 L313.4,157.1 L326.1,188.3 L334.5,196.0 L347.1,185.8 L355.5,195.9 L368.2,177.6 L376.6,182.0 L389.2,167.3 L397.6,177.4 L410.3,176.1 L422.9,202.5 L431.3,202.5 L439.7,211.8" fill="none" stroke="#ea580c" stroke-width="1.8"/>
+  <path d="M65.0,275.1 L77.6,274.4 L86.1,274.4 L94.5,274.4 L102.9,280.8 L115.5,262.1 L123.9,268.0 L132.4,249.1 L145.0,255.6 L153.4,228.6 L166.1,242.9 L174.5,222.5 L187.1,215.9 L199.7,217.1 L208.2,195.3 L220.8,229.6 L229.2,216.5 L241.8,221.5 L250.3,216.1 L262.9,208.4 L271.3,224.0 L283.9,231.1 L292.4,235.0 L305.0,212.8 L317.6,212.8 L326.1,227.4 L338.7,229.0 L347.1,230.7 L359.7,227.5 L368.2,226.0 L380.8,229.3 L389.2,212.4 L401.8,212.9 L414.5,224.9 L422.9,224.9 L431.3,224.9 L443.9,237.3" fill="none" stroke="#7c3aed" stroke-width="1.8"/>
+  <path d="M65.0,246.3 L73.4,261.4 L81.8,261.4 L94.5,261.4 L102.9,261.4 L111.3,255.4 L123.9,230.9 L132.4,235.2 L140.8,228.3 L153.4,249.6 L161.8,241.8 L174.5,223.8 L182.9,204.7 L195.5,176.8 L203.9,208.4 L216.6,200.0 L229.2,164.9 L237.6,200.3 L250.3,213.2 L258.7,227.4 L271.3,235.0 L279.7,232.1 L292.4,199.3 L300.8,212.1 L313.4,186.3 L321.8,214.7 L334.5,225.1 L342.9,242.9 L355.5,225.8 L363.9,213.9 L376.6,228.0 L389.2,199.3 L397.6,211.3 L410.3,205.1 L418.7,230.0 L427.1,230.0 L439.7,230.0" fill="none" stroke="#2563eb" stroke-width="1.8"/>
+  <path d="M65.0,377.9 L77.6,377.9 L86.1,377.9 L94.5,377.9 L102.9,377.9 L115.5,377.9 L123.9,377.9 L132.4,377.9 L145.0,377.9 L153.4,377.9 L166.1,377.9 L174.5,377.9 L187.1,377.9 L195.5,377.9 L203.9,377.9 L216.6,377.9 L225.0,377.9 L237.6,377.9 L246.1,377.9 L254.5,377.9 L267.1,377.9 L275.5,377.8 L288.2,377.8 L296.6,377.8 L309.2,377.8 L317.6,377.8 L330.3,377.8 L338.7,377.8 L347.1,377.8 L359.7,377.8 L368.2,377.8 L380.8,377.8 L389.2,377.8 L401.8,377.8 L410.3,377.8 L422.9,377.8 L431.3,377.8 L439.7,377.8" fill="none" stroke="#059669" stroke-width="3"/>
+  <text x="459" y="369.6" text-anchor="end" font-size="11" font-weight="700" fill="#059669">V4: ~135–141 MB flat!</text>
+  <text x="745.0" y="100" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">3,000 Concurrent Streams (Same &amp; Cross)</text>
+  <line x1="545" y1="116.2" x2="945" y2="116.2" stroke="#ef4444" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="943" y="112.2" text-anchor="end" font-size="9.5" fill="#dc2626">-Xmx 5120 MB</text>
+  <line x1="545" y1="385.0" x2="945" y2="385.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="389.0" text-anchor="end" font-size="10.5" fill="#64748b">0</text>
+  <line x1="545" y1="332.5" x2="945" y2="332.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="336.5" text-anchor="end" font-size="10.5" fill="#64748b">1000</text>
+  <line x1="545" y1="280.0" x2="945" y2="280.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="284.0" text-anchor="end" font-size="10.5" fill="#64748b">2000</text>
+  <line x1="545" y1="227.5" x2="945" y2="227.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="231.5" text-anchor="end" font-size="10.5" fill="#64748b">3000</text>
+  <line x1="545" y1="175.0" x2="945" y2="175.0" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="179.0" text-anchor="end" font-size="10.5" fill="#64748b">4000</text>
+  <line x1="545" y1="122.5" x2="945" y2="122.5" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="537" y="126.5" text-anchor="end" font-size="10.5" fill="#64748b">5000</text>
+  <line x1="545.0" y1="112" x2="545.0" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="545.0" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">0s</text>
+  <line x1="629.2" y1="112" x2="629.2" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="629.2" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">20s</text>
+  <line x1="713.4" y1="112" x2="713.4" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="713.4" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">40s</text>
+  <line x1="797.6" y1="112" x2="797.6" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="797.6" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">60s</text>
+  <line x1="881.8" y1="112" x2="881.8" y2="385" stroke="#f1f5f9" stroke-width="1"/>
+  <text x="881.8" y="403" text-anchor="middle" font-size="10.5" fill="#64748b">80s</text>
+  <text x="745.0" y="423" text-anchor="middle" font-size="11" fill="#475569">Elapsed Scenario Time (0–20s Ramp, 20–80s Steady)</text>
+  <line x1="545" y1="112" x2="545" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <line x1="545" y1="385" x2="945" y2="385" stroke="#94a3b8" stroke-width="1.2"/>
+  <path d="M545.0,191.6 L553.4,208.7 L561.8,208.7 L574.5,350.4 L582.9,350.4 L591.3,316.4 L603.9,316.4 L612.4,244.0 L625.0,218.2 L637.6,182.6 L650.3,173.8 L662.9,116.2 L675.5,213.4 L688.2,183.4 L700.8,141.9 L713.4,234.1 L730.3,172.0 L738.7,140.6 L751.3,220.5 L768.2,179.2 L776.6,185.5 L789.2,162.0 L801.8,180.4 L814.5,153.1 L827.1,230.8 L839.7,213.3 L852.4,158.2 L865.0,165.9 L877.6,162.0 L886.1,172.0 L898.7,177.7 L907.1,199.9 L919.7,199.9" fill="none" stroke="#2563eb" stroke-width="1.8"/>
+  <path d="M545.0,224.9 L557.6,224.9 L566.1,210.9 L574.5,215.7 L582.9,198.3 L595.5,183.2 L603.9,206.7 L616.6,226.6 L625.0,192.0 L637.6,198.0 L650.3,163.2 L662.9,231.3 L675.5,197.5 L688.2,165.4 L700.8,248.2 L713.4,208.2 L726.1,152.5 L738.7,175.2 L751.3,145.3 L763.9,151.9 L776.6,250.2 L789.2,216.1 L797.6,168.8 L814.5,160.4 L822.9,158.9 L839.7,167.5 L848.2,169.0 L860.8,116.2 L873.4,231.0 L890.3,186.9 L902.9,182.9 L911.3,182.9 L919.7,186.1" fill="none" stroke="#7c3aed" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <path d="M545.0,378.4 L557.6,378.4 L566.1,378.4 L574.5,378.4 L587.1,378.4 L595.5,378.4 L603.9,378.4 L616.6,378.4 L625.0,378.4 L637.6,378.4 L646.1,378.4 L658.7,378.3 L671.3,378.3 L679.7,378.3 L692.4,378.3 L700.8,378.3 L713.4,378.3 L726.1,378.3 L734.5,378.2 L747.1,378.2 L755.5,378.2 L768.2,378.2 L776.6,378.2 L789.2,378.2 L801.8,378.2 L810.3,378.2 L818.7,378.2 L831.3,378.2 L843.9,378.1 L852.4,378.1 L865.0,378.1 L873.4,378.1 L886.1,378.1 L894.5,378.1 L907.1,378.1 L915.5,378.1 L928.2,378.1" fill="none" stroke="#059669" stroke-width="3"/>
+  <path d="M545.0,377.7 L553.4,377.7 L561.8,377.7 L574.5,377.7 L582.9,377.7 L591.3,377.7 L603.9,377.7 L612.4,377.7 L625.0,377.7 L637.6,377.7 L646.1,377.7 L658.7,377.7 L667.1,377.7 L679.7,377.7 L692.4,377.7 L700.8,377.7 L713.4,377.6 L726.1,377.6 L734.5,377.6 L747.1,377.6 L755.5,377.6 L768.2,377.6 L776.6,377.6 L789.2,377.6 L801.8,377.6 L810.3,377.6 L822.9,377.6 L835.5,377.6 L843.9,377.6 L856.6,377.6 L865.0,377.6 L877.6,377.6 L890.3,377.6 L898.7,377.6 L911.3,377.6 L919.7,377.6" fill="none" stroke="#0d9488" stroke-width="3" stroke-dasharray="5,3"/>
+  <text x="939" y="369.6" text-anchor="end" font-size="11" font-weight="700" fill="#059669">V4: ~135–141 MB flat!</text>
+</svg>

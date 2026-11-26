@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 420" width="980" height="420" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif">
+  <rect width="980" height="420" fill="#ffffff" rx="8"/>
+  <rect x="0.5" y="0.5" width="979" height="419" fill="none" stroke="#e2e8f0" rx="8"/>
+  <text x="24" y="32" font-size="16" font-weight="700" fill="#0f172a">Total GC Pause Time (YGC + Full GC) &amp; Collection Count Over 90s Window</text>
+  <text x="24" y="52" font-size="12" fill="#64748b">ARM64 CAX 31 (4C / 5g), Cross-Protocol Streaming   |   Left: 2,000 Streams (V0 → V4-ZGC)   |   Right: 3,000 &amp; 3,500 Streams</text>
+  <text x="280.0" y="90" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">2,000 Concurrent Streams — Total STW Pause (ms)</text>
+  <line x1="60" y1="348.0" x2="500" y2="348.0" stroke="#e2e8f0"/>
+  <text x="52" y="352.0" text-anchor="end" font-size="10.5" fill="#64748b">0</text>
+  <line x1="60" y1="300.0" x2="500" y2="300.0" stroke="#e2e8f0"/>
+  <text x="52" y="304.0" text-anchor="end" font-size="10.5" fill="#64748b">960</text>
+  <line x1="60" y1="252.0" x2="500" y2="252.0" stroke="#e2e8f0"/>
+  <text x="52" y="256.0" text-anchor="end" font-size="10.5" fill="#64748b">1920</text>
+  <line x1="60" y1="204.0" x2="500" y2="204.0" stroke="#e2e8f0"/>
+  <text x="52" y="208.0" text-anchor="end" font-size="10.5" fill="#64748b">2880</text>
+  <line x1="60" y1="156.0" x2="500" y2="156.0" stroke="#e2e8f0"/>
+  <text x="52" y="160.0" text-anchor="end" font-size="10.5" fill="#64748b">3840</text>
+  <line x1="60" y1="108.0" x2="500" y2="108.0" stroke="#e2e8f0"/>
+  <text x="52" y="112.0" text-anchor="end" font-size="10.5" fill="#64748b">4800</text>
+  <rect x="71.0" y="132.2" width="40.9" height="215.8" fill="#dc2626" rx="3"/>
+  <text x="91.4" y="116.2" text-anchor="middle" font-size="10.5" font-weight="700" fill="#dc2626">4316ms</text>
+  <text x="91.4" y="128.2" text-anchor="middle" font-size="9.5" fill="#475569">(115Y)</text>
+  <text x="91.4" y="365" text-anchor="middle" font-size="10" fill="#334155">V0</text>
+  <text x="91.4" y="378" text-anchor="middle" font-size="10" fill="#334155">073e2d1</text>
+  <rect x="133.9" y="157.3" width="40.9" height="190.7" fill="#ea580c" rx="3"/>
+  <text x="154.3" y="141.3" text-anchor="middle" font-size="10.5" font-weight="700" fill="#ea580c">3813ms</text>
+  <text x="154.3" y="153.3" text-anchor="middle" font-size="9.5" fill="#475569">(108Y)</text>
+  <text x="154.3" y="365" text-anchor="middle" font-size="10" fill="#334155">V1</text>
+  <text x="154.3" y="378" text-anchor="middle" font-size="10" fill="#334155">6d230e2</text>
+  <rect x="196.7" y="208.2" width="40.9" height="139.8" fill="#d97706" rx="3"/>
+  <text x="217.1" y="192.2" text-anchor="middle" font-size="10.5" font-weight="700" fill="#d97706">2795ms</text>
+  <text x="217.1" y="204.2" text-anchor="middle" font-size="9.5" fill="#475569">(55Y)</text>
+  <text x="217.1" y="365" text-anchor="middle" font-size="10" fill="#334155">V1.5</text>
+  <text x="217.1" y="378" text-anchor="middle" font-size="10" fill="#334155">83c9336</text>
+  <rect x="259.6" y="201.5" width="40.9" height="146.5" fill="#7c3aed" rx="3"/>
+  <text x="280.0" y="185.5" text-anchor="middle" font-size="10.5" font-weight="700" fill="#7c3aed">2930ms</text>
+  <text x="280.0" y="197.5" text-anchor="middle" font-size="9.5" fill="#475569">(56Y)</text>
+  <text x="280.0" y="365" text-anchor="middle" font-size="10" fill="#334155">V2</text>
+  <text x="280.0" y="378" text-anchor="middle" font-size="10" fill="#334155">207e61a</text>
+  <rect x="322.4" y="232.3" width="40.9" height="115.7" fill="#2563eb" rx="3"/>
+  <text x="342.9" y="216.3" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2563eb">2314ms</text>
+  <text x="342.9" y="228.3" text-anchor="middle" font-size="9.5" fill="#475569">(43Y)</text>
+  <text x="342.9" y="365" text-anchor="middle" font-size="10" fill="#334155">V3</text>
+  <text x="342.9" y="378" text-anchor="middle" font-size="10" fill="#334155">59dea37</text>
+  <rect x="385.3" y="336.1" width="40.9" height="11.9" fill="#059669" rx="3"/>
+  <text x="405.7" y="320.1" text-anchor="middle" font-size="10.5" font-weight="700" fill="#059669">239ms</text>
+  <text x="405.7" y="332.1" text-anchor="middle" font-size="9.5" fill="#475569">(5Y)</text>
+  <text x="405.7" y="365" text-anchor="middle" font-size="10" fill="#334155">V4-G1</text>
+  <text x="405.7" y="378" text-anchor="middle" font-size="10" fill="#334155">9e6d413</text>
+  <rect x="448.1" y="348.0" width="40.9" height="1.5" fill="#0d9488" rx="3"/>
+  <text x="468.6" y="332.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#0d9488">0ms</text>
+  <text x="468.6" y="344.0" text-anchor="middle" font-size="9.5" fill="#475569">(18Y)</text>
+  <text x="468.6" y="365" text-anchor="middle" font-size="10" fill="#334155">V4-ZGC</text>
+  <text x="468.6" y="378" text-anchor="middle" font-size="10" fill="#334155">9e6d413</text>
+  <line x1="60" y1="348" x2="500" y2="348" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="752.5" y="90" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">3,000 &amp; 3,500 Streams — Total STW Pause (ms)</text>
+  <line x1="560" y1="348.0" x2="945" y2="348.0" stroke="#e2e8f0"/>
+  <text x="552" y="352.0" text-anchor="end" font-size="10.5" fill="#64748b">0</text>
+  <line x1="560" y1="300.0" x2="945" y2="300.0" stroke="#e2e8f0"/>
+  <text x="552" y="304.0" text-anchor="end" font-size="10.5" fill="#64748b">1300</text>
+  <line x1="560" y1="252.0" x2="945" y2="252.0" stroke="#e2e8f0"/>
+  <text x="552" y="256.0" text-anchor="end" font-size="10.5" fill="#64748b">2600</text>
+  <line x1="560" y1="204.0" x2="945" y2="204.0" stroke="#e2e8f0"/>
+  <text x="552" y="208.0" text-anchor="end" font-size="10.5" fill="#64748b">3900</text>
+  <line x1="560" y1="156.0" x2="945" y2="156.0" stroke="#e2e8f0"/>
+  <text x="552" y="160.0" text-anchor="end" font-size="10.5" fill="#64748b">5200</text>
+  <line x1="560" y1="108.0" x2="945" y2="108.0" stroke="#e2e8f0"/>
+  <text x="552" y="112.0" text-anchor="end" font-size="10.5" fill="#64748b">6500</text>
+  <rect x="575.5" y="187.5" width="46.0" height="160.5" fill="#2563eb" rx="3"/>
+  <rect x="575.5" y="123.0" width="46.0" height="64.5" fill="#dc2626" rx="3"/>
+  <text x="598.5" y="107.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2563eb">6094ms</text>
+  <text x="598.5" y="119.0" text-anchor="middle" font-size="9.5" fill="#475569">(112Y+4F)</text>
+  <text x="598.5" y="365" text-anchor="middle" font-size="10" fill="#334155">V3 G1</text>
+  <text x="598.5" y="378" text-anchor="middle" font-size="10" fill="#334155">c3000</text>
+  <rect x="652.5" y="330.0" width="46.0" height="18.0" fill="#059669" rx="3"/>
+  <text x="675.5" y="314.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#059669">487ms</text>
+  <text x="675.5" y="326.0" text-anchor="middle" font-size="9.5" fill="#475569">(8Y)</text>
+  <text x="675.5" y="365" text-anchor="middle" font-size="10" fill="#334155">V4 G1</text>
+  <text x="675.5" y="378" text-anchor="middle" font-size="10" fill="#334155">c3000</text>
+  <rect x="729.5" y="348.0" width="46.0" height="1.5" fill="#0d9488" rx="3"/>
+  <text x="752.5" y="332.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#0d9488">1ms</text>
+  <text x="752.5" y="344.0" text-anchor="middle" font-size="9.5" fill="#475569">(45Y)</text>
+  <text x="752.5" y="365" text-anchor="middle" font-size="10" fill="#334155">V4 ZGC</text>
+  <text x="752.5" y="378" text-anchor="middle" font-size="10" fill="#334155">c3000</text>
+  <rect x="806.5" y="323.7" width="46.0" height="24.3" fill="#10b981" rx="3"/>
+  <text x="829.5" y="307.7" text-anchor="middle" font-size="10.5" font-weight="700" fill="#10b981">659ms</text>
+  <text x="829.5" y="319.7" text-anchor="middle" font-size="9.5" fill="#475569">(10Y)</text>
+  <text x="829.5" y="365" text-anchor="middle" font-size="10" fill="#334155">V4 G1</text>
+  <text x="829.5" y="378" text-anchor="middle" font-size="10" fill="#334155">c3500</text>
+  <rect x="883.5" y="347.9" width="46.0" height="1.5" fill="#14b8a6" rx="3"/>
+  <text x="906.5" y="331.9" text-anchor="middle" font-size="10.5" font-weight="700" fill="#14b8a6">2ms</text>
+  <text x="906.5" y="343.9" text-anchor="middle" font-size="9.5" fill="#475569">(61Y)</text>
+  <text x="906.5" y="365" text-anchor="middle" font-size="10" fill="#334155">V4 ZGC</text>
+  <text x="906.5" y="378" text-anchor="middle" font-size="10" fill="#334155">c3500</text>
+  <line x1="560" y1="348" x2="945" y2="348" stroke="#94a3b8" stroke-width="1.2"/>
+  <rect x="745" y="102" width="12" height="12" fill="#dc2626" rx="2"/><text x="762" y="112" font-size="10.5" fill="#dc2626" font-weight="600">Full GC STW (red top)</text>
+</svg>
