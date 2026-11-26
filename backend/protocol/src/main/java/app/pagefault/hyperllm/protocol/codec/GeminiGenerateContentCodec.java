@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.protocol.io.ByteSink;
+import app.pagefault.hyperllm.protocol.io.JsonUtf8Writer;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -55,6 +56,15 @@ import java.util.Optional;
  * ({@code POST /v1beta/models/{model}:generateContent} and {@code :streamGenerateContent}).
  */
 public final class GeminiGenerateContentCodec implements ProtocolCodec {
+
+    private static final byte[] GEM_SSE_DATA_PREFIX = "data: ".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_SSE_TAIL = "\n\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_ARRAY_FIRST = "[\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_ARRAY_NEXT = ",\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_ARRAY_END = "\n]".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_TEXT_PART_OPEN = "{\"text\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_THOUGHT_PART_OPEN = "{\"thought\":true,\"text\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] GEM_CHUNK_SUFFIX = "}]}}]}".getBytes(StandardCharsets.US_ASCII);
 
     private final ObjectMapper mapper;
 
@@ -1329,27 +1339,187 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.push(upstreamChunk, ev -> processChunk(ev, out));
-            return out;
+        public void feed(byte[] upstreamChunk, int offset, int length, StreamEventSink sink) {
+            splitter.push(upstreamChunk, offset, length, ev -> processChunk(ev, sink));
         }
 
         @Override
-        public List<CanonicalStreamEvent> complete() {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.flushRemainder(ev -> processChunk(ev, out));
+        public void complete(StreamEventSink sink) {
+            splitter.flushRemainder(ev -> processChunk(ev, sink));
             if (!finished && started) {
-                closeActiveBlock(out);
+                closeActiveBlock(sink);
                 finished = true;
-                out.add(new CanonicalStreamEvent.MessageFinish(
+                sink.onEvent(new CanonicalStreamEvent.MessageFinish(
                         sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN, null));
             }
-            return out;
         }
 
-        private void processChunk(SseEventSplitter.SseEvent ev, List<CanonicalStreamEvent> out) {
+        /**
+         * Tree-free fast path for single-candidate, single-part text/thought Gemini chunks without
+         * {@code usageMetadata}, {@code finishReason}, {@code functionCall}, or {@code promptFeedback}.
+         */
+        private boolean scanAndEmitTextChunk(byte[] source, int offset, int length, StreamEventSink sink) {
+            String respId = null;
+            String modelVer = null;
+            boolean sawCandidates = false;
+            boolean isThought = false;
+            String text = null;
+            String thoughtSig = null;
+
+            try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
+                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                    return false;
+                }
+                JsonToken tok;
+                while ((tok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                    String field = parser.currentName();
+                    JsonToken val = parser.nextToken();
+                    switch (field) {
+                        case "responseId" -> {
+                            if (val == JsonToken.VALUE_STRING && !started) {
+                                respId = parser.getText();
+                            } else if (val != JsonToken.VALUE_STRING && val != JsonToken.VALUE_NULL) {
+                                return false;
+                            }
+                        }
+                        case "modelVersion" -> {
+                            if (val == JsonToken.VALUE_STRING && !started) {
+                                modelVer = parser.getText();
+                            } else if (val != JsonToken.VALUE_STRING && val != JsonToken.VALUE_NULL) {
+                                return false;
+                            }
+                        }
+                        case "candidates" -> {
+                            if (val != JsonToken.START_ARRAY || sawCandidates) {
+                                return false;
+                            }
+                            sawCandidates = true;
+                            if (parser.nextToken() != JsonToken.START_OBJECT) {
+                                return false;
+                            }
+                            JsonToken cTok;
+                            while ((cTok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                String cf = parser.currentName();
+                                JsonToken cv = parser.nextToken();
+                                switch (cf) {
+                                    case "index" -> {
+                                        if (!cv.isNumeric()) {
+                                            return false;
+                                        }
+                                    }
+                                    case "finishReason" -> {
+                                        if (cv != JsonToken.VALUE_NULL) {
+                                            return false;
+                                        }
+                                    }
+                                    case "content" -> {
+                                        if (cv != JsonToken.START_OBJECT) {
+                                            return false;
+                                        }
+                                        JsonToken ctTok;
+                                        while ((ctTok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                            String ctf = parser.currentName();
+                                            JsonToken ctv = parser.nextToken();
+                                            if ("role".equals(ctf) && ctv == JsonToken.VALUE_STRING) {
+                                                // ignore role
+                                            } else if ("parts".equals(ctf) && ctv == JsonToken.START_ARRAY) {
+                                                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                                                    return false;
+                                                }
+                                                JsonToken pTok;
+                                                while ((pTok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                                    String pf = parser.currentName();
+                                                    JsonToken pv = parser.nextToken();
+                                                    switch (pf) {
+                                                        case "text" -> {
+                                                            if (pv == JsonToken.VALUE_STRING) {
+                                                                text = parser.getText();
+                                                            } else if (pv != JsonToken.VALUE_NULL) {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        case "thought" -> {
+                                                            if (pv == JsonToken.VALUE_TRUE) {
+                                                                isThought = true;
+                                                            } else if (pv != JsonToken.VALUE_FALSE) {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        case "thoughtSignature" -> {
+                                                            if (pv == JsonToken.VALUE_STRING) {
+                                                                thoughtSig = parser.getText();
+                                                            } else if (pv != JsonToken.VALUE_NULL) {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        default -> {
+                                                            return false;
+                                                        }
+                                                    }
+                                                }
+                                                if (pTok != JsonToken.END_OBJECT || parser.nextToken() != JsonToken.END_ARRAY) {
+                                                    return false;
+                                                }
+                                            } else {
+                                                return false;
+                                            }
+                                        }
+                                        if (ctTok != JsonToken.END_OBJECT) {
+                                            return false;
+                                        }
+                                    }
+                                    case "safetyRatings", "groundingMetadata", "avgLogprobs" -> parser.skipChildren();
+                                    default -> {
+                                        return false;
+                                    }
+                                }
+                            }
+                            if (cTok != JsonToken.END_OBJECT || parser.nextToken() != JsonToken.END_ARRAY) {
+                                return false;
+                            }
+                        }
+                        default -> {
+                            return false;
+                        }
+                    }
+                }
+                if (tok != JsonToken.END_OBJECT || !sawCandidates || text == null) {
+                    return false;
+                }
+            } catch (Exception ex) {
+                return false;
+            }
+
+            if (!started) {
+                String id = (respId == null || respId.isBlank()) ? CodecSupport.generateId("gem_") : respId;
+                String model = (virtualModel != null && !virtualModel.isBlank())
+                        ? virtualModel : (modelVer != null ? modelVer : "");
+                sink.onEvent(new CanonicalStreamEvent.MessageStart(id, model, CodecSupport.nowEpochSeconds()));
+                started = true;
+            }
+            if (isThought) {
+                int idx = ensureActiveBlock(BlockKind.THINKING, sink);
+                if (!text.isEmpty()) {
+                    sink.onThinkingDelta(idx, text);
+                }
+                if (thoughtSig != null && !thoughtSig.isBlank()) {
+                    sink.onEvent(new CanonicalStreamEvent.ThinkingSignatureDelta(
+                            idx, thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
+                }
+            } else {
+                int idx = ensureActiveBlock(BlockKind.TEXT, sink);
+                if (!text.isEmpty()) {
+                    sink.onTextDelta(idx, text);
+                }
+            }
+            return true;
+        }
+
+        private void processChunk(SseEventSplitter.SseEvent ev, StreamEventSink sink) {
             if (!ev.hasData() || SseEventSplitter.isDoneMarker(ev)) {
+                return;
+            }
+            if (scanAndEmitTextChunk(ev.dataSource(), ev.dataOffset(), ev.dataLength(), sink)) {
                 return;
             }
             try {
@@ -1365,12 +1535,12 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                     }
                     String model = (virtualModel != null && !virtualModel.isBlank())
                             ? virtualModel : root.path("modelVersion").asText("");
-                    out.add(new CanonicalStreamEvent.MessageStart(id, model, CodecSupport.nowEpochSeconds()));
+                    sink.onEvent(new CanonicalStreamEvent.MessageStart(id, model, CodecSupport.nowEpochSeconds()));
                     started = true;
                 }
 
                 parseUsageMetadata(root.get("usageMetadata"))
-                        .ifPresent(u -> out.add(new CanonicalStreamEvent.UsageUpdate(u, true)));
+                        .ifPresent(u -> sink.onEvent(new CanonicalStreamEvent.UsageUpdate(u, true)));
 
                 JsonNode candidates = root.get("candidates");
                 if (candidates != null && candidates.isArray() && !candidates.isEmpty()) {
@@ -1380,23 +1550,23 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                         for (JsonNode part : parts) {
                             String thoughtSig = CodecSupport.asNullableText(part, "thoughtSignature");
                             if (part.path("thought").asBoolean(false)) {
-                                int idx = ensureActiveBlock(BlockKind.THINKING, out);
+                                int idx = ensureActiveBlock(BlockKind.THINKING, sink);
                                 String text = part.path("text").asText("");
                                 if (!text.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.ThinkingDelta(idx, text));
+                                    sink.onThinkingDelta(idx, text);
                                 }
                                 if (thoughtSig != null && !thoughtSig.isBlank()) {
-                                    out.add(new CanonicalStreamEvent.ThinkingSignatureDelta(
+                                    sink.onEvent(new CanonicalStreamEvent.ThinkingSignatureDelta(
                                             idx, thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
                                 }
                             } else if (part.hasNonNull("text")) {
-                                int idx = ensureActiveBlock(BlockKind.TEXT, out);
+                                int idx = ensureActiveBlock(BlockKind.TEXT, sink);
                                 String text = part.get("text").asText();
                                 if (!text.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.TextDelta(idx, text));
+                                    sink.onTextDelta(idx, text);
                                 }
                             } else if (part.hasNonNull("functionCall")) {
-                                closeActiveBlock(out);
+                                closeActiveBlock(sink);
                                 sawToolCall = true;
                                 JsonNode fc = part.get("functionCall");
                                 String callId = CodecSupport.asNullableText(fc, "id");
@@ -1408,17 +1578,17 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                                 String serializedArgs = (args != null && !args.isNull())
                                         ? CodecSupport.writeJsonString(mapper, args) : "{}";
                                 int idx = nextBlockIndex++;
-                                out.add(new CanonicalStreamEvent.ToolCallStart(
+                                sink.onEvent(new CanonicalStreamEvent.ToolCallStart(
                                         idx, callId, null, name, thoughtSig, ProtocolKind.GEMINI_GENERATE_CONTENT));
-                                out.add(new CanonicalStreamEvent.ToolCallArgsDelta(idx, callId, serializedArgs));
-                                out.add(new CanonicalStreamEvent.BlockStop(idx));
+                                sink.onToolCallArgsDelta(idx, callId, serializedArgs);
+                                sink.onEvent(new CanonicalStreamEvent.BlockStop(idx));
                             }
                         }
                     }
 
                     String finishReason = CodecSupport.asNullableText(cand0, "finishReason");
                     if (finishReason != null && !finishReason.isBlank() && !finished) {
-                        closeActiveBlock(out);
+                        closeActiveBlock(sink);
                         CanonicalStopReason mapped = switch (finishReason) {
                             case "MAX_TOKENS" -> CanonicalStopReason.MAX_TOKENS;
                             case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII" ->
@@ -1428,31 +1598,31 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                             default -> sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN;
                         };
                         finished = true;
-                        out.add(new CanonicalStreamEvent.MessageFinish(mapped, null));
+                        sink.onEvent(new CanonicalStreamEvent.MessageFinish(mapped, null));
                     }
                 } else if (root.path("promptFeedback").hasNonNull("blockReason") && !finished) {
-                    closeActiveBlock(out);
+                    closeActiveBlock(sink);
                     finished = true;
-                    out.add(new CanonicalStreamEvent.MessageFinish(CanonicalStopReason.CONTENT_FILTER, null));
+                    sink.onEvent(new CanonicalStreamEvent.MessageFinish(CanonicalStopReason.CONTENT_FILTER, null));
                 }
             } catch (Exception ignored) {
             }
         }
 
-        private int ensureActiveBlock(BlockKind kind, List<CanonicalStreamEvent> out) {
+        private int ensureActiveBlock(BlockKind kind, StreamEventSink sink) {
             if (activeBlockIndex >= 0 && activeBlockKind == kind) {
                 return activeBlockIndex;
             }
-            closeActiveBlock(out);
+            closeActiveBlock(sink);
             activeBlockIndex = nextBlockIndex++;
             activeBlockKind = kind;
-            out.add(new CanonicalStreamEvent.BlockStart(activeBlockIndex, kind));
+            sink.onEvent(new CanonicalStreamEvent.BlockStart(activeBlockIndex, kind));
             return activeBlockIndex;
         }
 
-        private void closeActiveBlock(List<CanonicalStreamEvent> out) {
+        private void closeActiveBlock(StreamEventSink sink) {
             if (activeBlockIndex >= 0) {
-                out.add(new CanonicalStreamEvent.BlockStop(activeBlockIndex));
+                sink.onEvent(new CanonicalStreamEvent.BlockStop(activeBlockIndex));
                 activeBlockIndex = -1;
                 activeBlockKind = null;
             }
@@ -1466,6 +1636,7 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         private final String model;
         private final boolean altSse;
         private String responseId = CodecSupport.generateId("gem_");
+        private byte[] chunkEnvelopePrefix;
         private boolean emittedAnyChunk;
         private boolean finished;
         private TokenUsage latestUsage = TokenUsage.empty();
@@ -1497,50 +1668,56 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<byte[]> encode(CanonicalStreamEvent event) {
-            List<byte[]> frames = new ArrayList<>();
+        public void encodeTextDelta(int blockIndex, CharSequence textDelta, ByteSink out) {
+            writeFastPartChunk(GEM_TEXT_PART_OPEN, textDelta, out);
+        }
+
+        @Override
+        public void encodeRefusalDelta(int blockIndex, CharSequence refusalDelta, ByteSink out) {
+            writeFastPartChunk(GEM_TEXT_PART_OPEN, refusalDelta, out);
+        }
+
+        @Override
+        public void encodeThinkingDelta(int blockIndex, CharSequence thinkingDelta, ByteSink out) {
+            writeFastPartChunk(GEM_THOUGHT_PART_OPEN, thinkingDelta, out);
+        }
+
+        @Override
+        public void encodeToolCallArgsDelta(int blockIndex, String callId, CharSequence partialJsonDelta, ByteSink out) {
+            PendingToolCall ptc = pendingTools.get(blockIndex);
+            if (ptc != null) {
+                ptc.argsBuffer.append(partialJsonDelta);
+            }
+        }
+
+        @Override
+        public void encode(CanonicalStreamEvent event, ByteSink out) {
             switch (event) {
                 case CanonicalStreamEvent.MessageStart start -> {
                     if (start.responseId() != null && !start.responseId().isBlank()) {
                         this.responseId = start.responseId();
+                        this.chunkEnvelopePrefix = null;
                     }
                 }
-                case CanonicalStreamEvent.TextDelta td -> {
-                    ObjectNode p = mapper.createObjectNode();
-                    p.put("text", td.textDelta());
-                    frames.add(wrapChunk(buildChunk(List.of(p), null, null)));
-                }
-                case CanonicalStreamEvent.RefusalDelta ref -> {
-                    ObjectNode p = mapper.createObjectNode();
-                    p.put("text", ref.refusalDelta());
-                    frames.add(wrapChunk(buildChunk(List.of(p), null, null)));
-                }
-                case CanonicalStreamEvent.ThinkingDelta th -> {
-                    ObjectNode p = mapper.createObjectNode();
-                    p.put("thought", true);
-                    p.put("text", th.thinkingDelta());
-                    frames.add(wrapChunk(buildChunk(List.of(p), null, null)));
-                }
+                case CanonicalStreamEvent.TextDelta td -> encodeTextDelta(td.blockIndex(), td.textDelta(), out);
+                case CanonicalStreamEvent.RefusalDelta ref -> encodeRefusalDelta(ref.blockIndex(), ref.refusalDelta(), out);
+                case CanonicalStreamEvent.ThinkingDelta th -> encodeThinkingDelta(th.blockIndex(), th.thinkingDelta(), out);
                 case CanonicalStreamEvent.ToolCallStart tcs -> pendingTools.put(
                         tcs.blockIndex(),
                         new PendingToolCall(tcs.callId(), tcs.name(), tcs.thoughtSignature(), tcs.originProtocol())
                 );
-                case CanonicalStreamEvent.ToolCallArgsDelta tcad -> {
-                    PendingToolCall ptc = pendingTools.get(tcad.blockIndex());
-                    if (ptc != null) {
-                        ptc.argsBuffer.append(tcad.partialJsonDelta());
-                    }
-                }
+                case CanonicalStreamEvent.ToolCallArgsDelta tcad ->
+                        encodeToolCallArgsDelta(tcad.blockIndex(), tcad.callId(), tcad.partialJsonDelta(), out);
                 case CanonicalStreamEvent.BlockStop stop -> {
                     PendingToolCall ptc = pendingTools.remove(stop.blockIndex());
                     if (ptc != null) {
-                        frames.add(wrapChunk(buildChunk(List.of(buildToolCallPart(ptc)), null, null)));
+                        writeWrappedChunk(buildChunk(List.of(buildToolCallPart(ptc)), null, null), out);
                     }
                 }
                 case CanonicalStreamEvent.UsageUpdate uu -> {
                     latestUsage = uu.cumulative() ? uu.usage() : latestUsage.mergeMax(uu.usage());
                 }
-                case CanonicalStreamEvent.MessageFinish mf -> emitTerminal(mf.stopReason(), frames);
+                case CanonicalStreamEvent.MessageFinish mf -> emitTerminal(mf.stopReason(), out);
                 case CanonicalStreamEvent.StreamError err -> {
                     ObjectNode errObj = mapper.createObjectNode();
                     ObjectNode inner = mapper.createObjectNode();
@@ -1548,9 +1725,9 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                     inner.put("status", "INTERNAL");
                     inner.put("message", err.message() != null ? err.message() : "Upstream stream error");
                     errObj.set("error", inner);
-                    frames.add(wrapChunk(errObj));
+                    writeWrappedChunk(errObj, out);
                     if (!altSse) {
-                        frames.add("]".getBytes(StandardCharsets.UTF_8));
+                        out.writeByte(']');
                     }
                     finished = true;
                 }
@@ -1558,20 +1735,56 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 case CanonicalStreamEvent.ThinkingSignatureDelta ignored -> {}
                 case CanonicalStreamEvent.RedactedThinking ignored -> {}
             }
-            return frames;
         }
 
         @Override
-        public List<byte[]> finish() {
+        public void finish(ByteSink out) {
             if (finished) {
-                return List.of();
+                return;
             }
-            List<byte[]> frames = new ArrayList<>();
-            emitTerminal(CanonicalStopReason.END_TURN, frames);
-            return frames;
+            emitTerminal(CanonicalStopReason.END_TURN, out);
         }
 
-        private void emitTerminal(CanonicalStopReason reason, List<byte[]> frames) {
+        private byte[] envelopePrefix() {
+            byte[] cached = chunkEnvelopePrefix;
+            if (cached != null) {
+                return cached;
+            }
+            ByteSink.HeapByteSink tmp = new ByteSink.HeapByteSink(160);
+            tmp.writeBytes("{\"responseId\":".getBytes(StandardCharsets.US_ASCII));
+            JsonUtf8Writer.writeJsonString(responseId, tmp);
+            tmp.writeBytes(",\"modelVersion\":".getBytes(StandardCharsets.US_ASCII));
+            if (model == null) {
+                tmp.writeBytes("null".getBytes(StandardCharsets.US_ASCII));
+            } else {
+                JsonUtf8Writer.writeJsonString(model, tmp);
+            }
+            tmp.writeBytes(",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[".getBytes(StandardCharsets.US_ASCII));
+            cached = tmp.toExactByteArray();
+            chunkEnvelopePrefix = cached;
+            return cached;
+        }
+
+        private void writeFastPartChunk(byte[] partOpen, CharSequence text, ByteSink out) {
+            if (altSse) {
+                emittedAnyChunk = true;
+                out.writeBytes(GEM_SSE_DATA_PREFIX, 0, GEM_SSE_DATA_PREFIX.length);
+            } else {
+                byte[] sep = emittedAnyChunk ? GEM_ARRAY_NEXT : GEM_ARRAY_FIRST;
+                emittedAnyChunk = true;
+                out.writeBytes(sep, 0, sep.length);
+            }
+            byte[] prefix = envelopePrefix();
+            out.writeBytes(prefix, 0, prefix.length);
+            out.writeBytes(partOpen, 0, partOpen.length);
+            JsonUtf8Writer.writeJsonString(text, out);
+            out.writeBytes(GEM_CHUNK_SUFFIX, 0, GEM_CHUNK_SUFFIX.length);
+            if (altSse) {
+                out.writeBytes(GEM_SSE_TAIL, 0, GEM_SSE_TAIL.length);
+            }
+        }
+
+        private void emitTerminal(CanonicalStopReason reason, ByteSink out) {
             if (finished) {
                 return;
             }
@@ -1580,9 +1793,9 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
                 finalParts.add(buildToolCallPart(ptc));
             }
             pendingTools.clear();
-            frames.add(wrapChunk(buildChunk(finalParts, encodeFinishReason(reason), latestUsage)));
+            writeWrappedChunk(buildChunk(finalParts, encodeFinishReason(reason), latestUsage), out);
             if (!altSse) {
-                frames.add("\n]".getBytes(StandardCharsets.UTF_8));
+                out.writeBytes(GEM_ARRAY_END, 0, GEM_ARRAY_END.length);
             }
             finished = true;
         }
@@ -1631,15 +1844,17 @@ public final class GeminiGenerateContentCodec implements ProtocolCodec {
             return chunk;
         }
 
-        private byte[] wrapChunk(ObjectNode chunk) {
-            String json = CodecSupport.writeJsonString(mapper, chunk);
+        private void writeWrappedChunk(ObjectNode chunk, ByteSink out) {
+            byte[] json = CodecSupport.writeJsonBytes(mapper, chunk);
             if (altSse) {
                 emittedAnyChunk = true;
-                return SseEventSplitter.buildDataFrame(json);
+                SseEventSplitter.writeDataFrame(json, out);
+                return;
             }
-            String prefix = emittedAnyChunk ? ",\n" : "[\n";
+            byte[] sep = emittedAnyChunk ? GEM_ARRAY_NEXT : GEM_ARRAY_FIRST;
             emittedAnyChunk = true;
-            return (prefix + json).getBytes(StandardCharsets.UTF_8);
+            out.writeBytes(sep, 0, sep.length);
+            out.writeBytes(json, 0, json.length);
         }
     }
 

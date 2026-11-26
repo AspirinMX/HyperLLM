@@ -1,23 +1,27 @@
 package app.pagefault.hyperllm.protocol.translate;
 
 import app.pagefault.hyperllm.protocol.codec.DownstreamStreamEncoder;
+import app.pagefault.hyperllm.protocol.codec.StreamEventSink;
 import app.pagefault.hyperllm.protocol.codec.UpstreamStreamDecoder;
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.CanonicalRequest;
 import app.pagefault.hyperllm.protocol.ir.CanonicalStreamEvent;
 import app.pagefault.hyperllm.protocol.ir.StreamRequestMetadata;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 import app.pagefault.hyperllm.protocol.tokenizer.TokenEstimator;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Cross-protocol streaming pipeline composing {@link UpstreamStreamDecoder} -> usage sniffing ->
- * {@link DownstreamStreamEncoder} with bounded text accumulation for token estimation on abrupt abort.
- * Retains only lightweight {@link StreamRequestMetadata} (~48 bytes) so large multi-turn requests are
- * never pinned in Old Gen across long-lived SSE streams.
+ * Push-based zero-allocation streaming bridge composing {@link UpstreamStreamDecoder} &rarr;
+ * incremental token counter / usage sniffing &rarr; {@link DownstreamStreamEncoder} directly into
+ * a caller-supplied {@link ByteSink}.
+ *
+ * <p>Retains only lightweight {@link StreamRequestMetadata} (~48 bytes) and a 24-byte
+ * {@link TokenEstimator.TextTokenCounter} so large requests and long completions never accumulate
+ * in Old Gen across long-lived SSE streams.
  */
-public final class TranslatingStreamBridge implements StreamBridge {
+public final class TranslatingStreamBridge implements StreamBridge, StreamEventSink {
 
     private static final byte[] EMPTY_FRAME = new byte[0];
 
@@ -25,6 +29,8 @@ public final class TranslatingStreamBridge implements StreamBridge {
     private final UpstreamStreamDecoder decoder;
     private final DownstreamStreamEncoder encoder;
     private final TokenEstimator.TextTokenCounter completionCounter = new TokenEstimator.TextTokenCounter();
+    private ByteSink.HeapByteSink reusableHeapSink;
+    private ByteSink activeOut;
     private TokenUsage observedUsage;
     private boolean sawUsage;
 
@@ -59,38 +65,88 @@ public final class TranslatingStreamBridge implements StreamBridge {
     }
 
     @Override
-    public byte[] feed(byte[] upstreamChunk) {
-        List<CanonicalStreamEvent> events = decoder.feed(upstreamChunk);
-        return concatenate(translateEvents(events));
+    public void feed(byte[] upstreamChunk, int offset, int length, ByteSink out) {
+        if (upstreamChunk == null || length <= 0) {
+            return;
+        }
+        this.activeOut = out;
+        try {
+            decoder.feed(upstreamChunk, offset, length, this);
+        } finally {
+            this.activeOut = null;
+        }
     }
 
-    /** Collapses every frame produced by one upstream chunk into a single downstream write. */
-    private static byte[] concatenate(List<byte[]> frames) {
-        if (frames.isEmpty()) {
+    @Override
+    public void complete(ByteSink out) {
+        this.activeOut = out;
+        try {
+            decoder.complete(this);
+            encoder.finish(out);
+        } finally {
+            this.activeOut = null;
+        }
+    }
+
+    @Override
+    public byte[] feed(byte[] upstreamChunk) {
+        if (upstreamChunk == null || upstreamChunk.length == 0) {
             return EMPTY_FRAME;
         }
-        if (frames.size() == 1) {
-            return frames.get(0);
-        }
-        int total = 0;
-        for (byte[] frame : frames) {
-            total += frame.length;
-        }
-        byte[] merged = new byte[total];
-        int offset = 0;
-        for (byte[] frame : frames) {
-            System.arraycopy(frame, 0, merged, offset, frame.length);
-            offset += frame.length;
-        }
-        return merged;
+        ByteSink.HeapByteSink sink = heapSink();
+        sink.reset();
+        feed(upstreamChunk, 0, upstreamChunk.length, sink);
+        return sink.writtenBytes() == 0 ? EMPTY_FRAME : sink.toCopiedByteArray();
     }
 
     @Override
     public List<byte[]> complete() {
-        List<byte[]> out = new ArrayList<>();
-        out.addAll(translateEvents(decoder.complete()));
-        out.addAll(encoder.finish());
-        return out;
+        ByteSink.HeapByteSink sink = heapSink();
+        sink.reset();
+        complete(sink);
+        return sink.writtenBytes() == 0 ? List.of() : List.of(sink.toCopiedByteArray());
+    }
+
+    @Override
+    public void onTextDelta(int blockIndex, CharSequence textDelta) {
+        if (textDelta == null || textDelta.isEmpty()) {
+            return;
+        }
+        completionCounter.add(textDelta);
+        encoder.encodeTextDelta(blockIndex, textDelta, activeOut);
+    }
+
+    @Override
+    public void onThinkingDelta(int blockIndex, CharSequence thinkingDelta) {
+        if (thinkingDelta == null || thinkingDelta.isEmpty()) {
+            return;
+        }
+        completionCounter.add(thinkingDelta);
+        encoder.encodeThinkingDelta(blockIndex, thinkingDelta, activeOut);
+    }
+
+    @Override
+    public void onRefusalDelta(int blockIndex, CharSequence refusalDelta) {
+        if (refusalDelta == null || refusalDelta.isEmpty()) {
+            return;
+        }
+        completionCounter.add(refusalDelta);
+        encoder.encodeRefusalDelta(blockIndex, refusalDelta, activeOut);
+    }
+
+    @Override
+    public void onToolCallArgsDelta(int blockIndex, String callId, CharSequence partialJsonDelta) {
+        if (partialJsonDelta == null || partialJsonDelta.isEmpty()) {
+            return;
+        }
+        completionCounter.add(partialJsonDelta);
+        encoder.encodeToolCallArgsDelta(blockIndex, callId, partialJsonDelta, activeOut);
+    }
+
+    @Override
+    public void onEvent(CanonicalStreamEvent event) {
+        observeEvent(event);
+        encoder.encode(event, activeOut);
     }
 
     @Override
@@ -116,16 +172,11 @@ public final class TranslatingStreamBridge implements StreamBridge {
         );
     }
 
-    private List<byte[]> translateEvents(List<CanonicalStreamEvent> events) {
-        if (events.isEmpty()) {
-            return List.of();
+    private ByteSink.HeapByteSink heapSink() {
+        if (reusableHeapSink == null) {
+            reusableHeapSink = new ByteSink.HeapByteSink(512);
         }
-        List<byte[]> out = new ArrayList<>(events.size());
-        for (CanonicalStreamEvent event : events) {
-            observeEvent(event);
-            out.addAll(encoder.encode(event));
-        }
-        return out;
+        return reusableHeapSink;
     }
 
     private void observeEvent(CanonicalStreamEvent event) {

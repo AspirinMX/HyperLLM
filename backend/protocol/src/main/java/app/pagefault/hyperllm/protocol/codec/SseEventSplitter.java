@@ -1,23 +1,31 @@
 package app.pagefault.hyperllm.protocol.codec;
 
+import app.pagefault.hyperllm.protocol.io.ByteSink;
+
 import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
 
 /**
  * Byte-level SSE event splitter that handles multi-byte UTF-8 characters split across TCP chunks.
  *
- * <p>The splitter keeps a growing receive buffer plus a read cursor, so a {@code push} of N bytes copies
- * those N bytes exactly once (and only an unconsumed remainder is ever shifted). Every emitted frame is a
- * zero-copy slice into that buffer - the payload is never decoded to {@link String} on the hot path.
- * Frames are handed to a consumer instead of being collected into a list, which both avoids one
- * allocation per frame and pins down the slice lifetime: a slice is only valid for the duration of the
- * callback, before the buffer is compacted.
+ * <p>Optimized for zero-copy streaming:
+ * <ul>
+ *   <li>When no partial remainder is buffered from an earlier chunk, complete SSE frames in the
+ *       incoming byte slice are scanned and dispatched directly without copying into the internal
+ *       remainder buffer.</li>
+ *   <li>Only incomplete trailing fragments are copied into a compact 1 KB-initial remainder buffer
+ *       (saving ~21 MB across 3,000 concurrent streams vs 8 KB eager allocation).</li>
+ *   <li>A single reusable {@link SseEvent} carrier per splitter eliminates per-frame object allocation.</li>
+ * </ul>
  */
 public final class SseEventSplitter {
 
-    private static final byte[] DONE = "[DONE]".getBytes(StandardCharsets.US_ASCII);
+    private static final int INITIAL_REMAINDER_CAPACITY = 1024;
     private static final byte[] EVENT_PREFIX = "event:".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] DATA_PREFIX = "data:".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DATA_PREFIX_WITH_SPACE = "data: ".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] EVENT_PREFIX_WITH_SPACE = "event: ".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DONE_FRAME = "data: [DONE]\n\n".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] EMPTY = new byte[0];
     private static final byte NEWLINE = '\n';
     private static final byte CARRIAGE_RETURN = '\r';
@@ -25,8 +33,7 @@ public final class SseEventSplitter {
 
     /**
      * One SSE frame. {@link #dataSource()}/{@link #dataOffset()}/{@link #dataLength()} delimit the
-     * (possibly multi-line, newline-joined) {@code data:} payload; {@link #eventNameString()} decodes the
-     * {@code event:} field on demand. Slices are only valid inside the consumer callback.
+     * {@code data:} payload; slices are valid until the next {@code push} compacts the buffer.
      */
     public static final class SseEvent {
 
@@ -82,7 +89,7 @@ public final class SseEventSplitter {
         }
     }
 
-    private byte[] buffer = new byte[8192];
+    private byte[] buffer;
     private int end;
     private int start;
     private byte[] scratch = EMPTY;
@@ -91,26 +98,58 @@ public final class SseEventSplitter {
         if (chunk == null || chunk.length == 0) {
             return;
         }
-        append(chunk);
+        push(chunk, 0, chunk.length, sink);
+    }
+
+    public void push(byte[] chunk, int offset, int length, Consumer<SseEvent> sink) {
+        if (chunk == null || length <= 0) {
+            return;
+        }
+        // Zero-copy fast path: when no prior remainder is buffered, emit complete frames straight
+        // out of the caller's slice and only buffer any trailing incomplete fragment.
+        if (start == end) {
+            int limit = offset + length;
+            int cursor = offset;
+            int i = offset;
+            while (i < limit) {
+                int delimLen = boundaryLength(chunk, i, limit);
+                if (delimLen > 0) {
+                    int frameEnd = i + delimLen;
+                    emit(chunk, cursor, frameEnd, sink, false);
+                    cursor = frameEnd;
+                    i = frameEnd;
+                } else {
+                    i++;
+                }
+            }
+            if (cursor < limit) {
+                append(chunk, cursor, limit - cursor);
+            }
+            return;
+        }
+        append(chunk, offset, length);
         drain(sink);
     }
 
     public void flushRemainder(Consumer<SseEvent> sink) {
-        if (start < end) {
+        if (start < end && buffer != null) {
             emit(buffer, start, end, sink, true);
             start = end;
         }
         compact();
     }
 
-    private void append(byte[] chunk) {
-        int required = end + chunk.length;
+    private void append(byte[] chunk, int offset, int length) {
+        if (buffer == null) {
+            buffer = new byte[Math.max(INITIAL_REMAINDER_CAPACITY, length)];
+        }
+        int required = end + length;
         if (required > buffer.length) {
             byte[] grown = new byte[Math.max(required, buffer.length * 2)];
             System.arraycopy(buffer, 0, grown, 0, end);
             buffer = grown;
         }
-        System.arraycopy(chunk, 0, buffer, end, chunk.length);
+        System.arraycopy(chunk, offset, buffer, end, length);
         end = required;
     }
 
@@ -178,7 +217,6 @@ public final class SseEventSplitter {
                     dataOffset = valueStart;
                     dataLength = valueLength;
                 } else if (dataBacking != scratch) {
-                    // second data: line - materialize the joined payload in scratch
                     byte[] joined = new byte[dataLength + 1 + valueLength];
                     System.arraycopy(source, dataOffset, joined, 0, dataLength);
                     joined[dataLength] = NEWLINE;
@@ -253,6 +291,29 @@ public final class SseEventSplitter {
     /** True when the payload is the {@code [DONE]} sentinel; never allocates. */
     public static boolean isDoneMarker(SseEvent event) {
         return matchesAscii(event.dataSource(), event.dataOffset(), event.dataLength(), "[DONE]");
+    }
+
+    public static void writeDoneFrame(ByteSink out) {
+        out.writeBytes(DONE_FRAME, 0, DONE_FRAME.length);
+    }
+
+    public static void writeDataFrame(byte[] jsonUtf8, ByteSink out) {
+        out.writeBytes(DATA_PREFIX_WITH_SPACE, 0, DATA_PREFIX_WITH_SPACE.length);
+        out.writeBytes(jsonUtf8, 0, jsonUtf8.length);
+        out.writeByte(NEWLINE);
+        out.writeByte(NEWLINE);
+    }
+
+    public static void writeNamedEventFrame(String eventName, byte[] jsonUtf8, ByteSink out) {
+        out.writeBytes(EVENT_PREFIX_WITH_SPACE, 0, EVENT_PREFIX_WITH_SPACE.length);
+        for (int i = 0; i < eventName.length(); i++) {
+            out.writeByte(eventName.charAt(i));
+        }
+        out.writeByte(NEWLINE);
+        out.writeBytes(DATA_PREFIX_WITH_SPACE, 0, DATA_PREFIX_WITH_SPACE.length);
+        out.writeBytes(jsonUtf8, 0, jsonUtf8.length);
+        out.writeByte(NEWLINE);
+        out.writeByte(NEWLINE);
     }
 
     public static byte[] buildDataFrame(String payload) {

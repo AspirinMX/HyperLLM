@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.protocol.io.ByteSink;
+import app.pagefault.hyperllm.protocol.io.JsonUtf8Writer;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -57,9 +58,14 @@ import java.util.Optional;
  */
 public final class OpenAiChatCodec implements ProtocolCodec {
 
-    /** Constant tail of a single-delta chunk frame: {@code ,"finish_reason":null}]}\n\n}. */
-    private static final byte[] DELTA_FRAME_TAIL =
-            ",\"finish_reason\":null}]}\n\n".getBytes(StandardCharsets.US_ASCII);
+    /** Constant delta field openings and tail for single-delta chunk frames. */
+    private static final byte[] DELTA_CONTENT_OPEN = "{\"content\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_REASONING_OPEN = "{\"reasoning_content\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_REFUSAL_OPEN = "{\"refusal\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_TOOL_CALL_OPEN = "{\"tool_calls\":[{\"index\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_TOOL_ARGS_MID = ",\"function\":{\"arguments\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_TOOL_CALL_TAIL = "}}]},\"finish_reason\":null}]}\n\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_FRAME_TAIL_OBJ = "},\"finish_reason\":null}]}\n\n".getBytes(StandardCharsets.US_ASCII);
 
     private final ObjectMapper mapper;
 
@@ -1839,31 +1845,25 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.push(upstreamChunk, event -> processEvent(event, out));
-            return out;
+        public void feed(byte[] upstreamChunk, int offset, int length, StreamEventSink sink) {
+            splitter.push(upstreamChunk, offset, length, event -> processEvent(event, sink));
         }
 
         @Override
-        public List<CanonicalStreamEvent> complete() {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.flushRemainder(event -> processEvent(event, out));
-            emitFinalClose(out);
-            return out;
+        public void complete(StreamEventSink sink) {
+            splitter.flushRemainder(event -> processEvent(event, sink));
+            emitFinalClose(sink);
         }
 
-        private void processEvent(SseEventSplitter.SseEvent event, List<CanonicalStreamEvent> out) {
+        private void processEvent(SseEventSplitter.SseEvent event, StreamEventSink sink) {
             if (!event.hasData()) {
                 return;
             }
             if (SseEventSplitter.isDoneMarker(event)) {
-                emitFinalClose(out);
+                emitFinalClose(sink);
                 return;
             }
-            TextFrame fastFrame = scanTextFrame(event.dataSource(), event.dataOffset(), event.dataLength());
-            if (fastFrame != null) {
-                emitTextFrame(fastFrame, out);
+            if (scanAndEmitTextFrame(event.dataSource(), event.dataOffset(), event.dataLength(), sink)) {
                 return;
             }
             try {
@@ -1880,7 +1880,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     long created = root.path("created").asLong(CodecSupport.nowEpochSeconds());
                     String model = (virtualModel != null && !virtualModel.isBlank())
                             ? virtualModel : root.path("model").asText("");
-                    out.add(new CanonicalStreamEvent.MessageStart(id, model, created));
+                    sink.onEvent(new CanonicalStreamEvent.MessageStart(id, model, created));
                     started = true;
                 }
 
@@ -1891,86 +1891,84 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     if (delta != null && delta.isObject()) {
                         String reasoning = extractReasoningText(delta);
                         if (reasoning != null && !reasoning.isEmpty()) {
-                            int idx = ensureActiveBlock(BlockKind.THINKING, out);
-                            out.add(new CanonicalStreamEvent.ThinkingDelta(idx, reasoning));
+                            int idx = ensureActiveBlock(BlockKind.THINKING, sink);
+                            sink.onThinkingDelta(idx, reasoning);
                         }
                         String content = CodecSupport.asNullableText(delta, "content");
                         if (content != null && !content.isEmpty()) {
-                            int idx = ensureActiveBlock(BlockKind.TEXT, out);
-                            out.add(new CanonicalStreamEvent.TextDelta(idx, content));
+                            int idx = ensureActiveBlock(BlockKind.TEXT, sink);
+                            sink.onTextDelta(idx, content);
                         }
                         String refusal = CodecSupport.asNullableText(delta, "refusal");
                         if (refusal != null && !refusal.isEmpty()) {
                             sawRefusal = true;
-                            int idx = ensureActiveBlock(BlockKind.REFUSAL, out);
-                            out.add(new CanonicalStreamEvent.RefusalDelta(idx, refusal));
+                            int idx = ensureActiveBlock(BlockKind.REFUSAL, sink);
+                            sink.onRefusalDelta(idx, refusal);
                         }
                         JsonNode toolCalls = delta.get("tool_calls");
                         if (toolCalls != null && toolCalls.isArray()) {
-                            closeActiveNonToolBlock(out);
+                            closeActiveNonToolBlock(sink);
                             for (JsonNode tc : toolCalls) {
-                                handleToolCallDelta(tc, out);
+                                handleToolCallDelta(tc, sink);
                             }
                         }
                         JsonNode legacyFnCall = delta.get("function_call");
                         if ((toolCalls == null || !toolCalls.isArray() || toolCalls.isEmpty())
                                 && legacyFnCall != null && legacyFnCall.isObject()) {
-                            closeActiveNonToolBlock(out);
+                            closeActiveNonToolBlock(sink);
                             ObjectNode wrapped = mapper.createObjectNode();
                             wrapped.put("index", 0);
                             wrapped.set("function", legacyFnCall);
-                            handleToolCallDelta(wrapped, out);
+                            handleToolCallDelta(wrapped, sink);
                         }
                     }
                     String finishReason = CodecSupport.asNullableText(choice0, "finish_reason");
                     if (finishReason != null && !finishReason.isBlank()) {
-                        pendingStopReason = switch (finishReason) {
-                            case "tool_calls", "function_call" -> CanonicalStopReason.TOOL_CALLS;
-                            case "length" -> CanonicalStopReason.MAX_TOKENS;
-                            case "content_filter" -> CanonicalStopReason.CONTENT_FILTER;
-                            default -> sawRefusal ? CanonicalStopReason.REFUSAL
-                                    : (sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN);
-                        };
+                        pendingStopReason = mapStreamFinishReason(finishReason);
                     }
                 }
 
                 Optional<TokenUsage> usage = parseUsageNode(root.get("usage"));
                 if (usage.isPresent()) {
-                    out.add(new CanonicalStreamEvent.UsageUpdate(usage.get(), true));
+                    sink.onEvent(new CanonicalStreamEvent.UsageUpdate(usage.get(), true));
                     if (pendingStopReason != null) {
-                        emitFinalClose(out);
+                        emitFinalClose(sink);
                     }
                 }
             } catch (Exception ignored) {
             }
         }
 
-        private record ChoiceFrame(String reasoning, String content, String refusal, String finishReason) {
-        }
-
-        private record TextFrame(String id, String model, Long created, String reasoning,
-                                 String content, String refusal, String finishReason) {
+        private CanonicalStopReason mapStreamFinishReason(String finishReason) {
+            return switch (finishReason) {
+                case "tool_calls", "function_call" -> CanonicalStopReason.TOOL_CALLS;
+                case "length" -> CanonicalStopReason.MAX_TOKENS;
+                case "content_filter" -> CanonicalStopReason.CONTENT_FILTER;
+                default -> sawRefusal ? CanonicalStopReason.REFUSAL
+                        : (sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN);
+            };
         }
 
         /**
-         * Tree-free fast path for the per-token frame shape
-         * ({@code choices[0].delta.{content,reasoning_content,refusal}} plus an optional
-         * {@code finish_reason}). Returns {@code null} for every other shape - tool calls, usage chunks,
-         * role chunks, malformed input - so the caller keeps the generic {@link JsonNode} path.
+         * Tree-free, record-free fast path for per-token frames
+         * ({@code choices[0].delta.{content,reasoning_content,refusal}} plus optional
+         * {@code finish_reason}). Once {@link #started} is true, skips {@code id}/{@code model}/
+         * {@code created} without allocating Strings via {@code parser.getText()}.
          */
-        private TextFrame scanTextFrame(byte[] source, int offset, int length) {
+        private boolean scanAndEmitTextFrame(byte[] source, int offset, int length, StreamEventSink sink) {
+            String id = null;
+            String model = null;
+            long created = -1L;
+            String reasoning = null;
+            String content = null;
+            String refusal = null;
+            String finishReason = null;
+            boolean sawChoices = false;
+
             try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
                 if (parser.nextToken() != JsonToken.START_OBJECT) {
-                    return null;
+                    return false;
                 }
-                String id = null;
-                String model = null;
-                Long created = null;
-                String reasoning = null;
-                String content = null;
-                String refusal = null;
-                String finishReason = null;
-                boolean sawChoices = false;
                 JsonToken token;
                 while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
                     String field = parser.currentName();
@@ -1978,178 +1976,157 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     switch (field) {
                         case "id" -> {
                             if (value != JsonToken.VALUE_STRING) {
-                                return null;
+                                return false;
                             }
-                            id = parser.getText();
+                            if (!started) {
+                                id = parser.getText();
+                            }
                         }
                         case "model" -> {
                             if (value != JsonToken.VALUE_STRING) {
-                                return null;
+                                return false;
                             }
-                            model = parser.getText();
+                            if (!started) {
+                                model = parser.getText();
+                            }
                         }
                         case "created" -> {
                             if (!value.isNumeric()) {
-                                return null;
+                                return false;
                             }
-                            created = parser.getLongValue();
+                            if (!started) {
+                                created = parser.getLongValue();
+                            }
                         }
                         case "object", "system_fingerprint", "service_tier" -> parser.skipChildren();
                         case "choices" -> {
                             if (value != JsonToken.START_ARRAY || sawChoices) {
-                                return null;
+                                return false;
                             }
                             sawChoices = true;
                             if (parser.nextToken() != JsonToken.START_OBJECT) {
-                                return null;
+                                return false;
                             }
-                            ChoiceFrame choice = scanChoice(parser);
-                            if (choice == null) {
-                                return null;
+                            JsonToken cTok;
+                            while ((cTok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                String cField = parser.currentName();
+                                JsonToken cVal = parser.nextToken();
+                                switch (cField) {
+                                    case "index" -> {
+                                        if (!cVal.isNumeric()) {
+                                            return false;
+                                        }
+                                    }
+                                    case "finish_reason" -> {
+                                        if (cVal == JsonToken.VALUE_NULL) {
+                                            finishReason = null;
+                                        } else if (cVal == JsonToken.VALUE_STRING) {
+                                            finishReason = parser.getText();
+                                        } else {
+                                            return false;
+                                        }
+                                    }
+                                    case "logprobs" -> {
+                                        if (cVal == JsonToken.VALUE_NULL) {
+                                            // ignore null logprobs
+                                        } else {
+                                            parser.skipChildren();
+                                        }
+                                    }
+                                    case "delta" -> {
+                                        if (cVal != JsonToken.START_OBJECT) {
+                                            return false;
+                                        }
+                                        JsonToken dTok;
+                                        while ((dTok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                                            String dField = parser.currentName();
+                                            JsonToken dVal = parser.nextToken();
+                                            switch (dField) {
+                                                case "content" -> {
+                                                    if (dVal == JsonToken.VALUE_NULL) {
+                                                        content = null;
+                                                    } else if (dVal == JsonToken.VALUE_STRING) {
+                                                        content = parser.getText();
+                                                    } else {
+                                                        return false;
+                                                    }
+                                                }
+                                                case "reasoning_content" -> {
+                                                    if (dVal == JsonToken.VALUE_NULL) {
+                                                        reasoning = null;
+                                                    } else if (dVal == JsonToken.VALUE_STRING) {
+                                                        reasoning = parser.getText();
+                                                    } else {
+                                                        return false;
+                                                    }
+                                                }
+                                                case "refusal" -> {
+                                                    if (dVal == JsonToken.VALUE_NULL) {
+                                                        refusal = null;
+                                                    } else if (dVal == JsonToken.VALUE_STRING) {
+                                                        refusal = parser.getText();
+                                                    } else {
+                                                        return false;
+                                                    }
+                                                }
+                                                default -> {
+                                                    return false;
+                                                }
+                                            }
+                                        }
+                                        if (dTok != JsonToken.END_OBJECT) {
+                                            return false;
+                                        }
+                                    }
+                                    default -> {
+                                        return false;
+                                    }
+                                }
                             }
-                            reasoning = choice.reasoning();
-                            content = choice.content();
-                            refusal = choice.refusal();
-                            finishReason = choice.finishReason();
-                            if (parser.nextToken() != JsonToken.END_ARRAY) {
-                                return null;
+                            if (cTok != JsonToken.END_OBJECT || parser.nextToken() != JsonToken.END_ARRAY) {
+                                return false;
                             }
                         }
                         default -> {
-                            return null;
+                            return false;
                         }
                     }
                 }
                 if (token != JsonToken.END_OBJECT || !sawChoices) {
-                    return null;
+                    return false;
                 }
-                return new TextFrame(id, model, created, reasoning, content, refusal, finishReason);
             } catch (Exception ex) {
-                return null;
+                return false;
             }
-        }
 
-        private ChoiceFrame scanChoice(JsonParser parser) throws IOException {
-            String reasoning = null;
-            String content = null;
-            String refusal = null;
-            String finishReason = null;
-            JsonToken token;
-            while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
-                String field = parser.currentName();
-                JsonToken value = parser.nextToken();
-                switch (field) {
-                    case "index" -> {
-                        if (!value.isNumeric()) {
-                            return null;
-                        }
-                    }
-                    case "finish_reason" -> {
-                        if (value == JsonToken.VALUE_NULL) {
-                            finishReason = null;
-                        } else if (value == JsonToken.VALUE_STRING) {
-                            finishReason = parser.getText();
-                        } else {
-                            return null;
-                        }
-                    }
-                    case "delta" -> {
-                        if (value != JsonToken.START_OBJECT) {
-                            return null;
-                        }
-                        JsonToken deltaToken;
-                        while ((deltaToken = parser.nextToken()) == JsonToken.FIELD_NAME) {
-                            String deltaField = parser.currentName();
-                            JsonToken deltaValue = parser.nextToken();
-                            switch (deltaField) {
-                                case "content" -> {
-                                    if (deltaValue == JsonToken.VALUE_NULL) {
-                                        content = null;
-                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
-                                        content = parser.getText();
-                                    } else {
-                                        return null;
-                                    }
-                                }
-                                case "reasoning_content" -> {
-                                    if (deltaValue == JsonToken.VALUE_NULL) {
-                                        reasoning = null;
-                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
-                                        reasoning = parser.getText();
-                                    } else {
-                                        return null;
-                                    }
-                                }
-                                case "refusal" -> {
-                                    if (deltaValue == JsonToken.VALUE_NULL) {
-                                        refusal = null;
-                                    } else if (deltaValue == JsonToken.VALUE_STRING) {
-                                        refusal = parser.getText();
-                                    } else {
-                                        return null;
-                                    }
-                                }
-                                default -> {
-                                    return null;
-                                }
-                            }
-                        }
-                        if (deltaToken != JsonToken.END_OBJECT) {
-                            return null;
-                        }
-                    }
-                    default -> {
-                        return null;
-                    }
-                }
-            }
-            if (token != JsonToken.END_OBJECT) {
-                return null;
-            }
-            return new ChoiceFrame(reasoning, content, refusal, finishReason);
-        }
-
-        private void emitTextFrame(TextFrame frame, List<CanonicalStreamEvent> out) {
             if (!started) {
-                String id = frame.id();
-                if (id == null || id.isBlank()) {
-                    id = CodecSupport.generateId("chatcmpl-");
-                }
-                long created = frame.created() != null ? frame.created() : CodecSupport.nowEpochSeconds();
-                String model = (virtualModel != null && !virtualModel.isBlank())
-                        ? virtualModel : (frame.model() != null ? frame.model() : "");
-                out.add(new CanonicalStreamEvent.MessageStart(id, model, created));
+                String resolvedId = (id == null || id.isBlank()) ? CodecSupport.generateId("chatcmpl-") : id;
+                long resolvedCreated = created >= 0L ? created : CodecSupport.nowEpochSeconds();
+                String resolvedModel = (virtualModel != null && !virtualModel.isBlank())
+                        ? virtualModel : (model != null ? model : "");
+                sink.onEvent(new CanonicalStreamEvent.MessageStart(resolvedId, resolvedModel, resolvedCreated));
                 started = true;
             }
-            String reasoning = frame.reasoning();
             if (reasoning != null && !reasoning.isEmpty()) {
-                int idx = ensureActiveBlock(BlockKind.THINKING, out);
-                out.add(new CanonicalStreamEvent.ThinkingDelta(idx, reasoning));
+                int idx = ensureActiveBlock(BlockKind.THINKING, sink);
+                sink.onThinkingDelta(idx, reasoning);
             }
-            String content = frame.content();
             if (content != null && !content.isEmpty()) {
-                int idx = ensureActiveBlock(BlockKind.TEXT, out);
-                out.add(new CanonicalStreamEvent.TextDelta(idx, content));
+                int idx = ensureActiveBlock(BlockKind.TEXT, sink);
+                sink.onTextDelta(idx, content);
             }
-            String refusal = frame.refusal();
             if (refusal != null && !refusal.isEmpty()) {
                 sawRefusal = true;
-                int idx = ensureActiveBlock(BlockKind.REFUSAL, out);
-                out.add(new CanonicalStreamEvent.RefusalDelta(idx, refusal));
+                int idx = ensureActiveBlock(BlockKind.REFUSAL, sink);
+                sink.onRefusalDelta(idx, refusal);
             }
-            String finishReason = frame.finishReason();
             if (finishReason != null && !finishReason.isBlank()) {
-                pendingStopReason = switch (finishReason) {
-                    case "tool_calls", "function_call" -> CanonicalStopReason.TOOL_CALLS;
-                    case "length" -> CanonicalStopReason.MAX_TOKENS;
-                    case "content_filter" -> CanonicalStopReason.CONTENT_FILTER;
-                    default -> sawRefusal ? CanonicalStopReason.REFUSAL
-                            : (sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN);
-                };
+                pendingStopReason = mapStreamFinishReason(finishReason);
             }
+            return true;
         }
 
-        private void handleToolCallDelta(JsonNode tc, List<CanonicalStreamEvent> out) {
+        private void handleToolCallDelta(JsonNode tc, StreamEventSink sink) {
             boolean hasIndex = tc.hasNonNull("index") && tc.get("index").isIntegralNumber();
             String incomingId = CodecSupport.asNullableText(tc, "id");
             int slotKey;
@@ -2192,50 +2169,50 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                 toolSlotsById.put(callId, slot);
                 lastToolSlotKey = slotKey;
                 sawToolCall = true;
-                out.add(new CanonicalStreamEvent.ToolCallStart(
+                sink.onEvent(new CanonicalStreamEvent.ToolCallStart(
                         blockIdx, callId, null, name, thoughtSig,
                         thoughtSig != null ? ProtocolKind.GEMINI_GENERATE_CONTENT : ProtocolKind.OPENAI_CHAT
                 ));
             }
             String argDelta = CodecSupport.asNullableText(tc.path("function"), "arguments");
             if (argDelta != null && !argDelta.isEmpty()) {
-                out.add(new CanonicalStreamEvent.ToolCallArgsDelta(slot.blockIndex(), slot.callId(), argDelta));
+                sink.onToolCallArgsDelta(slot.blockIndex(), slot.callId(), argDelta);
             }
         }
 
-        private int ensureActiveBlock(BlockKind kind, List<CanonicalStreamEvent> out) {
+        private int ensureActiveBlock(BlockKind kind, StreamEventSink sink) {
             if (activeBlockIndex >= 0 && activeBlockKind == kind) {
                 return activeBlockIndex;
             }
-            closeActiveNonToolBlock(out);
+            closeActiveNonToolBlock(sink);
             activeBlockIndex = nextBlockIndex++;
             activeBlockKind = kind;
-            out.add(new CanonicalStreamEvent.BlockStart(activeBlockIndex, kind));
+            sink.onEvent(new CanonicalStreamEvent.BlockStart(activeBlockIndex, kind));
             return activeBlockIndex;
         }
 
-        private void closeActiveNonToolBlock(List<CanonicalStreamEvent> out) {
+        private void closeActiveNonToolBlock(StreamEventSink sink) {
             if (activeBlockIndex >= 0) {
-                out.add(new CanonicalStreamEvent.BlockStop(activeBlockIndex));
+                sink.onEvent(new CanonicalStreamEvent.BlockStop(activeBlockIndex));
                 activeBlockIndex = -1;
                 activeBlockKind = null;
             }
         }
 
-        private void emitFinalClose(List<CanonicalStreamEvent> out) {
+        private void emitFinalClose(StreamEventSink sink) {
             if (finished) {
                 return;
             }
             finished = true;
-            closeActiveNonToolBlock(out);
+            closeActiveNonToolBlock(sink);
             for (ToolSlot slot : toolSlots.values()) {
-                out.add(new CanonicalStreamEvent.BlockStop(slot.blockIndex()));
+                sink.onEvent(new CanonicalStreamEvent.BlockStop(slot.blockIndex()));
             }
             toolSlots.clear();
             CanonicalStopReason reason = pendingStopReason != null
                     ? pendingStopReason
                     : (sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN);
-            out.add(new CanonicalStreamEvent.MessageFinish(reason, null));
+            sink.onEvent(new CanonicalStreamEvent.MessageFinish(reason, null));
         }
     }
 
@@ -2248,7 +2225,6 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         private String model;
         private long created = CodecSupport.nowEpochSeconds();
         private boolean roleSent;
-        private final CodecSupport.ResizableByteBuffer frameBuffer = new CodecSupport.ResizableByteBuffer(320);
         private byte[] deltaPrefix;
         private boolean doneSent;
         private int nextToolIdx;
@@ -2267,8 +2243,39 @@ public final class OpenAiChatCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<byte[]> encode(CanonicalStreamEvent event) {
-            List<byte[]> frames = new ArrayList<>();
+        public void encodeTextDelta(int blockIndex, CharSequence textDelta, ByteSink out) {
+            ensureRoleChunk(out);
+            writeDeltaFrame(DELTA_CONTENT_OPEN, textDelta, out);
+        }
+
+        @Override
+        public void encodeThinkingDelta(int blockIndex, CharSequence thinkingDelta, ByteSink out) {
+            ensureRoleChunk(out);
+            writeDeltaFrame(DELTA_REASONING_OPEN, thinkingDelta, out);
+        }
+
+        @Override
+        public void encodeRefusalDelta(int blockIndex, CharSequence refusalDelta, ByteSink out) {
+            ensureRoleChunk(out);
+            writeDeltaFrame(DELTA_REFUSAL_OPEN, refusalDelta, out);
+        }
+
+        @Override
+        public void encodeToolCallArgsDelta(int blockIndex, String callId, CharSequence partialJsonDelta, ByteSink out) {
+            Integer toolIdx = blockToToolIndex.get(blockIndex);
+            if (toolIdx != null) {
+                byte[] prefix = deltaPrefix();
+                out.writeBytes(prefix, 0, prefix.length);
+                out.writeBytes(DELTA_TOOL_CALL_OPEN, 0, DELTA_TOOL_CALL_OPEN.length);
+                out.writeAsciiInt(toolIdx);
+                out.writeBytes(DELTA_TOOL_ARGS_MID, 0, DELTA_TOOL_ARGS_MID.length);
+                JsonUtf8Writer.writeJsonString(partialJsonDelta, out);
+                out.writeBytes(DELTA_TOOL_CALL_TAIL, 0, DELTA_TOOL_CALL_TAIL.length);
+            }
+        }
+
+        @Override
+        public void encode(CanonicalStreamEvent event, ByteSink out) {
             switch (event) {
                 case CanonicalStreamEvent.MessageStart start -> {
                     if (start.responseId() != null && !start.responseId().isBlank()) {
@@ -2281,22 +2288,13 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                         this.created = start.createdEpochSeconds();
                     }
                     deltaPrefix = null;
-                    ensureRoleChunk(frames);
+                    ensureRoleChunk(out);
                 }
-                case CanonicalStreamEvent.TextDelta td -> {
-                    ensureRoleChunk(frames);
-                    frames.add(buildDeltaFrame("content", td.textDelta()));
-                }
-                case CanonicalStreamEvent.ThinkingDelta th -> {
-                    ensureRoleChunk(frames);
-                    frames.add(buildDeltaFrame("reasoning_content", th.thinkingDelta()));
-                }
-                case CanonicalStreamEvent.RefusalDelta ref -> {
-                    ensureRoleChunk(frames);
-                    frames.add(buildDeltaFrame("refusal", ref.refusalDelta()));
-                }
+                case CanonicalStreamEvent.TextDelta td -> encodeTextDelta(td.blockIndex(), td.textDelta(), out);
+                case CanonicalStreamEvent.ThinkingDelta th -> encodeThinkingDelta(th.blockIndex(), th.thinkingDelta(), out);
+                case CanonicalStreamEvent.RefusalDelta ref -> encodeRefusalDelta(ref.blockIndex(), ref.refusalDelta(), out);
                 case CanonicalStreamEvent.ToolCallStart tcs -> {
-                    ensureRoleChunk(frames);
+                    ensureRoleChunk(out);
                     sawToolCall = true;
                     int toolIdx = nextToolIdx++;
                     blockToToolIndex.put(tcs.blockIndex(), toolIdx);
@@ -2319,35 +2317,22 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     arr.add(tcObj);
                     ObjectNode delta = mapper.createObjectNode();
                     delta.set("tool_calls", arr);
-                    frames.add(buildChunkFrame(delta, null));
+                    writeChunkFrame(delta, null, out);
                 }
-                case CanonicalStreamEvent.ToolCallArgsDelta tcad -> {
-                    Integer toolIdx = blockToToolIndex.get(tcad.blockIndex());
-                    if (toolIdx != null) {
-                        ObjectNode tcObj = mapper.createObjectNode();
-                        tcObj.put("index", toolIdx);
-                        ObjectNode fn = mapper.createObjectNode();
-                        fn.put("arguments", tcad.partialJsonDelta());
-                        tcObj.set("function", fn);
-                        ArrayNode arr = mapper.createArrayNode();
-                        arr.add(tcObj);
-                        ObjectNode delta = mapper.createObjectNode();
-                        delta.set("tool_calls", arr);
-                        frames.add(buildChunkFrame(delta, null));
-                    }
-                }
+                case CanonicalStreamEvent.ToolCallArgsDelta tcad ->
+                        encodeToolCallArgsDelta(tcad.blockIndex(), tcad.callId(), tcad.partialJsonDelta(), out);
                 case CanonicalStreamEvent.UsageUpdate uu -> {
                     latestUsage = uu.cumulative() ? uu.usage()
                             : (latestUsage == null ? uu.usage() : latestUsage.mergeMax(uu.usage()));
                 }
                 case CanonicalStreamEvent.MessageFinish mf -> {
                     if (!doneSent) {
-                        ensureRoleChunk(frames);
-                        frames.add(buildChunkFrame(mapper.createObjectNode(), encodeFinishReason(mf.stopReason(), sawToolCall)));
+                        ensureRoleChunk(out);
+                        writeChunkFrame(mapper.createObjectNode(), encodeFinishReason(mf.stopReason(), sawToolCall), out);
                         if (clientRequestedUsage && latestUsage != null) {
-                            frames.add(buildUsageOnlyFrame(latestUsage));
+                            writeUsageOnlyFrame(latestUsage, out);
                         }
-                        frames.add(SseEventSplitter.buildDataFrame("[DONE]"));
+                        SseEventSplitter.writeDoneFrame(out);
                         doneSent = true;
                     }
                 }
@@ -2357,46 +2342,39 @@ public final class OpenAiChatCodec implements ProtocolCodec {
                     inner.put("message", err.message() != null ? err.message() : "Upstream stream error");
                     inner.put("type", err.errorType() != null ? err.errorType() : "server_error");
                     errorWrap.set("error", inner);
-                    frames.add(SseEventSplitter.buildDataFrame(CodecSupport.writeJsonString(mapper, errorWrap)));
+                    SseEventSplitter.writeDataFrame(CodecSupport.writeJsonBytes(mapper, errorWrap), out);
                 }
                 case CanonicalStreamEvent.BlockStart ignored -> {}
                 case CanonicalStreamEvent.BlockStop ignored -> {}
                 case CanonicalStreamEvent.ThinkingSignatureDelta ignored -> {}
                 case CanonicalStreamEvent.RedactedThinking ignored -> {}
             }
-            return frames;
         }
 
         @Override
-        public List<byte[]> finish() {
+        public void finish(ByteSink out) {
             if (doneSent) {
-                return List.of();
+                return;
             }
-            List<byte[]> frames = new ArrayList<>();
-            ensureRoleChunk(frames);
-            frames.add(buildChunkFrame(mapper.createObjectNode(), sawToolCall ? "tool_calls" : "stop"));
+            ensureRoleChunk(out);
+            writeChunkFrame(mapper.createObjectNode(), sawToolCall ? "tool_calls" : "stop", out);
             if (clientRequestedUsage && latestUsage != null) {
-                frames.add(buildUsageOnlyFrame(latestUsage));
+                writeUsageOnlyFrame(latestUsage, out);
             }
-            frames.add(SseEventSplitter.buildDataFrame("[DONE]"));
+            SseEventSplitter.writeDoneFrame(out);
             doneSent = true;
-            return frames;
         }
 
-        private void ensureRoleChunk(List<byte[]> frames) {
+        private void ensureRoleChunk(ByteSink out) {
             if (!roleSent) {
                 roleSent = true;
                 ObjectNode delta = mapper.createObjectNode();
                 delta.put("role", "assistant");
                 delta.put("content", "");
-                frames.add(buildChunkFrame(delta, null));
+                writeChunkFrame(delta, null, out);
             }
         }
 
-        /**
-         * Everything up to (and including) the {@code "delta":} key, rendered once per stream: the chunk
-         * envelope is identical for every token, so only the delta object is generated per frame.
-         */
         private byte[] deltaPrefix() {
             byte[] cached = deltaPrefix;
             if (cached != null) {
@@ -2420,26 +2398,16 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             }
         }
 
-        /**
-         * Emits a single-field delta chunk directly into bytes: template prefix + Jackson-escaped delta
-         * object + constant suffix, with the payload buffer reused across frames.
-         */
-        private byte[] buildDeltaFrame(String field, String text) {
-            CodecSupport.ResizableByteBuffer buffer = frameBuffer;
-            buffer.reset();
-            buffer.writeBytes(deltaPrefix());
-            try (JsonGenerator generator = CodecSupport.newUtf8Generator(mapper, buffer)) {
-                generator.writeStartObject();
-                generator.writeStringField(field, text);
-                generator.writeEndObject();
-            } catch (IOException ex) {
-                throw new IllegalStateException("Failed to encode streaming delta frame", ex);
-            }
-            buffer.writeBytes(DELTA_FRAME_TAIL);
-            return buffer.toCopiedByteArray();
+        /** Zero-allocation delta chunk writer directly into {@link ByteSink}. */
+        private void writeDeltaFrame(byte[] fieldOpen, CharSequence text, ByteSink out) {
+            byte[] prefix = deltaPrefix();
+            out.writeBytes(prefix, 0, prefix.length);
+            out.writeBytes(fieldOpen, 0, fieldOpen.length);
+            JsonUtf8Writer.writeJsonString(text, out);
+            out.writeBytes(DELTA_FRAME_TAIL_OBJ, 0, DELTA_FRAME_TAIL_OBJ.length);
         }
 
-        private byte[] buildChunkFrame(ObjectNode delta, String finishReason) {
+        private void writeChunkFrame(ObjectNode delta, String finishReason, ByteSink out) {
             ObjectNode chunk = mapper.createObjectNode();
             chunk.put("id", responseId);
             chunk.put("object", "chat.completion.chunk");
@@ -2456,10 +2424,10 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             ArrayNode choices = mapper.createArrayNode();
             choices.add(choice);
             chunk.set("choices", choices);
-            return SseEventSplitter.buildDataFrame(CodecSupport.writeJsonString(mapper, chunk));
+            SseEventSplitter.writeDataFrame(CodecSupport.writeJsonBytes(mapper, chunk), out);
         }
 
-        private byte[] buildUsageOnlyFrame(TokenUsage usage) {
+        private void writeUsageOnlyFrame(TokenUsage usage, ByteSink out) {
             ObjectNode chunk = mapper.createObjectNode();
             chunk.put("id", responseId);
             chunk.put("object", "chat.completion.chunk");
@@ -2467,7 +2435,7 @@ public final class OpenAiChatCodec implements ProtocolCodec {
             chunk.put("model", model);
             chunk.set("choices", mapper.createArrayNode());
             chunk.set("usage", encodeUsageNode(usage));
-            return SseEventSplitter.buildDataFrame(CodecSupport.writeJsonString(mapper, chunk));
+            SseEventSplitter.writeDataFrame(CodecSupport.writeJsonBytes(mapper, chunk), out);
         }
     }
 

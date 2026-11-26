@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.protocol.io.ByteSink;
+import app.pagefault.hyperllm.protocol.io.JsonUtf8Writer;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
 import app.pagefault.hyperllm.protocol.ir.CanonicalContentPart;
@@ -57,6 +58,25 @@ import java.util.Optional;
  * Bidirectional codec for OpenAI Responses API ({@code POST /v1/responses}).
  */
 public final class OpenAiResponsesCodec implements ProtocolCodec {
+
+    private static final byte[] RESP_TEXT_DELTA_PREFIX =
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":"
+                    .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_REFUSAL_DELTA_PREFIX =
+            "event: response.refusal.delta\ndata: {\"type\":\"response.refusal.delta\",\"sequence_number\":"
+                    .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_REASONING_DELTA_PREFIX =
+            "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"sequence_number\":"
+                    .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_ARGS_DELTA_PREFIX =
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":"
+                    .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_ITEM_ID_KEY = ",\"item_id\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_OUTPUT_INDEX_KEY = ",\"output_index\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_CONTENT_INDEX_DELTA_KEY = ",\"content_index\":0,\"delta\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_SUMMARY_INDEX_DELTA_KEY = ",\"summary_index\":0,\"delta\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_DELTA_KEY = ",\"delta\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RESP_SSE_TAIL = "}\n\n".getBytes(StandardCharsets.US_ASCII);
 
     private final ObjectMapper mapper;
 
@@ -1653,26 +1673,116 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.push(upstreamChunk, event -> processEvent(event, out));
-            return out;
+        public void feed(byte[] upstreamChunk, int offset, int length, StreamEventSink sink) {
+            splitter.push(upstreamChunk, offset, length, event -> processEvent(event, sink));
         }
 
         @Override
-        public List<CanonicalStreamEvent> complete() {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.flushRemainder(event -> processEvent(event, out));
+        public void complete(StreamEventSink sink) {
+            splitter.flushRemainder(event -> processEvent(event, sink));
             if (!finished && started) {
                 finished = true;
-                out.add(new CanonicalStreamEvent.MessageFinish(
+                sink.onEvent(new CanonicalStreamEvent.MessageFinish(
                         sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN, null));
             }
-            return out;
         }
 
-        private void processEvent(SseEventSplitter.SseEvent event, List<CanonicalStreamEvent> out) {
+        /**
+         * Tree-free fast path for per-token Responses delta frames ({@code response.output_text.delta},
+         * {@code response.reasoning_*_text.delta}, {@code response.refusal.delta},
+         * {@code response.function_call_arguments.delta}).
+         */
+        private boolean scanAndEmitDeltaFrame(byte[] source, int offset, int length, StreamEventSink sink) {
+            int kind = 0; // 1=text, 2=refusal, 3=thinking, 4=toolArgs
+            int outputIdx = 0;
+            String delta = null;
+            try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
+                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                    return false;
+                }
+                JsonToken tok;
+                while ((tok = parser.nextToken()) == JsonToken.FIELD_NAME) {
+                    String field = parser.currentName();
+                    JsonToken val = parser.nextToken();
+                    switch (field) {
+                        case "type" -> {
+                            if (val != JsonToken.VALUE_STRING) {
+                                return false;
+                            }
+                            kind = switch (parser.getText()) {
+                                case "response.output_text.delta" -> 1;
+                                case "response.refusal.delta" -> 2;
+                                case "response.reasoning_summary_text.delta", "response.reasoning_text.delta" -> 3;
+                                case "response.function_call_arguments.delta" -> 4;
+                                default -> 0;
+                            };
+                            if (kind == 0) {
+                                return false;
+                            }
+                        }
+                        case "output_index" -> {
+                            if (!val.isNumeric()) {
+                                return false;
+                            }
+                            outputIdx = parser.getIntValue();
+                        }
+                        case "delta" -> {
+                            if (val == JsonToken.VALUE_STRING) {
+                                delta = parser.getText();
+                            } else if (val == JsonToken.VALUE_NULL) {
+                                delta = null;
+                            } else {
+                                return false;
+                            }
+                        }
+                        default -> parser.skipChildren();
+                    }
+                }
+                if (tok != JsonToken.END_OBJECT || kind == 0) {
+                    return false;
+                }
+            } catch (Exception ex) {
+                return false;
+            }
+            switch (kind) {
+                case 1 -> {
+                    ensureStarted(sink);
+                    ItemState state = ensureItemState(outputIdx, BlockKind.TEXT, sink);
+                    if (delta != null && !delta.isEmpty()) {
+                        sink.onTextDelta(state.blockIndex(), delta);
+                    }
+                }
+                case 2 -> {
+                    ensureStarted(sink);
+                    sawRefusal = true;
+                    ItemState state = ensureItemState(outputIdx, BlockKind.REFUSAL, sink);
+                    if (delta != null && !delta.isEmpty()) {
+                        sink.onRefusalDelta(state.blockIndex(), delta);
+                    }
+                }
+                case 3 -> {
+                    ensureStarted(sink);
+                    ItemState state = ensureItemState(outputIdx, BlockKind.THINKING, sink);
+                    if (delta != null && !delta.isEmpty()) {
+                        sink.onThinkingDelta(state.blockIndex(), delta);
+                    }
+                }
+                case 4 -> {
+                    ItemState state = outputIndexMap.get(outputIdx);
+                    if (state != null && delta != null && !delta.isEmpty()) {
+                        sink.onToolCallArgsDelta(state.blockIndex(), state.callId(), delta);
+                    }
+                }
+                default -> {}
+            }
+            return true;
+        }
+
+        private void processEvent(SseEventSplitter.SseEvent event, StreamEventSink sink) {
             if (!event.hasData() || SseEventSplitter.isDoneMarker(event)) {
+                return;
+            }
+            if (scanAndEmitDeltaFrame(event.dataSource(), event.dataOffset(), event.dataLength(), sink)) {
                 return;
             }
             try {
@@ -1692,12 +1802,12 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                             long created = resp.path("created_at").asLong(CodecSupport.nowEpochSeconds());
                             String model = (virtualModel != null && !virtualModel.isBlank())
                                     ? virtualModel : resp.path("model").asText("");
-                            out.add(new CanonicalStreamEvent.MessageStart(id, model, created));
+                            sink.onEvent(new CanonicalStreamEvent.MessageStart(id, model, created));
                             started = true;
                         }
                     }
                     case "response.output_item.added" -> {
-                        ensureStarted(out);
+                        ensureStarted(sink);
                         int outputIdx = root.path("output_index").asInt(0);
                         JsonNode item = root.path("item");
                         String itemType = item.path("type").asText("");
@@ -1705,11 +1815,11 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                         switch (itemType) {
                             case "message" -> {
                                 outputIndexMap.put(outputIdx, new ItemState(blockIdx, BlockKind.TEXT, null));
-                                out.add(new CanonicalStreamEvent.BlockStart(blockIdx, BlockKind.TEXT));
+                                sink.onEvent(new CanonicalStreamEvent.BlockStart(blockIdx, BlockKind.TEXT));
                             }
                             case "reasoning" -> {
                                 outputIndexMap.put(outputIdx, new ItemState(blockIdx, BlockKind.THINKING, null));
-                                out.add(new CanonicalStreamEvent.BlockStart(blockIdx, BlockKind.THINKING));
+                                sink.onEvent(new CanonicalStreamEvent.BlockStart(blockIdx, BlockKind.THINKING));
                             }
                             case "function_call" -> {
                                 sawToolCall = true;
@@ -1720,35 +1830,35 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                                 }
                                 String name = item.path("name").asText("");
                                 outputIndexMap.put(outputIdx, new ItemState(blockIdx, BlockKind.TOOL_CALL, callId));
-                                out.add(new CanonicalStreamEvent.ToolCallStart(
+                                sink.onEvent(new CanonicalStreamEvent.ToolCallStart(
                                         blockIdx, callId, itemId, name, null, ProtocolKind.OPENAI_RESPONSES));
                             }
                             default -> {}
                         }
                     }
                     case "response.output_text.delta" -> {
-                        ensureStarted(out);
-                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.TEXT, out);
+                        ensureStarted(sink);
+                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.TEXT, sink);
                         String delta = root.path("delta").asText("");
                         if (!delta.isEmpty()) {
-                            out.add(new CanonicalStreamEvent.TextDelta(state.blockIndex(), delta));
+                            sink.onTextDelta(state.blockIndex(), delta);
                         }
                     }
                     case "response.refusal.delta" -> {
-                        ensureStarted(out);
+                        ensureStarted(sink);
                         sawRefusal = true;
-                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.REFUSAL, out);
+                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.REFUSAL, sink);
                         String delta = root.path("delta").asText("");
                         if (!delta.isEmpty()) {
-                            out.add(new CanonicalStreamEvent.RefusalDelta(state.blockIndex(), delta));
+                            sink.onRefusalDelta(state.blockIndex(), delta);
                         }
                     }
                     case "response.reasoning_summary_text.delta", "response.reasoning_text.delta" -> {
-                        ensureStarted(out);
-                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.THINKING, out);
+                        ensureStarted(sink);
+                        ItemState state = ensureItemState(root.path("output_index").asInt(0), BlockKind.THINKING, sink);
                         String delta = root.path("delta").asText("");
                         if (!delta.isEmpty()) {
-                            out.add(new CanonicalStreamEvent.ThinkingDelta(state.blockIndex(), delta));
+                            sink.onThinkingDelta(state.blockIndex(), delta);
                         }
                     }
                     case "response.function_call_arguments.delta" -> {
@@ -1756,22 +1866,22 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                         ItemState state = outputIndexMap.get(outputIdx);
                         String delta = root.path("delta").asText("");
                         if (state != null && !delta.isEmpty()) {
-                            out.add(new CanonicalStreamEvent.ToolCallArgsDelta(state.blockIndex(), state.callId(), delta));
+                            sink.onToolCallArgsDelta(state.blockIndex(), state.callId(), delta);
                         }
                     }
                     case "response.output_item.done" -> {
                         int outputIdx = root.path("output_index").asInt(0);
                         ItemState state = outputIndexMap.remove(outputIdx);
                         if (state != null) {
-                            out.add(new CanonicalStreamEvent.BlockStop(state.blockIndex()));
+                            sink.onEvent(new CanonicalStreamEvent.BlockStop(state.blockIndex()));
                         }
                     }
                     case "response.completed", "response.incomplete" -> {
                         JsonNode resp = root.path("response");
                         parseUsageNode(resp.get("usage"))
-                                .ifPresent(u -> out.add(new CanonicalStreamEvent.UsageUpdate(u, true)));
+                                .ifPresent(u -> sink.onEvent(new CanonicalStreamEvent.UsageUpdate(u, true)));
                         for (ItemState leftover : outputIndexMap.values()) {
-                            out.add(new CanonicalStreamEvent.BlockStop(leftover.blockIndex()));
+                            sink.onEvent(new CanonicalStreamEvent.BlockStop(leftover.blockIndex()));
                         }
                         outputIndexMap.clear();
                         CanonicalStopReason stopReason;
@@ -1787,12 +1897,12 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                             stopReason = CanonicalStopReason.END_TURN;
                         }
                         finished = true;
-                        out.add(new CanonicalStreamEvent.MessageFinish(stopReason, null));
+                        sink.onEvent(new CanonicalStreamEvent.MessageFinish(stopReason, null));
                     }
                     case "response.failed", "error" -> {
                         String msg = root.path("response").path("error").path("message")
                                 .asText(root.path("message").asText("Responses stream failed"));
-                        out.add(new CanonicalStreamEvent.StreamError("server_error", msg));
+                        sink.onEvent(new CanonicalStreamEvent.StreamError("server_error", msg));
                         finished = true;
                     }
                     default -> {}
@@ -1801,15 +1911,15 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             }
         }
 
-        private void ensureStarted(List<CanonicalStreamEvent> out) {
+        private void ensureStarted(StreamEventSink sink) {
             if (!started) {
                 started = true;
-                out.add(new CanonicalStreamEvent.MessageStart(
+                sink.onEvent(new CanonicalStreamEvent.MessageStart(
                         CodecSupport.generateId("resp_"), virtualModel, CodecSupport.nowEpochSeconds()));
             }
         }
 
-        private ItemState ensureItemState(int outputIdx, BlockKind kind, List<CanonicalStreamEvent> out) {
+        private ItemState ensureItemState(int outputIdx, BlockKind kind, StreamEventSink sink) {
             ItemState existing = outputIndexMap.get(outputIdx);
             if (existing != null) {
                 return existing;
@@ -1817,7 +1927,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             int blockIdx = nextBlockIndex++;
             ItemState created = new ItemState(blockIdx, kind, null);
             outputIndexMap.put(outputIdx, created);
-            out.add(new CanonicalStreamEvent.BlockStart(blockIdx, kind));
+            sink.onEvent(new CanonicalStreamEvent.BlockStart(blockIdx, kind));
             return created;
         }
 
@@ -1877,8 +1987,67 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<byte[]> encode(CanonicalStreamEvent event) {
-            List<byte[]> frames = new ArrayList<>();
+        public void encodeTextDelta(int blockIndex, CharSequence textDelta, ByteSink out) {
+            ensureInitialized(out);
+            ActiveItem item = activeItems.get(blockIndex);
+            if (item == null) {
+                item = openItem(blockIndex, BlockKind.TEXT, null, null, null, out);
+            }
+            item.buffer.append(textDelta);
+            writeFastDeltaFrame(RESP_TEXT_DELTA_PREFIX, item, RESP_CONTENT_INDEX_DELTA_KEY, textDelta, out);
+        }
+
+        @Override
+        public void encodeRefusalDelta(int blockIndex, CharSequence refusalDelta, ByteSink out) {
+            ensureInitialized(out);
+            ActiveItem item = activeItems.get(blockIndex);
+            if (item == null) {
+                item = openItem(blockIndex, BlockKind.REFUSAL, null, null, null, out);
+            }
+            item.buffer.append(refusalDelta);
+            writeFastDeltaFrame(RESP_REFUSAL_DELTA_PREFIX, item, RESP_CONTENT_INDEX_DELTA_KEY, refusalDelta, out);
+        }
+
+        @Override
+        public void encodeThinkingDelta(int blockIndex, CharSequence thinkingDelta, ByteSink out) {
+            ensureInitialized(out);
+            ActiveItem item = activeItems.get(blockIndex);
+            if (item == null) {
+                item = openItem(blockIndex, BlockKind.THINKING, null, null, null, out);
+            }
+            item.buffer.append(thinkingDelta);
+            writeFastDeltaFrame(RESP_REASONING_DELTA_PREFIX, item, RESP_SUMMARY_INDEX_DELTA_KEY, thinkingDelta, out);
+        }
+
+        @Override
+        public void encodeToolCallArgsDelta(int blockIndex, String callId, CharSequence partialJsonDelta, ByteSink out) {
+            ActiveItem item = activeItems.get(blockIndex);
+            if (item != null) {
+                item.buffer.append(partialJsonDelta);
+                writeFastDeltaFrame(RESP_ARGS_DELTA_PREFIX, item, RESP_DELTA_KEY, partialJsonDelta, out);
+            }
+        }
+
+        private void writeFastDeltaFrame(
+                byte[] prefix,
+                ActiveItem item,
+                byte[] indexAndDeltaKey,
+                CharSequence delta,
+                ByteSink out
+        ) {
+            out.writeBytes(prefix, 0, prefix.length);
+            out.writeAsciiInt(seq++);
+            out.writeBytes(RESP_ITEM_ID_KEY, 0, RESP_ITEM_ID_KEY.length);
+            JsonUtf8Writer.writeJsonString(item.itemId, out);
+            out.writeBytes(RESP_OUTPUT_INDEX_KEY, 0, RESP_OUTPUT_INDEX_KEY.length);
+            out.writeAsciiInt(item.outputIndex);
+            out.writeBytes(indexAndDeltaKey, 0, indexAndDeltaKey.length);
+            JsonUtf8Writer.writeJsonString(delta, out);
+            out.writeBytes(RESP_SSE_TAIL, 0, RESP_SSE_TAIL.length);
+        }
+
+        @Override
+        public void encode(CanonicalStreamEvent event, ByteSink out) {
             switch (event) {
                 case CanonicalStreamEvent.MessageStart start -> {
                     if (start.responseId() != null && !start.responseId().isBlank()) {
@@ -1887,126 +2056,65 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     if (start.createdEpochSeconds() > 0) {
                         this.created = start.createdEpochSeconds();
                     }
-                    ensureInitialized(frames);
+                    ensureInitialized(out);
                 }
                 case CanonicalStreamEvent.BlockStart bs -> {
-                    ensureInitialized(frames);
+                    ensureInitialized(out);
                     if (bs.kind() == BlockKind.TEXT || bs.kind() == BlockKind.THINKING || bs.kind() == BlockKind.REFUSAL) {
-                        openItem(bs.blockIndex(), bs.kind(), null, null, null, frames);
+                        openItem(bs.blockIndex(), bs.kind(), null, null, null, out);
                     }
                 }
-                case CanonicalStreamEvent.TextDelta td -> {
-                    ensureInitialized(frames);
-                    ActiveItem item = activeItems.get(td.blockIndex());
-                    if (item == null) {
-                        item = openItem(td.blockIndex(), BlockKind.TEXT, null, null, null, frames);
-                    }
-                    item.buffer.append(td.textDelta());
-                    ObjectNode ev = mapper.createObjectNode();
-                    ev.put("type", "response.output_text.delta");
-                    ev.put("sequence_number", seq++);
-                    ev.put("item_id", item.itemId);
-                    ev.put("output_index", item.outputIndex);
-                    ev.put("content_index", 0);
-                    ev.put("delta", td.textDelta());
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.output_text.delta", CodecSupport.writeJsonString(mapper, ev)));
-                }
-                case CanonicalStreamEvent.RefusalDelta ref -> {
-                    ensureInitialized(frames);
-                    ActiveItem item = activeItems.get(ref.blockIndex());
-                    if (item == null) {
-                        item = openItem(ref.blockIndex(), BlockKind.REFUSAL, null, null, null, frames);
-                    }
-                    item.buffer.append(ref.refusalDelta());
-                    ObjectNode ev = mapper.createObjectNode();
-                    ev.put("type", "response.refusal.delta");
-                    ev.put("sequence_number", seq++);
-                    ev.put("item_id", item.itemId);
-                    ev.put("output_index", item.outputIndex);
-                    ev.put("content_index", 0);
-                    ev.put("delta", ref.refusalDelta());
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.refusal.delta", CodecSupport.writeJsonString(mapper, ev)));
-                }
-                case CanonicalStreamEvent.ThinkingDelta th -> {
-                    ensureInitialized(frames);
-                    ActiveItem item = activeItems.get(th.blockIndex());
-                    if (item == null) {
-                        item = openItem(th.blockIndex(), BlockKind.THINKING, null, null, null, frames);
-                    }
-                    item.buffer.append(th.thinkingDelta());
-                    ObjectNode ev = mapper.createObjectNode();
-                    ev.put("type", "response.reasoning_summary_text.delta");
-                    ev.put("sequence_number", seq++);
-                    ev.put("item_id", item.itemId);
-                    ev.put("output_index", item.outputIndex);
-                    ev.put("summary_index", 0);
-                    ev.put("delta", th.thinkingDelta());
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.reasoning_summary_text.delta",
-                            CodecSupport.writeJsonString(mapper, ev)));
-                }
+                case CanonicalStreamEvent.TextDelta td -> encodeTextDelta(td.blockIndex(), td.textDelta(), out);
+                case CanonicalStreamEvent.RefusalDelta ref -> encodeRefusalDelta(ref.blockIndex(), ref.refusalDelta(), out);
+                case CanonicalStreamEvent.ThinkingDelta th -> encodeThinkingDelta(th.blockIndex(), th.thinkingDelta(), out);
                 case CanonicalStreamEvent.ToolCallStart tcs -> {
-                    ensureInitialized(frames);
+                    ensureInitialized(out);
                     openItem(tcs.blockIndex(), BlockKind.TOOL_CALL,
                             tcs.itemId() != null ? tcs.itemId() : CodecSupport.generateId("fc_"),
                             tcs.callId() != null ? tcs.callId() : CodecSupport.generateId("call_"),
-                            tcs.name(), frames);
+                            tcs.name(), out);
                 }
-                case CanonicalStreamEvent.ToolCallArgsDelta tcad -> {
-                    ActiveItem item = activeItems.get(tcad.blockIndex());
-                    if (item != null) {
-                        item.buffer.append(tcad.partialJsonDelta());
-                        ObjectNode ev = mapper.createObjectNode();
-                        ev.put("type", "response.function_call_arguments.delta");
-                        ev.put("sequence_number", seq++);
-                        ev.put("item_id", item.itemId);
-                        ev.put("output_index", item.outputIndex);
-                        ev.put("delta", tcad.partialJsonDelta());
-                        frames.add(SseEventSplitter.buildNamedEventFrame("response.function_call_arguments.delta",
-                                CodecSupport.writeJsonString(mapper, ev)));
-                    }
-                }
-                case CanonicalStreamEvent.BlockStop stop -> closeItem(stop.blockIndex(), frames);
+                case CanonicalStreamEvent.ToolCallArgsDelta tcad ->
+                        encodeToolCallArgsDelta(tcad.blockIndex(), tcad.callId(), tcad.partialJsonDelta(), out);
+                case CanonicalStreamEvent.BlockStop stop -> closeItem(stop.blockIndex(), out);
                 case CanonicalStreamEvent.UsageUpdate uu -> {
                     latestUsage = uu.cumulative() ? uu.usage() : latestUsage.mergeMax(uu.usage());
                 }
-                case CanonicalStreamEvent.MessageFinish mf -> emitTerminal(mf.stopReason(), frames);
+                case CanonicalStreamEvent.MessageFinish mf -> emitTerminal(mf.stopReason(), out);
                 case CanonicalStreamEvent.StreamError err -> {
-                    ensureInitialized(frames);
+                    ensureInitialized(out);
                     ObjectNode ev = mapper.createObjectNode();
                     ev.put("type", "error");
                     ev.put("sequence_number", seq++);
                     ev.put("message", err.message() != null ? err.message() : "Upstream stream error");
-                    frames.add(SseEventSplitter.buildNamedEventFrame("error", CodecSupport.writeJsonString(mapper, ev)));
+                    SseEventSplitter.writeNamedEventFrame("error", CodecSupport.writeJsonBytes(mapper, ev), out);
                     finished = true;
                 }
                 case CanonicalStreamEvent.ThinkingSignatureDelta ignored -> {}
                 case CanonicalStreamEvent.RedactedThinking ignored -> {}
             }
-            return frames;
         }
 
         @Override
-        public List<byte[]> finish() {
+        public void finish(ByteSink out) {
             if (finished) {
-                return List.of();
+                return;
             }
-            List<byte[]> frames = new ArrayList<>();
-            emitTerminal(CanonicalStopReason.END_TURN, frames);
-            return frames;
+            emitTerminal(CanonicalStopReason.END_TURN, out);
         }
 
-        private void ensureInitialized(List<byte[]> frames) {
+        private void ensureInitialized(ByteSink out) {
             if (initialized) {
                 return;
             }
             initialized = true;
             ObjectNode initialResp = buildResponseEnvelope("in_progress", null, false);
-            emitResponseLifecycle("response.created", initialResp, frames);
-            emitResponseLifecycle("response.in_progress", initialResp, frames);
+            emitResponseLifecycle("response.created", initialResp, out);
+            emitResponseLifecycle("response.in_progress", initialResp, out);
         }
 
         private ActiveItem openItem(
-                int blockIdx, BlockKind kind, String itemId, String callId, String toolName, List<byte[]> frames) {
+                int blockIdx, BlockKind kind, String itemId, String callId, String toolName, ByteSink out) {
             String resolvedItemId = itemId != null ? itemId : switch (kind) {
                 case THINKING, REDACTED_THINKING -> CodecSupport.generateId("rs_");
                 case TOOL_CALL -> CodecSupport.generateId("fc_");
@@ -2041,7 +2149,7 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             ev.put("sequence_number", seq++);
             ev.put("output_index", outIdx);
             ev.set("item", addedItem);
-            frames.add(SseEventSplitter.buildNamedEventFrame("response.output_item.added", CodecSupport.writeJsonString(mapper, ev)));
+            SseEventSplitter.writeNamedEventFrame("response.output_item.added", CodecSupport.writeJsonBytes(mapper, ev), out);
 
             if (kind == BlockKind.TEXT || kind == BlockKind.REFUSAL) {
                 item.partAdded = true;
@@ -2061,8 +2169,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 partEv.put("output_index", outIdx);
                 partEv.put("content_index", 0);
                 partEv.set("part", part);
-                frames.add(SseEventSplitter.buildNamedEventFrame("response.content_part.added",
-                        CodecSupport.writeJsonString(mapper, partEv)));
+                SseEventSplitter.writeNamedEventFrame("response.content_part.added",
+                        CodecSupport.writeJsonBytes(mapper, partEv), out);
             } else if (kind == BlockKind.THINKING) {
                 item.partAdded = true;
                 ObjectNode part = mapper.createObjectNode();
@@ -2075,13 +2183,13 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                 partEv.put("output_index", outIdx);
                 partEv.put("summary_index", 0);
                 partEv.set("part", part);
-                frames.add(SseEventSplitter.buildNamedEventFrame("response.reasoning_summary_part.added",
-                        CodecSupport.writeJsonString(mapper, partEv)));
+                SseEventSplitter.writeNamedEventFrame("response.reasoning_summary_part.added",
+                        CodecSupport.writeJsonBytes(mapper, partEv), out);
             }
             return item;
         }
 
-        private void closeItem(int blockIdx, List<byte[]> frames) {
+        private void closeItem(int blockIdx, ByteSink out) {
             ActiveItem item = activeItems.remove(blockIdx);
             if (item == null) {
                 return;
@@ -2100,8 +2208,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     textDone.put("output_index", item.outputIndex);
                     textDone.put("content_index", 0);
                     textDone.put("text", full);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.output_text.done",
-                            CodecSupport.writeJsonString(mapper, textDone)));
+                    SseEventSplitter.writeNamedEventFrame("response.output_text.done",
+                            CodecSupport.writeJsonBytes(mapper, textDone), out);
 
                     ObjectNode part = mapper.createObjectNode();
                     part.put("type", "output_text");
@@ -2114,8 +2222,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     partDone.put("output_index", item.outputIndex);
                     partDone.put("content_index", 0);
                     partDone.set("part", part);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.content_part.done",
-                            CodecSupport.writeJsonString(mapper, partDone)));
+                    SseEventSplitter.writeNamedEventFrame("response.content_part.done",
+                            CodecSupport.writeJsonBytes(mapper, partDone), out);
 
                     doneItem.put("type", "message");
                     doneItem.put("role", "assistant");
@@ -2132,8 +2240,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     refDone.put("output_index", item.outputIndex);
                     refDone.put("content_index", 0);
                     refDone.put("refusal", full);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.refusal.done",
-                            CodecSupport.writeJsonString(mapper, refDone)));
+                    SseEventSplitter.writeNamedEventFrame("response.refusal.done",
+                            CodecSupport.writeJsonBytes(mapper, refDone), out);
 
                     ObjectNode part = mapper.createObjectNode();
                     part.put("type", "refusal");
@@ -2153,8 +2261,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     sumDone.put("output_index", item.outputIndex);
                     sumDone.put("summary_index", 0);
                     sumDone.put("text", full);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.reasoning_summary_text.done",
-                            CodecSupport.writeJsonString(mapper, sumDone)));
+                    SseEventSplitter.writeNamedEventFrame("response.reasoning_summary_text.done",
+                            CodecSupport.writeJsonBytes(mapper, sumDone), out);
 
                     ObjectNode part = mapper.createObjectNode();
                     part.put("type", "summary_text");
@@ -2172,8 +2280,8 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
                     argsDone.put("item_id", item.itemId);
                     argsDone.put("output_index", item.outputIndex);
                     argsDone.put("arguments", args);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("response.function_call_arguments.done",
-                            CodecSupport.writeJsonString(mapper, argsDone)));
+                    SseEventSplitter.writeNamedEventFrame("response.function_call_arguments.done",
+                            CodecSupport.writeJsonBytes(mapper, argsDone), out);
 
                     doneItem.put("type", "function_call");
                     doneItem.put("call_id", item.callId);
@@ -2188,24 +2296,24 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             itemDoneEv.put("sequence_number", seq++);
             itemDoneEv.put("output_index", item.outputIndex);
             itemDoneEv.set("item", doneItem);
-            frames.add(SseEventSplitter.buildNamedEventFrame("response.output_item.done",
-                    CodecSupport.writeJsonString(mapper, itemDoneEv)));
+            SseEventSplitter.writeNamedEventFrame("response.output_item.done",
+                    CodecSupport.writeJsonBytes(mapper, itemDoneEv), out);
         }
 
-        private void emitTerminal(CanonicalStopReason reason, List<byte[]> frames) {
+        private void emitTerminal(CanonicalStopReason reason, ByteSink out) {
             if (finished) {
                 return;
             }
-            ensureInitialized(frames);
+            ensureInitialized(out);
             for (Integer key : List.copyOf(activeItems.keySet())) {
-                closeItem(key, frames);
+                closeItem(key, out);
             }
             finished = true;
             boolean incomplete = (reason == CanonicalStopReason.MAX_TOKENS || reason == CanonicalStopReason.CONTENT_FILTER);
             String eventType = incomplete ? "response.incomplete" : "response.completed";
             String status = incomplete ? "incomplete" : "completed";
             ObjectNode finalResp = buildResponseEnvelope(status, reason, true);
-            emitResponseLifecycle(eventType, finalResp, frames);
+            emitResponseLifecycle(eventType, finalResp, out);
         }
 
         private ObjectNode buildResponseEnvelope(String status, CanonicalStopReason reason, boolean includeOutputAndUsage) {
@@ -2233,12 +2341,12 @@ public final class OpenAiResponsesCodec implements ProtocolCodec {
             return resp;
         }
 
-        private void emitResponseLifecycle(String eventType, ObjectNode resp, List<byte[]> frames) {
+        private void emitResponseLifecycle(String eventType, ObjectNode resp, ByteSink out) {
             ObjectNode ev = mapper.createObjectNode();
             ev.put("type", eventType);
             ev.put("sequence_number", seq++);
             ev.set("response", resp);
-            frames.add(SseEventSplitter.buildNamedEventFrame(eventType, CodecSupport.writeJsonString(mapper, ev)));
+            SseEventSplitter.writeNamedEventFrame(eventType, CodecSupport.writeJsonBytes(mapper, ev), out);
         }
     }
 

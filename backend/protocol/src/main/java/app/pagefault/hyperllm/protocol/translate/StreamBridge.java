@@ -1,5 +1,6 @@
 package app.pagefault.hyperllm.protocol.translate;
 
+import app.pagefault.hyperllm.protocol.io.ByteSink;
 import app.pagefault.hyperllm.protocol.ir.TokenUsage;
 
 import java.util.List;
@@ -15,17 +16,24 @@ public interface StreamBridge {
     }
 
     /**
-     * Feeds a raw upstream chunk and returns the downstream bytes for that chunk in one array.
-     *
-     * <p>An upstream read often carries several SSE events; concatenating the frames they translate to
-     * means the gateway performs a single socket write per read instead of one per event, without
-     * changing what the client sees (a sequence of {@code data:} frames is the same wire format).
-     * Returns an empty array when the chunk produced nothing.
+     * Push-based zero-copy streaming feed: decodes upstream bytes in {@code [offset, offset+length)}
+     * and writes all translated downstream SSE bytes directly into {@code out} (e.g. a pooled Netty
+     * direct {@code ByteBuf} sink).
+     */
+    void feed(byte[] upstreamChunk, int offset, int length, ByteSink out);
+
+    /**
+     * Flushes any trailing state-machine frames directly into {@code out} when the upstream completes.
+     */
+    void complete(ByteSink out);
+
+    /**
+     * Backwards-compatible byte-array feed returning downstream bytes for one upstream chunk.
      */
     byte[] feed(byte[] upstreamChunk);
 
     /**
-     * Flushes any trailing state-machine frames when the upstream completes cleanly.
+     * Backwards-compatible completion returning trailing downstream frames.
      */
     List<byte[]> complete();
 

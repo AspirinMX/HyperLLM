@@ -1,25 +1,25 @@
 package app.pagefault.hyperllm.gateway.proxy;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Per-request batcher that turns a stream of downstream SSE frames into fewer, larger socket writes.
+ * Thread-safe per-request batcher that turns a stream of downstream SSE frames into fewer, larger
+ * socket writes.
  *
- * <p>An upstream provider emits one SSE event per token, so a proxied stream pays one {@code writev}
- * per frame - the dominant cost measured at 2,000 concurrent streams. Holding frames for a short window
- * lets several events travel in one write. The batch is deliberately dumb about scheduling: callers
- * feed {@link #offer} and call {@link #poll} from a shared tick, which keeps the whole thing free of
- * timers per connection.
+ * <p>Synchronized across EventLoop {@link #offer}/{@link #drain} calls and the shared
+ * {@link SseFrameCoalescer} ticker's {@link #poll} calls, with an {@link AtomicBoolean} queue
+ * membership guard so each active batcher appears at most once in the coalescer's pending queue.
  *
- * <p>The first frame is never delayed - time-to-first-token is a user-visible metric and the window is
- * only worth paying for once a stream is actually flowing. Frames are concatenated verbatim, so the
- * wire format is unchanged: the client still sees a sequence of complete {@code data:} events.
+ * <p>The first frame is never delayed — time-to-first-token is user-visible and the window is only
+ * applied once a stream is flowing.
  */
 public final class SseFrameBatcher {
 
     private final long windowNanos;
     private final int maxBytes;
     private final int maxFrames;
+    private final AtomicBoolean enqueued = new AtomicBoolean(false);
 
     private byte[] pending;
     private int pendingLength;
@@ -43,7 +43,7 @@ public final class SseFrameBatcher {
      * Accepts one downstream frame and returns the bytes that must be written immediately, or
      * {@code null} when the frame has been buffered until the window elapses (or the batch is full).
      */
-    public byte[] offer(byte[] frame, long nowNanos) {
+    public synchronized byte[] offer(byte[] frame, long nowNanos) {
         Objects.requireNonNull(frame, "frame");
         if (frame.length == 0) {
             return null;
@@ -53,15 +53,24 @@ public final class SseFrameBatcher {
             return frame;
         }
         if (pendingFrames == 0) {
+            if (frame.length > maxBytes) {
+                return frame;
+            }
             deadlineNanos = nowNanos + windowNanos;
             append(frame);
             return null;
         }
         if (pendingLength + frame.length > maxBytes || pendingFrames + 1 > maxFrames) {
-            byte[] flushed = drain();
+            byte[] flushed = drainLocked();
             if (frame.length > maxBytes) {
-                // a single frame larger than a whole batch: never buffer it, write it on its own
-                return frame;
+                // Preserve both the previously buffered batch and this oversized frame without dropping either.
+                if (flushed == null || flushed.length == 0) {
+                    return frame;
+                }
+                byte[] combined = new byte[flushed.length + frame.length];
+                System.arraycopy(flushed, 0, combined, 0, flushed.length);
+                System.arraycopy(frame, 0, combined, flushed.length, frame.length);
+                return combined;
             }
             deadlineNanos = nowNanos + windowNanos;
             append(frame);
@@ -72,20 +81,32 @@ public final class SseFrameBatcher {
     }
 
     /** Returns the buffered batch once its window has elapsed, or {@code null} when nothing is due. */
-    public byte[] poll(long nowNanos) {
+    public synchronized byte[] poll(long nowNanos) {
         if (pendingFrames == 0 || nowNanos < deadlineNanos) {
             return null;
         }
-        return drain();
+        return drainLocked();
     }
 
     /** True while frames are held, so a scheduler only touches batchers that have work. */
-    public boolean hasPending() {
+    public synchronized boolean hasPending() {
         return pendingFrames > 0;
     }
 
     /** Returns and clears the buffered batch, regardless of the window. */
-    public byte[] drain() {
+    public synchronized byte[] drain() {
+        return drainLocked();
+    }
+
+    boolean tryMarkEnqueued() {
+        return enqueued.compareAndSet(false, true);
+    }
+
+    void clearEnqueued() {
+        enqueued.set(false);
+    }
+
+    private byte[] drainLocked() {
         if (pendingFrames == 0) {
             return null;
         }

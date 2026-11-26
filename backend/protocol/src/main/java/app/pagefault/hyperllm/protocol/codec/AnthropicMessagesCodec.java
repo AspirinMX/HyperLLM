@@ -3,6 +3,7 @@ package app.pagefault.hyperllm.protocol.codec;
 import app.pagefault.hyperllm.common.error.ErrorCode;
 import app.pagefault.hyperllm.common.error.HyperLlmException;
 import app.pagefault.hyperllm.protocol.io.ByteSink;
+import app.pagefault.hyperllm.protocol.io.JsonUtf8Writer;
 import app.pagefault.hyperllm.protocol.ir.BlockKind;
 import app.pagefault.hyperllm.protocol.ir.CacheControl;
 import app.pagefault.hyperllm.protocol.ir.CanonicalCacheConfig;
@@ -60,12 +61,26 @@ import java.util.Optional;
  */
 public final class AnthropicMessagesCodec implements ProtocolCodec {
 
-    /** Constant envelope of a {@code content_block_delta} frame, up to the block index. */
+    /** Constant envelopes for zero-allocation {@code content_block_delta} frame serialization. */
     private static final byte[] DELTA_EVENT_PREFIX =
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"
                     .getBytes(StandardCharsets.US_ASCII);
-    private static final byte[] DELTA_EVENT_DELTA_KEY = ",\"delta\":".getBytes(StandardCharsets.US_ASCII);
-    private static final byte[] DELTA_EVENT_TAIL = "}\n\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_TEXT_MID =
+            ",\"delta\":{\"type\":\"text_delta\",\"text\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_THINKING_MID =
+            ",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_INPUT_JSON_MID =
+            ",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_SIGNATURE_MID =
+            ",\"delta\":{\"type\":\"signature_delta\",\"signature\":".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DELTA_EVENT_DOUBLE_TAIL = "}}\n\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[][] BLOCK_INDEX_ASCII = new byte[16][];
+
+    static {
+        for (int i = 0; i < BLOCK_INDEX_ASCII.length; i++) {
+            BLOCK_INDEX_ASCII[i] = Integer.toString(i).getBytes(StandardCharsets.US_ASCII);
+        }
+    }
 
     private static final int DEFAULT_MAX_TOKENS = 8192;
 
@@ -1518,42 +1533,34 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<CanonicalStreamEvent> feed(byte[] upstreamChunk) {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.push(upstreamChunk, ev -> processEvent(ev, out));
-            return out;
+        public void feed(byte[] upstreamChunk, int offset, int length, StreamEventSink sink) {
+            splitter.push(upstreamChunk, offset, length, ev -> processEvent(ev, sink));
         }
 
         @Override
-        public List<CanonicalStreamEvent> complete() {
-            List<CanonicalStreamEvent> out = new ArrayList<>();
-            splitter.flushRemainder(ev -> processEvent(ev, out));
+        public void complete(StreamEventSink sink) {
+            splitter.flushRemainder(ev -> processEvent(ev, sink));
             if (!finished) {
                 finished = true;
-                out.add(new CanonicalStreamEvent.MessageFinish(
+                sink.onEvent(new CanonicalStreamEvent.MessageFinish(
                         sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN, null));
             }
-            return out;
-        }
-
-        private record DeltaFrame(int index, String kind, String text) {
         }
 
         /**
-         * Tree-free fast path for {@code content_block_delta} frames, which make up every token of an
-         * Anthropic stream. Returns {@code null} for any other event type so the caller keeps the
-         * generic {@link JsonNode} path.
+         * Tree-free, record-free fast path for {@code content_block_delta} frames, pushing directly
+         * into {@link StreamEventSink}.
          */
-        private DeltaFrame scanDeltaFrame(byte[] source, int offset, int length) {
+        private boolean scanAndEmitDeltaFrame(byte[] source, int offset, int length, StreamEventSink sink) {
+            int index = 0;
+            int deltaKind = 0; // 1=text, 2=thinking, 3=signature, 4=partial_json
+            String text = null;
+            boolean sawType = false;
+            boolean sawDelta = false;
             try (JsonParser parser = mapper.getFactory().createParser(source, offset, length)) {
                 if (parser.nextToken() != JsonToken.START_OBJECT) {
-                    return null;
+                    return false;
                 }
-                int index = 0;
-                String deltaKind = null;
-                String text = null;
-                boolean sawType = false;
-                boolean sawDelta = false;
                 JsonToken token;
                 while ((token = parser.nextToken()) == JsonToken.FIELD_NAME) {
                     String field = parser.currentName();
@@ -1562,19 +1569,19 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                         case "type" -> {
                             if (value != JsonToken.VALUE_STRING
                                     || !"content_block_delta".equals(parser.getText())) {
-                                return null;
+                                return false;
                             }
                             sawType = true;
                         }
                         case "index" -> {
                             if (!value.isNumeric()) {
-                                return null;
+                                return false;
                             }
                             index = parser.getIntValue();
                         }
                         case "delta" -> {
                             if (value != JsonToken.START_OBJECT) {
-                                return null;
+                                return false;
                             }
                             sawDelta = true;
                             JsonToken deltaToken;
@@ -1584,17 +1591,17 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                                 switch (deltaField) {
                                     case "type" -> {
                                         if (deltaValue != JsonToken.VALUE_STRING) {
-                                            return null;
+                                            return false;
                                         }
                                         deltaKind = switch (parser.getText()) {
-                                            case "text_delta" -> "text";
-                                            case "thinking_delta" -> "thinking";
-                                            case "signature_delta" -> "signature";
-                                            case "input_json_delta" -> "partial_json";
-                                            default -> null;
+                                            case "text_delta" -> 1;
+                                            case "thinking_delta" -> 2;
+                                            case "signature_delta" -> 3;
+                                            case "input_json_delta" -> 4;
+                                            default -> 0;
                                         };
-                                        if (deltaKind == null) {
-                                            return null;
+                                        if (deltaKind == 0) {
+                                            return false;
                                         }
                                     }
                                     case "text", "thinking", "signature", "partial_json" -> {
@@ -1603,56 +1610,47 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                                         } else if (deltaValue == JsonToken.VALUE_STRING) {
                                             text = parser.getText();
                                         } else {
-                                            return null;
+                                            return false;
                                         }
                                     }
                                     default -> {
-                                        return null;
+                                        return false;
                                     }
                                 }
                             }
                             if (deltaToken != JsonToken.END_OBJECT) {
-                                return null;
+                                return false;
                             }
                         }
                         default -> {
-                            return null;
+                            return false;
                         }
                     }
                 }
-                if (token != JsonToken.END_OBJECT || !sawType || !sawDelta || deltaKind == null) {
-                    return null;
+                if (token != JsonToken.END_OBJECT || !sawType || !sawDelta || deltaKind == 0) {
+                    return false;
                 }
-                return new DeltaFrame(index, deltaKind, text);
             } catch (Exception ex) {
-                return null;
+                return false;
             }
-        }
-
-        private void emitDeltaFrame(DeltaFrame frame, List<CanonicalStreamEvent> out) {
-            String text = frame.text();
-            if (text == null || text.isEmpty()) {
-                return;
-            }
-            switch (frame.kind()) {
-                case "text" -> out.add(new CanonicalStreamEvent.TextDelta(frame.index(), text));
-                case "thinking" -> out.add(new CanonicalStreamEvent.ThinkingDelta(frame.index(), text));
-                case "signature" -> out.add(new CanonicalStreamEvent.ThinkingSignatureDelta(
-                        frame.index(), text, ProtocolKind.ANTHROPIC_MESSAGES));
-                case "partial_json" -> out.add(new CanonicalStreamEvent.ToolCallArgsDelta(
-                        frame.index(), toolCallIdsByIndex.get(frame.index()), text));
-                default -> {
+            if (text != null && !text.isEmpty()) {
+                switch (deltaKind) {
+                    case 1 -> sink.onTextDelta(index, text);
+                    case 2 -> sink.onThinkingDelta(index, text);
+                    case 3 -> sink.onEvent(new CanonicalStreamEvent.ThinkingSignatureDelta(
+                            index, text, ProtocolKind.ANTHROPIC_MESSAGES));
+                    case 4 -> sink.onToolCallArgsDelta(index, toolCallIdsByIndex.get(index), text);
+                    default -> {}
                 }
             }
+            return true;
         }
 
-        private void processEvent(SseEventSplitter.SseEvent ev, List<CanonicalStreamEvent> out) {
+        private void processEvent(SseEventSplitter.SseEvent ev, StreamEventSink sink) {
             if (!ev.hasData()) {
                 return;
             }
-            DeltaFrame fastFrame = scanDeltaFrame(ev.dataSource(), ev.dataOffset(), ev.dataLength());
-            if (fastFrame != null) {
-                emitDeltaFrame(fastFrame, out);
+            if (scanAndEmitDeltaFrame(ev.dataSource(), ev.dataOffset(), ev.dataLength(), sink)) {
                 return;
             }
             try {
@@ -1670,10 +1668,10 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                         String id = msg.path("id").asText(CodecSupport.generateId("msg_"));
                         String model = (virtualModel != null && !virtualModel.isBlank())
                                 ? virtualModel : msg.path("model").asText("");
-                        out.add(new CanonicalStreamEvent.MessageStart(id, model, CodecSupport.nowEpochSeconds()));
+                        sink.onEvent(new CanonicalStreamEvent.MessageStart(id, model, CodecSupport.nowEpochSeconds()));
                         parseUsageObject(msg.get("usage")).ifPresent(u -> {
                             mergedUsage = mergedUsage.mergeMax(u);
-                            out.add(new CanonicalStreamEvent.UsageUpdate(mergedUsage, false));
+                            sink.onEvent(new CanonicalStreamEvent.UsageUpdate(mergedUsage, false));
                         });
                     }
                     case "content_block_start" -> {
@@ -1681,11 +1679,11 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                         JsonNode block = root.path("content_block");
                         String bType = block.path("type").asText("");
                         switch (bType) {
-                            case "text" -> out.add(new CanonicalStreamEvent.BlockStart(idx, BlockKind.TEXT));
-                            case "thinking" -> out.add(new CanonicalStreamEvent.BlockStart(idx, BlockKind.THINKING));
+                            case "text" -> sink.onEvent(new CanonicalStreamEvent.BlockStart(idx, BlockKind.TEXT));
+                            case "thinking" -> sink.onEvent(new CanonicalStreamEvent.BlockStart(idx, BlockKind.THINKING));
                             case "redacted_thinking" -> {
-                                out.add(new CanonicalStreamEvent.BlockStart(idx, BlockKind.REDACTED_THINKING));
-                                out.add(new CanonicalStreamEvent.RedactedThinking(
+                                sink.onEvent(new CanonicalStreamEvent.BlockStart(idx, BlockKind.REDACTED_THINKING));
+                                sink.onEvent(new CanonicalStreamEvent.RedactedThinking(
                                         idx, block.path("data").asText(""), ProtocolKind.ANTHROPIC_MESSAGES));
                             }
                             case "tool_use" -> {
@@ -1693,7 +1691,7 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                                 String callId = block.path("id").asText(CodecSupport.generateId("toolu_"));
                                 String name = block.path("name").asText("");
                                 toolCallIdsByIndex.put(idx, callId);
-                                out.add(new CanonicalStreamEvent.ToolCallStart(
+                                sink.onEvent(new CanonicalStreamEvent.ToolCallStart(
                                         idx, callId, null, name, null, ProtocolKind.ANTHROPIC_MESSAGES));
                             }
                             default -> {}
@@ -1707,27 +1705,26 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                             case "text_delta" -> {
                                 String t = delta.path("text").asText("");
                                 if (!t.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.TextDelta(idx, t));
+                                    sink.onTextDelta(idx, t);
                                 }
                             }
                             case "thinking_delta" -> {
                                 String th = delta.path("thinking").asText("");
                                 if (!th.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.ThinkingDelta(idx, th));
+                                    sink.onThinkingDelta(idx, th);
                                 }
                             }
                             case "signature_delta" -> {
                                 String sig = delta.path("signature").asText("");
                                 if (!sig.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.ThinkingSignatureDelta(
+                                    sink.onEvent(new CanonicalStreamEvent.ThinkingSignatureDelta(
                                             idx, sig, ProtocolKind.ANTHROPIC_MESSAGES));
                                 }
                             }
                             case "input_json_delta" -> {
                                 String pj = delta.path("partial_json").asText("");
                                 if (!pj.isEmpty()) {
-                                    out.add(new CanonicalStreamEvent.ToolCallArgsDelta(
-                                            idx, toolCallIdsByIndex.get(idx), pj));
+                                    sink.onToolCallArgsDelta(idx, toolCallIdsByIndex.get(idx), pj);
                                 }
                             }
                             default -> {}
@@ -1736,12 +1733,12 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     case "content_block_stop" -> {
                         int idx = root.path("index").asInt(0);
                         toolCallIdsByIndex.remove(idx);
-                        out.add(new CanonicalStreamEvent.BlockStop(idx));
+                        sink.onEvent(new CanonicalStreamEvent.BlockStop(idx));
                     }
                     case "message_delta" -> {
                         parseUsageObject(root.get("usage")).ifPresent(u -> {
                             mergedUsage = mergedUsage.mergeMax(u);
-                            out.add(new CanonicalStreamEvent.UsageUpdate(mergedUsage, true));
+                            sink.onEvent(new CanonicalStreamEvent.UsageUpdate(mergedUsage, true));
                         });
                         JsonNode delta = root.path("delta");
                         String sr = CodecSupport.asNullableText(delta, "stop_reason");
@@ -1750,11 +1747,11 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                                 ? List.of(new CanonicalContentPart.ToolCallPart("", null, "", null, "", null, ProtocolKind.ANTHROPIC_MESSAGES))
                                 : List.of());
                         finished = true;
-                        out.add(new CanonicalStreamEvent.MessageFinish(mapped, stopSeq));
+                        sink.onEvent(new CanonicalStreamEvent.MessageFinish(mapped, stopSeq));
                     }
                     case "error" -> {
                         JsonNode err = root.path("error");
-                        out.add(new CanonicalStreamEvent.StreamError(
+                        sink.onEvent(new CanonicalStreamEvent.StreamError(
                                 err.path("type").asText("api_error"),
                                 err.path("message").asText("Anthropic stream error")
                         ));
@@ -1772,7 +1769,6 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
     private final class AnthropicStreamEncoder implements DownstreamStreamEncoder {
 
         private final String model;
-        private final CodecSupport.ResizableByteBuffer frameBuffer = new CodecSupport.ResizableByteBuffer(256);
         private String messageId = CodecSupport.generateId("msg_");
         private boolean started;
         private boolean finished;
@@ -1809,63 +1805,72 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
         }
 
         @Override
-        public List<byte[]> encode(CanonicalStreamEvent event) {
-            List<byte[]> frames = new ArrayList<>();
+        public void encodeTextDelta(int blockIndex, CharSequence textDelta, ByteSink out) {
+            ensureMessageStart(out);
+            handleDelta(blockIndex, BlockKind.TEXT, textDelta, out);
+        }
+
+        @Override
+        public void encodeRefusalDelta(int blockIndex, CharSequence refusalDelta, ByteSink out) {
+            ensureMessageStart(out);
+            handleDelta(blockIndex, BlockKind.TEXT, refusalDelta, out);
+        }
+
+        @Override
+        public void encodeThinkingDelta(int blockIndex, CharSequence thinkingDelta, ByteSink out) {
+            ensureMessageStart(out);
+            handleDelta(blockIndex, BlockKind.THINKING, thinkingDelta, out);
+        }
+
+        @Override
+        public void encodeToolCallArgsDelta(int blockIndex, String callId, CharSequence partialJsonDelta, ByteSink out) {
+            ensureMessageStart(out);
+            handleDelta(blockIndex, BlockKind.TOOL_CALL, partialJsonDelta, out);
+        }
+
+        @Override
+        public void encode(CanonicalStreamEvent event, ByteSink out) {
             switch (event) {
                 case CanonicalStreamEvent.MessageStart start -> {
                     if (start.responseId() != null && !start.responseId().isBlank()) {
                         this.messageId = start.responseId();
                     }
-                    ensureMessageStart(frames);
+                    ensureMessageStart(out);
                 }
                 case CanonicalStreamEvent.UsageUpdate uu -> {
                     latestUsage = uu.cumulative() ? uu.usage() : latestUsage.mergeMax(uu.usage());
                 }
                 case CanonicalStreamEvent.BlockStart bs -> {
-                    ensureMessageStart(frames);
+                    ensureMessageStart(out);
                     if (bs.kind() == BlockKind.TEXT || bs.kind() == BlockKind.THINKING || bs.kind() == BlockKind.REFUSAL) {
                         BlockKind mappedKind = bs.kind() == BlockKind.REFUSAL ? BlockKind.TEXT : bs.kind();
-                        openOrBufferBlock(bs.blockIndex(), mappedKind, null, null, frames);
+                        openOrBufferBlock(bs.blockIndex(), mappedKind, null, null, out);
                     }
                 }
-                case CanonicalStreamEvent.TextDelta td -> {
-                    ensureMessageStart(frames);
-                    handleDelta(td.blockIndex(), BlockKind.TEXT, td.textDelta(), frames);
-                }
-                case CanonicalStreamEvent.RefusalDelta ref -> {
-                    ensureMessageStart(frames);
-                    handleDelta(ref.blockIndex(), BlockKind.TEXT, ref.refusalDelta(), frames);
-                }
-                case CanonicalStreamEvent.ThinkingDelta th -> {
-                    ensureMessageStart(frames);
-                    handleDelta(th.blockIndex(), BlockKind.THINKING, th.thinkingDelta(), frames);
-                }
+                case CanonicalStreamEvent.TextDelta td -> encodeTextDelta(td.blockIndex(), td.textDelta(), out);
+                case CanonicalStreamEvent.RefusalDelta ref -> encodeRefusalDelta(ref.blockIndex(), ref.refusalDelta(), out);
+                case CanonicalStreamEvent.ThinkingDelta th -> encodeThinkingDelta(th.blockIndex(), th.thinkingDelta(), out);
                 case CanonicalStreamEvent.ThinkingSignatureDelta sig -> {
                     if (CodecSupport.isSameOrigin(sig.originProtocol(), ProtocolKind.ANTHROPIC_MESSAGES)
                             && activeSourceBlock != null && activeSourceBlock == sig.blockIndex()) {
-                        ObjectNode delta = mapper.createObjectNode();
-                        delta.put("type", "signature_delta");
-                        delta.put("signature", sig.signatureDelta());
-                        emitBlockDelta(activeAnthropicIdx, delta, frames);
+                        writeDeltaFrame(activeAnthropicIdx, DELTA_SIGNATURE_MID, sig.signatureDelta(), out);
                     }
                 }
                 case CanonicalStreamEvent.ToolCallStart tcs -> {
-                    ensureMessageStart(frames);
+                    ensureMessageStart(out);
                     sawToolCall = true;
                     openOrBufferBlock(
                             tcs.blockIndex(),
                             BlockKind.TOOL_CALL,
                             tcs.callId() != null ? tcs.callId() : CodecSupport.generateId("toolu_"),
                             tcs.name(),
-                            frames
+                            out
                     );
                 }
-                case CanonicalStreamEvent.ToolCallArgsDelta tcad -> {
-                    ensureMessageStart(frames);
-                    handleDelta(tcad.blockIndex(), BlockKind.TOOL_CALL, tcad.partialJsonDelta(), frames);
-                }
-                case CanonicalStreamEvent.BlockStop stop -> closeBlock(stop.blockIndex(), frames);
-                case CanonicalStreamEvent.MessageFinish mf -> emitFinish(mf.stopReason(), mf.stopSequence(), frames);
+                case CanonicalStreamEvent.ToolCallArgsDelta tcad ->
+                        encodeToolCallArgsDelta(tcad.blockIndex(), tcad.callId(), tcad.partialJsonDelta(), out);
+                case CanonicalStreamEvent.BlockStop stop -> closeBlock(stop.blockIndex(), out);
+                case CanonicalStreamEvent.MessageFinish mf -> emitFinish(mf.stopReason(), mf.stopSequence(), out);
                 case CanonicalStreamEvent.StreamError err -> {
                     ObjectNode ev = mapper.createObjectNode();
                     ev.put("type", "error");
@@ -1873,25 +1878,22 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                     inner.put("type", err.errorType() != null ? err.errorType() : "api_error");
                     inner.put("message", err.message() != null ? err.message() : "Upstream stream error");
                     ev.set("error", inner);
-                    frames.add(SseEventSplitter.buildNamedEventFrame("error", CodecSupport.writeJsonString(mapper, ev)));
+                    SseEventSplitter.writeNamedEventFrame("error", CodecSupport.writeJsonBytes(mapper, ev), out);
                     finished = true;
                 }
                 case CanonicalStreamEvent.RedactedThinking ignored -> {}
             }
-            return frames;
         }
 
         @Override
-        public List<byte[]> finish() {
+        public void finish(ByteSink out) {
             if (finished) {
-                return List.of();
+                return;
             }
-            List<byte[]> frames = new ArrayList<>();
-            emitFinish(sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN, null, frames);
-            return frames;
+            emitFinish(sawToolCall ? CanonicalStopReason.TOOL_CALLS : CanonicalStopReason.END_TURN, null, out);
         }
 
-        private void ensureMessageStart(List<byte[]> frames) {
+        private void ensureMessageStart(ByteSink out) {
             if (started) {
                 return;
             }
@@ -1918,39 +1920,39 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             ObjectNode ev = mapper.createObjectNode();
             ev.put("type", "message_start");
             ev.set("message", msg);
-            frames.add(SseEventSplitter.buildNamedEventFrame("message_start", CodecSupport.writeJsonString(mapper, ev)));
+            SseEventSplitter.writeNamedEventFrame("message_start", CodecSupport.writeJsonBytes(mapper, ev), out);
         }
 
-        private void openOrBufferBlock(int sourceIdx, BlockKind kind, String callId, String toolName, List<byte[]> frames) {
+        private void openOrBufferBlock(int sourceIdx, BlockKind kind, String callId, String toolName, ByteSink out) {
             if (activeSourceBlock == null) {
                 activeSourceBlock = sourceIdx;
                 activeAnthropicIdx = nextAnthropicIdx++;
                 activeKind = kind;
-                emitBlockStart(activeAnthropicIdx, kind, callId, toolName, frames);
+                emitBlockStart(activeAnthropicIdx, kind, callId, toolName, out);
             } else if (activeSourceBlock != sourceIdx) {
                 bufferedBlocks.putIfAbsent(sourceIdx, new BufferedBlock(kind, callId, toolName));
             }
         }
 
-        private void handleDelta(int sourceIdx, BlockKind kind, String text, List<byte[]> frames) {
+        private void handleDelta(int sourceIdx, BlockKind kind, CharSequence text, ByteSink out) {
             if (activeSourceBlock == null) {
-                openOrBufferBlock(sourceIdx, kind, null, null, frames);
+                openOrBufferBlock(sourceIdx, kind, null, null, out);
             }
             if (activeSourceBlock != null && activeSourceBlock == sourceIdx) {
-                emitTypedDelta(activeAnthropicIdx, activeKind, text, frames);
+                emitTypedDelta(activeAnthropicIdx, activeKind, text, out);
             } else {
                 BufferedBlock buf = bufferedBlocks.computeIfAbsent(sourceIdx, k -> new BufferedBlock(kind, null, null));
-                buf.deltas.add(text);
+                buf.deltas.add(text.toString());
             }
         }
 
-        private void closeBlock(int sourceIdx, List<byte[]> frames) {
+        private void closeBlock(int sourceIdx, ByteSink out) {
             if (activeSourceBlock != null && activeSourceBlock == sourceIdx) {
-                emitBlockStop(activeAnthropicIdx, frames);
+                emitBlockStop(activeAnthropicIdx, out);
                 activeSourceBlock = null;
                 activeAnthropicIdx = -1;
                 activeKind = null;
-                flushBufferedBlocks(frames);
+                flushBufferedBlocks(out);
             } else {
                 BufferedBlock buf = bufferedBlocks.get(sourceIdx);
                 if (buf != null && !buf.closed) {
@@ -1960,20 +1962,19 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             }
         }
 
-        private void flushBufferedBlocks(List<byte[]> frames) {
+        private void flushBufferedBlocks(ByteSink out) {
             while (!completedBufferedQueue.isEmpty()) {
                 Integer nextSrc = completedBufferedQueue.pollFirst();
                 BufferedBlock buf = bufferedBlocks.remove(nextSrc);
                 if (buf != null) {
                     int idx = nextAnthropicIdx++;
-                    emitBlockStart(idx, buf.kind, buf.callId, buf.toolName, frames);
+                    emitBlockStart(idx, buf.kind, buf.callId, buf.toolName, out);
                     for (String d : buf.deltas) {
-                        emitTypedDelta(idx, buf.kind, d, frames);
+                        emitTypedDelta(idx, buf.kind, d, out);
                     }
-                    emitBlockStop(idx, frames);
+                    emitBlockStop(idx, out);
                 }
             }
-            // Promote the oldest still-open buffered block to active if any exists
             if (activeSourceBlock == null && !bufferedBlocks.isEmpty()) {
                 var it = bufferedBlocks.entrySet().iterator();
                 var entry = it.next();
@@ -1982,31 +1983,31 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
                 activeSourceBlock = entry.getKey();
                 activeAnthropicIdx = nextAnthropicIdx++;
                 activeKind = buf.kind;
-                emitBlockStart(activeAnthropicIdx, buf.kind, buf.callId, buf.toolName, frames);
+                emitBlockStart(activeAnthropicIdx, buf.kind, buf.callId, buf.toolName, out);
                 for (String d : buf.deltas) {
-                    emitTypedDelta(activeAnthropicIdx, buf.kind, d, frames);
+                    emitTypedDelta(activeAnthropicIdx, buf.kind, d, out);
                 }
             }
         }
 
-        private void emitFinish(CanonicalStopReason reason, String stopSeq, List<byte[]> frames) {
+        private void emitFinish(CanonicalStopReason reason, String stopSeq, ByteSink out) {
             if (finished) {
                 return;
             }
-            ensureMessageStart(frames);
+            ensureMessageStart(out);
             if (activeSourceBlock != null) {
-                emitBlockStop(activeAnthropicIdx, frames);
+                emitBlockStop(activeAnthropicIdx, out);
                 activeSourceBlock = null;
                 activeAnthropicIdx = -1;
                 activeKind = null;
             }
             for (BufferedBlock buf : bufferedBlocks.values()) {
                 int idx = nextAnthropicIdx++;
-                emitBlockStart(idx, buf.kind, buf.callId, buf.toolName, frames);
+                emitBlockStart(idx, buf.kind, buf.callId, buf.toolName, out);
                 for (String d : buf.deltas) {
-                    emitTypedDelta(idx, buf.kind, d, frames);
+                    emitTypedDelta(idx, buf.kind, d, out);
                 }
-                emitBlockStop(idx, frames);
+                emitBlockStop(idx, out);
             }
             bufferedBlocks.clear();
             completedBufferedQueue.clear();
@@ -2022,15 +2023,15 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             msgDelta.put("type", "message_delta");
             msgDelta.set("delta", delta);
             msgDelta.set("usage", encodeUsageObject(latestUsage));
-            frames.add(SseEventSplitter.buildNamedEventFrame("message_delta", CodecSupport.writeJsonString(mapper, msgDelta)));
+            SseEventSplitter.writeNamedEventFrame("message_delta", CodecSupport.writeJsonBytes(mapper, msgDelta), out);
 
             ObjectNode msgStop = mapper.createObjectNode();
             msgStop.put("type", "message_stop");
-            frames.add(SseEventSplitter.buildNamedEventFrame("message_stop", CodecSupport.writeJsonString(mapper, msgStop)));
+            SseEventSplitter.writeNamedEventFrame("message_stop", CodecSupport.writeJsonBytes(mapper, msgStop), out);
             finished = true;
         }
 
-        private void emitBlockStart(int idx, BlockKind kind, String callId, String toolName, List<byte[]> frames) {
+        private void emitBlockStart(int idx, BlockKind kind, String callId, String toolName, ByteSink out) {
             ObjectNode cb = mapper.createObjectNode();
             switch (kind) {
                 case THINKING -> {
@@ -2052,53 +2053,36 @@ public final class AnthropicMessagesCodec implements ProtocolCodec {
             ev.put("type", "content_block_start");
             ev.put("index", idx);
             ev.set("content_block", cb);
-            frames.add(SseEventSplitter.buildNamedEventFrame("content_block_start", CodecSupport.writeJsonString(mapper, ev)));
+            SseEventSplitter.writeNamedEventFrame("content_block_start", CodecSupport.writeJsonBytes(mapper, ev), out);
         }
 
-        private void emitTypedDelta(int idx, BlockKind kind, String fragment, List<byte[]> frames) {
+        private void emitTypedDelta(int idx, BlockKind kind, CharSequence fragment, ByteSink out) {
             switch (kind) {
-                case THINKING -> frames.add(buildDeltaFrame(idx, "thinking_delta", "thinking", fragment));
-                case TOOL_CALL -> frames.add(buildDeltaFrame(idx, "input_json_delta", "partial_json", fragment));
-                default -> frames.add(buildDeltaFrame(idx, "text_delta", "text", fragment));
+                case THINKING -> writeDeltaFrame(idx, DELTA_THINKING_MID, fragment, out);
+                case TOOL_CALL -> writeDeltaFrame(idx, DELTA_INPUT_JSON_MID, fragment, out);
+                default -> writeDeltaFrame(idx, DELTA_TEXT_MID, fragment, out);
             }
         }
 
-        /**
-         * Renders a {@code content_block_delta} frame straight into bytes: constant envelope, the block
-         * index, then the delta object produced by Jackson (so escaping stays authoritative). The payload
-         * buffer is reused across frames.
-         */
-        private byte[] buildDeltaFrame(int idx, String deltaType, String field, String fragment) {
-            CodecSupport.ResizableByteBuffer buffer = frameBuffer;
-            buffer.reset();
-            buffer.writeBytes(DELTA_EVENT_PREFIX);
-            buffer.writeBytes(Integer.toString(idx).getBytes(StandardCharsets.US_ASCII));
-            buffer.writeBytes(DELTA_EVENT_DELTA_KEY);
-            try (JsonGenerator generator = CodecSupport.newUtf8Generator(mapper, buffer)) {
-                generator.writeStartObject();
-                generator.writeStringField("type", deltaType);
-                generator.writeStringField(field, fragment);
-                generator.writeEndObject();
-            } catch (IOException ex) {
-                throw new IllegalStateException("Failed to encode Anthropic delta frame", ex);
+        /** Zero-allocation {@code content_block_delta} frame serializer directly into {@link ByteSink}. */
+        private void writeDeltaFrame(int idx, byte[] midBytes, CharSequence fragment, ByteSink out) {
+            out.writeBytes(DELTA_EVENT_PREFIX, 0, DELTA_EVENT_PREFIX.length);
+            if (idx >= 0 && idx < BLOCK_INDEX_ASCII.length) {
+                byte[] digits = BLOCK_INDEX_ASCII[idx];
+                out.writeBytes(digits, 0, digits.length);
+            } else {
+                out.writeAsciiInt(idx);
             }
-            buffer.writeBytes(DELTA_EVENT_TAIL);
-            return buffer.toCopiedByteArray();
+            out.writeBytes(midBytes, 0, midBytes.length);
+            JsonUtf8Writer.writeJsonString(fragment, out);
+            out.writeBytes(DELTA_EVENT_DOUBLE_TAIL, 0, DELTA_EVENT_DOUBLE_TAIL.length);
         }
 
-        private void emitBlockDelta(int idx, ObjectNode delta, List<byte[]> frames) {
-            ObjectNode ev = mapper.createObjectNode();
-            ev.put("type", "content_block_delta");
-            ev.put("index", idx);
-            ev.set("delta", delta);
-            frames.add(SseEventSplitter.buildNamedEventFrame("content_block_delta", CodecSupport.writeJsonString(mapper, ev)));
-        }
-
-        private void emitBlockStop(int idx, List<byte[]> frames) {
+        private void emitBlockStop(int idx, ByteSink out) {
             ObjectNode ev = mapper.createObjectNode();
             ev.put("type", "content_block_stop");
             ev.put("index", idx);
-            frames.add(SseEventSplitter.buildNamedEventFrame("content_block_stop", CodecSupport.writeJsonString(mapper, ev)));
+            SseEventSplitter.writeNamedEventFrame("content_block_stop", CodecSupport.writeJsonBytes(mapper, ev), out);
         }
     }
 

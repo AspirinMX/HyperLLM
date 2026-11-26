@@ -7,11 +7,11 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Drives {@link SseFrameBatcher} instances from one shared tick.
+ * Drives {@link SseFrameBatcher} instances from one shared tick without duplicate queue entries.
  *
- * <p>Batching needs a deadline, but a timer per connection would cost more than the writes it saves
- * (2,000 streams x 200 ticks/s). Instead every batcher that holds frames is registered once, a single
- * daemon thread polls them, and the entry is re-registered only while it still has work.
+ * <p>Each batcher carrying pending bytes is enqueued at most once via
+ * {@link SseFrameBatcher#tryMarkEnqueued()} and re-enqueued only if pending bytes remain after the
+ * tick clears its queue membership guard.
  */
 public final class SseFrameCoalescer implements AutoCloseable {
 
@@ -47,13 +47,13 @@ public final class SseFrameCoalescer implements AutoCloseable {
         return new SseFrameBatcher(windowNanos, maxBytes, maxFrames);
     }
 
-    /** Offers a frame, emitting whatever is due right away; registers the request while work is held. */
+    /** Offers a frame, emitting whatever is due right away; registers the batcher at most once while work is held. */
     public void offer(SseFrameBatcher batcher, Sink sink, byte[] frame) {
         byte[] immediate = batcher.offer(frame, System.nanoTime());
         if (immediate != null) {
             sink.emit(immediate);
         }
-        if (batcher.hasPending()) {
+        if (batcher.hasPending() && batcher.tryMarkEnqueued()) {
             pending.add(new Entry(batcher, sink));
         }
     }
@@ -66,6 +66,10 @@ public final class SseFrameCoalescer implements AutoCloseable {
         }
     }
 
+    int pendingQueueSize() {
+        return pending.size();
+    }
+
     private void flushDue() {
         int size = pending.size();
         long now = System.nanoTime();
@@ -74,15 +78,19 @@ public final class SseFrameCoalescer implements AutoCloseable {
             if (entry == null) {
                 return;
             }
+            SseFrameBatcher batcher = entry.batcher();
             try {
-                byte[] batch = entry.batcher().poll(now);
+                byte[] batch = batcher.poll(now);
                 if (batch != null) {
                     entry.sink().emit(batch);
                 }
             } catch (RuntimeException ex) {
                 LOG.log(System.Logger.Level.WARNING, "Coalesced flush failed", ex);
             } finally {
-                if (entry.batcher().hasPending()) {
+                // Clear membership guard first, then re-check hasPending() to avoid missed handoff
+                // when offer() appends concurrently between poll() and clearEnqueued().
+                batcher.clearEnqueued();
+                if (batcher.hasPending() && batcher.tryMarkEnqueued()) {
                     pending.add(entry);
                 }
             }
