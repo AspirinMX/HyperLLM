@@ -2,7 +2,7 @@
 
 # ⚡ HyperLLM
 
-**企业级 LLM API 网关，支持主流大模型协议与无缝跨协议转换，针对高并发与高可用深度优化。**
+**企业级 LLM API 网关，支持主流大模型协议与跨协议转换，针对高并发与高可用深度优化。**
 
 <sub>An enterprise-level LLM API gateway that supports mainstream API protocols and seamless inter-protocol conversion; highly optimized for high concurrency and high availability.</sub>
 
@@ -12,17 +12,19 @@
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Java-21%20LTS-ED8B00?style=flat-square&logo=openjdk&logoColor=white" alt="Java 21 LTS" />
+  <img src="https://img.shields.io/badge/Java-21-ED8B00?style=flat-square&logo=openjdk&logoColor=white" alt="Java 21" />
   <img src="https://img.shields.io/badge/Spring%20Boot-3.5-6DB33F?style=flat-square&logo=springboot&logoColor=white" alt="Spring Boot 3.5" />
-  <img src="https://img.shields.io/badge/Next.js-16%20%2B%20React%2019-000000?style=flat-square&logo=nextdotjs&logoColor=white" alt="Next.js 16 + React 19" />
+  <img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=nextdotjs&logoColor=white" alt="Next.js 16" />
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19" />
   <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 16" />
-  <img src="https://img.shields.io/badge/Redis-7%20Lua-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis 7" />
-  <img src="https://img.shields.io/badge/Apache%20Kafka-3.9%20KRaft-231F20?style=flat-square&logo=apachekafka&logoColor=white" alt="Kafka 3.9" />
+  <img src="https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis 7" />
+  <img src="https://img.shields.io/badge/Apache%20Kafka-3.9-231F20?style=flat-square&logo=apachekafka&logoColor=white" alt="Kafka 3.9" />
   <img src="https://img.shields.io/badge/ClickHouse-24-FFCC01?style=flat-square&logo=clickhouse&logoColor=black" alt="ClickHouse 24" />
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square" alt="Apache 2.0 License" /></a>
 </p>
 
 <p>
+  <a href="#性能压测">性能压测</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#开箱即用的-sdk-调用示例">SDK 示例</a> ·
   <a href="#文档导航">文档导航</a>
@@ -32,6 +34,34 @@
 
 ---
 
+## 性能压测
+
+**网关在 4C8G 单机部署下，保证 200 token/s 的输出速度和 500 ms TTFT 情况下，可稳定维持 5,000 个并发 SSE 连接**
+
+> 因为网关未区分同协议/跨协议路径，所有经过网关的请求一律转为中间级表示，再请求上游（出于安全考虑），所以下述同协议测量结果与跨协议测量结果相差不大。
+
+> **压测场景**：100K-token 长上下文输入、2,000 输出 token、200 token/s（5 token/帧，单流 400 帧、持续约 10.5s）、20s 均匀 ramp + 60s 闭环稳态窗口；单机严格硬切核隔离，所有有效场景均满足 `%steal = 0.00`、`0 错误`。
+
+### 腾讯云 CVM 服务器（计算型 C6，x86_64）
+
+- **机型配置**：8 vCPU Intel Xeon Platinum 8372C @ 3.20 GHz（4 物理核 × 2 HT）/ 16 GiB 内存（网关硬隔离 4 vCPU / 2 物理核，`6 GiB` G1GC 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`）
+
+| 并发、协议路径与 GC | TTFT P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
+| :--- | --: | --: | --: | --: | --: |
+| 3,000 · OpenAI → OpenAI（G1） | +87.6 / +381.4 ms | 8 / 565 ms | **0** | 288 MB | 86.0% |
+| 4,000 · OpenAI → OpenAI（G1）| +146.7 / +394.0 ms | 9 / 647 ms | **0** | 234 MB | 87.8% |
+| 5,000 · OpenAI → OpenAI（G1） | +216.6 / +603.7 ms | 10 / 833 ms | **0** | 244 MB | 89.9% |
+
+### Hetzner Cost-Optimized `CAX 31`（ARM64）
+
+- **机型配置**：8 vCPU ARM Neoverse-N1 / 16 GiB 内存（网关硬隔离 4 vCPU，`5 GiB` 堆，满足 4C8G 单机资源配额，`nettyEpoll=true`）
+
+| 并发、协议路径与 GC | TTFT P50 / P99（网关净增） | YGC / 总暂停 | Full GC | 老年代峰值 | 网关 CPU |
+| :--- | --: | --: | --: | --: | --: |
+| 2,000 · OpenAI → OpenAI（G1） |+74.5 / +210.5 ms | 6 / 302 ms | **0** | 153 MB | 92.1% |
+| 3,000 · OpenAI → OpenAI（G1） | +199.7 / +443.3 ms | 8 / 578 ms | **0** | 158 MB | 92.7% |
+| 3,500 · OpenAI → OpenAI（G1） |+265.6 / +616.0 ms | 9 / 657 ms | **0** | 171 MB | 93.4% |
+
 ## 快速开始
 
 ### 1. 初始化环境变量与核心基础设施
@@ -40,7 +70,7 @@
 # 复制本地环境变量模板（生产部署前务必替换所有密钥！）
 cp .env.example .env
 
-# 启动核心底座（PostgreSQL 16 逻辑复制、Redis 7 AOF、Kafka 3.9 KRaft）与调试工具
+# 启动核心底座
 docker compose --env-file .env -f infra/docker-compose.yaml --profile tools up -d
 ```
 
@@ -72,15 +102,6 @@ cd frontend/console && pnpm install && pnpm dev
 # 平台运营管理后台 -> http://localhost:3001
 cd frontend/admin && pnpm install && pnpm dev
 ```
-
-### 4. 全链路验证
-
-```bash
-# 全量构建 + Testcontainers 容器集成测试（PostgreSQL、Redis、Kafka、ClickHouse、WireMock）
-./backend/mvnw -f backend/pom.xml verify
-```
-
-> 如需复现网关压测与 `async-profiler` 火焰图剖析，请参阅 [benchmark/README.md](./benchmark/README.md)。
 
 ## 开箱即用的 SDK 调用示例
 
@@ -127,6 +148,7 @@ curl http://localhost:8080/v1/messages \
 - **[新手接管实战手册（8 课循序渐进）](./docs/onboarding/README.md)** — 从零环境搭建、工程红线、存储全景、Gateway 请求链路、Redis 权威层与 Lua 脚本，到双控制面、前端 BFF 与排障 Runbook。
 - **[OpenAPI 3.1 接口契约文档](./docs/openapi/README.md)** — 可直接导入 Swagger UI / Postman / `openapi-typescript` 的标准规范：[Gateway 数据面](./docs/openapi/gateway-api.yaml) · [Console 开发者控制面](./docs/openapi/console-api.yaml) · [Admin 运营控制面](./docs/openapi/admin-api.yaml)。
 - **[压测与火焰图剖析套件](./benchmark/README.md)** — 如何在核隔离环境下复现网关压力测试并抓取 `async-profiler` 火焰图。
+- **[全链路性能重构与容量复测报告](./docs/benchmark/2026-11-26-full-pipeline-refactoring.md)** — Hetzner `CAX 31`（ARM64）与腾讯云 `C6.2XLARGE16`（x86_64）完整实测数据、3,000 并发存活集审计及 G1GC vs Generational ZGC 对比。
 
 ## 参与贡献与开源协议
 
