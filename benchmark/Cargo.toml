@@ -1,0 +1,25 @@
+[package]
+name = "hyperllm-bench"
+version = "0.1.0"
+edition = "2021"
+description = "High-throughput zero-GC Rust benchmark harness for HyperLLM Gateway (mock-upstream, loadgen, bench-seed)"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+bytes = "1"
+memchr = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

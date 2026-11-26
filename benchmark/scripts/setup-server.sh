@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Sets up the benchmark stack on an ARM64/x86_64 Linux host:
 #   1. Applies KVM sysctl tuning
-#   2. Builds Go binaries (mock-upstream, loadgen, bench-seed) if Go is available
+#   2. Builds Rust binaries (mock-upstream, loadgen, bench-seed) if Cargo is available
 #   3. Starts lean bench Docker Compose (Postgres, Redis, Kafka; optional BENCH_TMPFS=1)
 #   4. Applies Flyway SQL migrations (V1..V9) in order
 #   5. Seeds idempotent benchmark tenant, wallet ($100M), API key, 3 channels, 4 virtual models
@@ -28,19 +28,18 @@ else
   echo "WARN: Not root, skipping sysctl-bench.sh"
 fi
 
-echo "==> [2/5] Building Go benchmark binaries..."
+echo "==> [2/5] Building Rust benchmark binaries..."
 mkdir -p "${BIN_DIR}"
-if command -v go >/dev/null 2>&1; then
+if command -v cargo >/dev/null 2>&1; then
   (
     cd "${BENCH_DIR}"
-    CGO_ENABLED=0 go build -o "${BIN_DIR}/mock-upstream" ./cmd/mock-upstream
-    CGO_ENABLED=0 go build -o "${BIN_DIR}/loadgen" ./cmd/loadgen
-    CGO_ENABLED=0 go build -o "${BIN_DIR}/bench-seed" ./cmd/bench-seed
+    cargo build --release --bins
+    cp -f target/release/mock-upstream target/release/loadgen target/release/bench-seed "${BIN_DIR}/"
   )
 elif [[ -x "${BIN_DIR}/mock-upstream" && -x "${BIN_DIR}/loadgen" && -x "${BIN_DIR}/bench-seed" ]]; then
-  echo "Using prebuilt Go binaries in ${BIN_DIR}"
+  echo "Using prebuilt benchmark binaries in ${BIN_DIR}"
 else
-  echo "ERROR: Go toolchain not found and prebuilt binaries missing in ${BIN_DIR}." >&2
+  echo "ERROR: Rust/Cargo toolchain not found and prebuilt binaries missing in ${BIN_DIR}." >&2
   exit 1
 fi
 

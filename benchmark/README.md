@@ -144,11 +144,11 @@ be quoted:
 ## Running
 
 ```bash
-# 1. build the tools
+# 1. build the tools (Rust zero-GC harness)
 cd backend && ./mvnw -q -f pom.xml package -pl common,domain,protocol,gateway -am -DskipTests && cd ..
-(cd benchmark && go build -o bin/mock-upstream ./cmd/mock-upstream \
-                    && go build -o bin/loadgen ./cmd/loadgen \
-                    && go build -o bin/bench-seed ./cmd/bench-seed)
+(cd benchmark && cargo build --release --bins \
+              && mkdir -p bin \
+              && cp -f target/release/mock-upstream target/release/loadgen target/release/bench-seed bin/)
 
 # 2. infrastructure, migrations, seed data
 BENCH_TMPFS=1 BENCH_INFRA_CPUS=4 ./benchmark/scripts/setup-server.sh
